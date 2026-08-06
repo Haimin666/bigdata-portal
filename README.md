@@ -127,6 +127,14 @@ scripts/dockerctl.sh logs      # 跟随日志
 scripts/dockerctl.sh ps        # 查看状态
 ```
 
+**内网构建**:服务器无法访问 docker.io 时,构建会卡在拉 `node:20-alpine`(connect timeout)。用环境变量指定内部镜像源与 npm 源后重试:
+
+```bash
+BASE_IMAGE=<harbor-addr>/library/node:20-alpine \
+NPM_REGISTRY=<内网 npm 源,可选> \
+scripts/dockerctl.sh up
+```
+
 `docker-compose.yml` 已声明健康检查(探测 `/api/config`),凭证与各系统地址由运行时注入项目根 `.env.local`(不影响构建,不进镜像);无需凭证也能启动,仅子系统免登录回退默认值。
 
 ### Nginx 前置(可选)

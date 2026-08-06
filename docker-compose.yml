@@ -8,6 +8,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 内网构建无法访问 docker.io 时,设置 BASE_IMAGE 指向内部 registry,如:
+        #   BASE_IMAGE=harbor.example.com/library/node:20-alpine ./scripts/dockerctl.sh up
+        BASE_IMAGE: ${BASE_IMAGE:-node:20-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
     image: bigdata-portal:latest
     container_name: bigdata-portal
     restart: unless-stopped
