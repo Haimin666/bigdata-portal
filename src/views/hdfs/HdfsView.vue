@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowUp, Document, Folder, HomeFilled, Position, Refresh } from '@element-plus/icons-vue'
@@ -7,6 +7,7 @@ import { listStatus, fetchHdfsDiskOverview } from '@/api/hdfs'
 import { formatTimestamp } from '@/utils/format'
 import type { HdfsDiskOverview, HdfsFileStatus } from '@/types/hdfs'
 import HdfsDiskOverviewView from './HdfsDiskOverview.vue'
+import HdfsScanPanel, { type ScannedFile } from './HdfsScanPanel.vue'
 
 defineOptions({ name: 'HdfsView' })
 
@@ -33,6 +34,62 @@ async function loadDisk() {
     diskLoading.value = false
   }
 }
+
+// ── 磁盘检测(大/小文件,由自建服务经 /api/hdfs/scan 提供)────────
+const scanPanel = ref<InstanceType<typeof HdfsScanPanel>>()
+// 服务未部署时隐藏检测入口:启动时探测一次,失败则标记不可用
+const scanAvailable = ref(true)
+
+async function onScan() {
+  try {
+    const res = await fetch('/api/hdfs/scan')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as {
+      code?: number
+      data?: { scanTime?: string; files?: ScannedFile[] }
+    }
+    if (data.code !== 0 || !data.data) throw new Error(data.code ? '扫描失败' : '无数据')
+    scanPanel.value?.onScanResult({ scanTime: data.data.scanTime, files: data.data.files ?? [] })
+    scanPanel.value?.setScanning(false)
+  } catch (e) {
+    scanPanel.value?.setScanning(false)
+    ElMessage.error(`磁盘检测失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
+async function onScanDelete(file: ScannedFile) {
+  try {
+    const res = await fetch('/api/hdfs/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: file.path, trash: true })
+    })
+    const data = (await res.json()) as { code?: number; msg?: string }
+    if (!res.ok || data.code !== 0) throw new Error(data.msg || `HTTP ${res.status}`)
+    ElMessage.success(`已删除 ${file.path}(移入回收站)`)
+    // 删除成功后重新检测
+    onScan()
+  } catch (e) {
+    ElMessage.error(`删除失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
+// 磁盘相关 30s 自动刷新(仅磁盘监控,不刷新目录列表)
+let diskTimer: number | undefined
+onMounted(() => {
+  diskTimer = window.setInterval(() => loadDisk(), 30000)
+  // 探测磁盘检测服务是否可用(自建服务未部署时隐藏入口)
+  fetch('/api/hdfs/scan', { method: 'GET' })
+    .then((r) => {
+      if (!r.ok) scanAvailable.value = false
+    })
+    .catch(() => {
+      scanAvailable.value = false
+    })
+})
+onUnmounted(() => {
+  if (diskTimer) clearInterval(diskTimer)
+})
 
 // 分页(前端分页:WebHDFS LISTSTATUS 不支持分页参数)
 const page = ref(0)
@@ -139,6 +196,8 @@ watch(path, (p) => {
 <template>
   <div class="hdfs-view">
     <HdfsDiskOverviewView :data="diskData" :loading="diskLoading" />
+
+    <HdfsScanPanel ref="scanPanel" :available="scanAvailable" @scan="onScan" @delete="onScanDelete" />
 
     <div class="toolbar">
       <el-input
