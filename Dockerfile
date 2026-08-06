@@ -22,6 +22,6 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server ./server
-EXPOSE 3000
+EXPOSE 9910
 # --no-deprecation: 与 scripts/dev.mjs 一致,抑制 http-proxy@1.18 的 DEP0060 噪音警告
 CMD ["node", "--no-deprecation", "server/index.js"]
