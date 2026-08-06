@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdirSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdirSync, existsSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import https from 'node:https'
@@ -53,19 +53,25 @@ function fetchText(url, timeoutMs = 15000) {
   })
 }
 
-/** 拿最新 checkpoint txid(NameNodeInfo.JournalTransactionInfo.MostRecentCheckpointTxId) */
+/** 拿最新 checkpoint txid(NameNodeInfo.JournalTransactionInfo.MostRecentCheckpointTxId;
+ *  JMX 里该字段是 JSON 字符串,需先 parse) */
 async function getCheckpointTxId() {
   const buf = await fetchText(`${NN}/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo`)
   const data = JSON.parse(buf.toString('utf8'))
   const bean = data.beans?.find((b) => (b.name ?? '').endsWith('NameNodeInfo'))
-  return bean?.JournalTransactionInfo?.MostRecentCheckpointTxId
+  const jti = bean?.JournalTransactionInfo
+  const info = typeof jti === 'string' ? JSON.parse(jti) : jti
+  return info?.MostRecentCheckpointTxId
 }
 
-/** 下载最新 FsImage 到本地 */
+/** 下载最新 FsImage 到本地(只保留最新一份;镜像大且内网可能慢,超时放宽) */
 async function downloadFsImage(txid) {
   const dest = path.join(CACHE_DIR, `fsimage_${txid}.bin`)
   if (existsSync(dest)) return dest
-  const buf = await fetchText(`${NN}/imagetransfer?getimage=1&txid=${txid}`, 60000)
+  for (const f of readdirSync(CACHE_DIR)) {
+    if (f.startsWith('fsimage_')) rmSync(path.join(CACHE_DIR, f), { force: true })
+  }
+  const buf = await fetchText(`${NN}/imagetransfer?getimage=1&txid=${txid}`, 300000)
   writeFileSync(dest, buf)
   return dest
 }
