@@ -1,0 +1,32 @@
+{
+  "name": "bigdata-portal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:vite": "vite",
+    "dev:gateway": "node --no-deprecation server/index.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit",
+    "serve": "node --no-deprecation server/index.js"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "cookie-parser": "^1.4.7",
+    "element-plus": "^2.9.1",
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.3",
+    "pinia": "^2.2.6",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "sass": "^1.81.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}

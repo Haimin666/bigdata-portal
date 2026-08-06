@@ -1,0 +1,156 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { ColumnHeader, YarnApp } from '@/types/yarn'
+import AppInfoLine from './AppInfoLine.vue'
+import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
+
+defineOptions({ name: 'AppsCardView' })
+
+const props = defineProps<{
+  apps: YarnApp[]
+  loading: boolean
+  humanize: boolean
+  headers: ColumnHeader[]
+  searchByAppName: string
+  resourceManager: string
+  page: number
+  rowsPerPage: number
+}>()
+
+const emit = defineEmits<{
+  (e: 'kill', appId: string, appName: string): void
+  (e: 'page-change', page: number): void
+  (e: 'rows-change', rows: number): void
+}>()
+
+const visibleHeaders = computed(() => props.headers.filter((h) => h.visible))
+
+const rows = computed(() =>
+  props.apps.filter((a) =>
+    a.name.toLowerCase().includes(props.searchByAppName.toLowerCase())
+  )
+)
+
+const paged = computed(() =>
+  props.rowsPerPage === -1
+    ? rows.value
+    : rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
+)
+
+function open(url: string) {
+  window.open(url, '_blank')
+}
+
+function onPageChange(p: number) {
+  emit('page-change', p - 1)
+}
+
+function onSizeChange(s: number) {
+  emit('rows-change', s)
+}
+</script>
+
+<template>
+  <div class="apps-card-view" v-loading="loading">
+    <el-row :gutter="16">
+      <el-col v-for="app in paged" :key="app.id" :xs="24" :sm="12" :md="8" :lg="6">
+        <el-card class="app-card" shadow="never">
+          <div class="app-name" :title="app.name">{{ app.name }}</div>
+          <el-divider class="app-divider" />
+          <div v-for="h in visibleHeaders" :key="h.value" class="app-field">
+            <span class="field-label">{{ h.text }}</span>
+            <span class="field-value">
+              <AppInfoLine :item="app" :header="h" :humanize="humanize" />
+            </span>
+          </div>
+          <div class="card-actions">
+            <el-button
+              v-if="app.trackingUrl"
+              size="small"
+              @click="open(app.trackingUrl)"
+            >
+              追踪
+            </el-button>
+            <el-button v-if="app.amContainerLogs" size="small" @click="open(app.amContainerLogs)">
+              日志
+            </el-button>
+            <el-button size="small" @click="open(`${resourceManager}/cluster/app/${app.id}`)">
+              详情
+            </el-button>
+            <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
+              终止
+            </el-button>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+    <div v-if="rows.length === 0 && !loading" class="card-empty">无数据</div>
+    <el-pagination
+      class="apps-pagination"
+      :current-page="page + 1"
+      :page-size="rowsPerPage"
+      :page-sizes="ROWS_PER_PAGE_OPTIONS"
+      :total="rows.length"
+      layout="total, sizes, prev, pager, next"
+      @current-change="onPageChange"
+      @size-change="onSizeChange"
+    />
+  </div>
+</template>
+
+<style scoped lang="scss">
+.app-card {
+  margin-bottom: 16px;
+}
+
+.app-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: $text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-divider {
+  margin: 8px 0;
+}
+
+.app-field {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.field-label {
+  font-size: 12px;
+  color: $muted;
+  flex-shrink: 0;
+}
+
+.field-value {
+  text-align: right;
+  max-width: 60%;
+  word-break: break-all;
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.card-empty {
+  text-align: center;
+  color: $muted;
+  padding: 24px 0;
+}
+
+.apps-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0;
+}
+</style>
