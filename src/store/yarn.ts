@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
-import { fetchApps, fetchResourceManagers, fetchScheduler, requestKill } from '@/api/yarn'
+import { fetchApps, fetchMetrics, fetchResourceManagers, fetchScheduler, requestKill } from '@/api/yarn'
 import { HEADERS } from '@/config/yarn'
-import type { ColumnHeader, AppFilters, YarnApp } from '@/types/yarn'
+import type { ClusterMetrics, ColumnHeader, AppFilters, QueueNode, QueueResources, YarnApp } from '@/types/yarn'
 
 function loadPref<T>(key: string, fallback: T): T {
   try {
@@ -28,6 +28,10 @@ export const useYarnStore = defineStore('yarn', {
     availableUsers: [] as string[],
     availableAppTypes: [] as string[],
     queues: [] as string[],
+    /** 集群指标(total/allocated 内存与 vCores 等) */
+    metrics: {} as ClusterMetrics,
+    /** 队列资源树(总览展示) */
+    queueTree: [] as QueueResources[],
     loading: false,
     error: '',
     filters: {
@@ -81,24 +85,65 @@ export const useYarnStore = defineStore('yarn', {
         this.loading = false
       }
     },
+    async loadMetrics() {
+      if (!this.rm) return
+      try {
+        this.metrics = await fetchMetrics(this.rm)
+      } catch {
+        this.metrics = {}
+      }
+    },
     async loadQueues() {
       if (!this.rm) return
       try {
         const node = await fetchScheduler(this.rm)
+        // 调度器类型:FairScheduler 的根队列在 schedulerInfo.rootQueue,CapacityScheduler 直接是 schedulerInfo
+        const isFair = (node.type ?? '').toLowerCase().includes('fair')
+        const root: QueueNode = isFair && node.rootQueue ? node.rootQueue : node
+        const scheduler: QueueResources['scheduler'] = isFair
+          ? 'fair'
+          : (node.type ?? '').toLowerCase().includes('capacity')
+            ? 'capacity'
+            : 'unknown'
+        // 队列资源树(schedulerInfo/rootQueue 本身就是根队列节点)
+        const toResources = (q: QueueNode): QueueResources => {
+          const used = q.usedResources ?? q.resourcesUsed ?? {}
+          const maxRes = q.maxResources ?? {}
+          const fairRes = q.fairResources ?? q.fairShare ?? {}
+          return {
+            queueName: q.queueName ?? '',
+            scheduler,
+            capacity: q.capacity ?? 0,
+            usedCapacity: q.usedCapacity ?? 0,
+            absoluteCapacity: q.absoluteCapacity ?? 0,
+            weight: q.weight ?? 0,
+            memory: used.memory ?? 0,
+            vCores: used.vCores ?? 0,
+            quotaMemory: maxRes.memory ?? 0,
+            quotaVCores: maxRes.vCores ?? 0,
+            fairMemory: fairRes.memory,
+            fairVCores: fairRes.vCores,
+            numActiveApps: q.numActiveApps ?? q.numActiveApplications,
+            numPendingApps: q.numPendingApps ?? q.numPendingApplications,
+            children: (q.childQueues?.queue ?? q.queues?.queue ?? []).map(toResources)
+          }
+        }
+        this.queueTree = root.queueName ? [toResources(root)] : []
+        // 叶子队列名列表(筛选用)
         const result: string[] = []
-        const walk = (q: { queueName?: string; queues?: { queue: unknown[] } }) => {
-          if (q.queues) {
-            q.queues.queue.forEach((item) =>
-              walk(item as { queueName?: string; queues?: { queue: unknown[] } })
-            )
+        const walk = (q: QueueNode) => {
+          const kids = q.childQueues?.queue ?? q.queues?.queue ?? []
+          if (kids.length) {
+            kids.forEach(walk)
           } else if (q.queueName) {
             result.push(q.queueName)
           }
         }
-        walk(node)
+        walk(root)
         this.queues = result.sort((a, b) => a.localeCompare(b))
       } catch {
         this.queues = []
+        this.queueTree = []
       }
     },
     toggleHeader(value: string) {

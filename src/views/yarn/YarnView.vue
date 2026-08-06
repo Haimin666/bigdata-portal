@@ -7,6 +7,7 @@ import { useYarnStore } from '@/store/yarn'
 import { AVAILABLE_STATES, REFRESH_INTERVALS } from '@/config/yarn'
 import AppsTable from './AppsTable.vue'
 import AppsCardView from './AppsCardView.vue'
+import YarnOverview from './YarnOverview.vue'
 import type { AppFilters } from '@/types/yarn'
 
 defineOptions({ name: 'YarnView' })
@@ -15,7 +16,7 @@ const store = useYarnStore()
 const route = useRoute()
 const router = useRouter()
 
-const { rms, apps, queues, availableUsers, availableAppTypes, headers } = storeToRefs(store)
+const { rms, apps, queues, availableUsers, availableAppTypes, headers, metrics, queueTree } = storeToRefs(store)
 
 // 偏好:通过 computed 包装 store.setPref 以便 v-model
 const humanizeModel = computed({
@@ -74,10 +75,11 @@ watch(
   { deep: true }
 )
 
-// RM 切换 → 重新拉取应用与队列
+// RM 切换 → 重新拉取指标、队列与应用
 watch(
   () => store.rm,
   () => {
+    store.loadMetrics()
     store.loadQueues()
     store.loadApps()
   }
@@ -92,7 +94,12 @@ watch(
       clearInterval(timer)
       timer = undefined
     }
-    if (auto) timer = window.setInterval(() => store.loadApps(), interval * 1000)
+    if (auto)
+      timer = window.setInterval(() => {
+        store.loadMetrics()
+        store.loadQueues()
+        store.loadApps()
+      }, interval * 1000)
   },
   { immediate: true }
 )
@@ -111,6 +118,7 @@ watch(
 onMounted(async () => {
   applyFiltersFromQuery()
   await store.init()
+  store.loadMetrics()
   store.loadQueues()
   store.loadApps()
 })
@@ -137,6 +145,8 @@ async function onKill(appId: string, appName: string) {
 }
 
 function onManualRefresh() {
+  store.loadMetrics()
+  store.loadQueues()
   store.loadApps()
 }
 
@@ -251,6 +261,8 @@ function onRowsChange(s: number) {
         </div>
       </el-popover>
     </div>
+
+    <YarnOverview :metrics="metrics" :queue-tree="queueTree" :humanize="store.humanize" />
 
     <AppsTable
       v-if="viewStyleModel === 'table'"

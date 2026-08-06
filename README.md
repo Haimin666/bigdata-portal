@@ -61,6 +61,19 @@ npm run build    # 产出 dist/
 npm run serve    # 网关托管 dist/ + 代理,端口 3000
 ```
 
+一键脚本(生产模式,基于 npm):
+
+```bash
+scripts/npmctl.sh rebuild   # 重构并重启:stop → npm run build → start(推荐)
+scripts/npmctl.sh start     # 后台启动网关(托管 dist/,端口 3000)
+scripts/npmctl.sh stop      # 停止网关
+scripts/npmctl.sh restart   # 重启(不重新构建)
+scripts/npmctl.sh status    # 进程与健康状态
+scripts/npmctl.sh build     # 仅构建前端
+```
+
+进程信息:`scripts/npmctl.sh` 将主进程 PID 写入项目根 `.portal.pid`,日志在 `.portal.log`;端口可用环境变量 `PORT` 覆盖。
+
 ## 环境变量(server/config.js,支持项目根 .env.local)
 
 | 变量 | 默认值 | 说明 |
@@ -73,6 +86,7 @@ npm run serve    # 网关托管 dist/ + 代理,端口 3000
 | `OMD_URL` | `https://omd.corp.shiqiao.com` | OMD |
 | `STINGRAY_URL` | `http://stingray.corp.shiqiao.com` | Stingray |
 | `DSWEB_USER/PASS` | — | 海豚自动登录凭证 |
+| `DS_TOKEN` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,任务监控项目列表即该 token 用户可见(无无权限项目);换 token 改此项后重启网关 |
 | `STINGRAY_USER/PASS` | — | Stingray 自动登录凭证 |
 | `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
 
@@ -82,6 +96,7 @@ npm run serve    # 网关托管 dist/ + 代理,端口 3000
 
 - **同源 iframe**(海豚、Stingray):经网关代理,会话 cookie 种在门户域,进入时自动登录(`/api/login/{ds|stingray}`)免登录;Stingray 经 HTML 注入修正 React 路由。
 - **跨源 iframe**(OMD、StreamX):目标系统无 `X-Frame-Options` 限制,直接嵌入,认证在各自域内完成(受同源策略限制,门户无法注入;密码自动填充建议用浏览器密码管理器)。
+- **Tab 常驻池**:所有模块(原生视图 YARN/HDFS/任务监控 + 子应用 iframe)访问后均常驻——切走仅隐藏不卸载,状态保留(筛选、翻页、HDFS 路径、子应用页面),回来可接着操作;顶部 Tab 条可切换/关闭,关闭即销毁组件/iframe 释放内存。
 - 配置在 `src/config/menu.ts`(`iframe: true` 原生 iframe,`login` 同源自动登录)。
 
 ## Docker 部署
@@ -97,6 +112,22 @@ docker run -d -p 3000:3000 \
   -e DSWEB_USER=<user> -e DSWEB_PASS=<pass> \
   bigdata-portal
 ```
+
+一键脚本(docker compose,构建 / 启动 / 停止 / 销毁):
+
+```bash
+scripts/dockerctl.sh up        # 构建并启动(推荐;已存在则直接启动)
+scripts/dockerctl.sh build     # 仅构建镜像
+scripts/dockerctl.sh start     # 启动已构建的容器
+scripts/dockerctl.sh stop      # 停止
+scripts/dockerctl.sh restart   # 重启
+scripts/dockerctl.sh down      # 停止并删除容器(保留镜像)
+scripts/dockerctl.sh destroy   # 销毁:删除容器 + 镜像
+scripts/dockerctl.sh logs      # 跟随日志
+scripts/dockerctl.sh ps        # 查看状态
+```
+
+`docker-compose.yml` 已声明健康检查(探测 `/api/config`),凭证与各系统地址由运行时注入项目根 `.env.local`(不影响构建,不进镜像);无需凭证也能启动,仅子系统免登录回退默认值。
 
 ### Nginx 前置(可选)
 

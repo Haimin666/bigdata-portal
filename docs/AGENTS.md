@@ -52,7 +52,9 @@ bigdata-portal/
 │   ├── views/
 │   │   ├── yarn/                # YARN 原生视图
 │   │   ├── hdfs/HdfsView.vue    # HDFS 文件浏览器(WebHDFS)
-│   │   └── subapp/SubAppView.vue# 通用 iframe 容器(自动登录 + 原生 iframe)
+│   │   └── subapp/              # Tab 常驻池相关(原生视图 + 子应用共用)
+│   │       ├── SubAppView.vue   # iframe 内容组件(自动登录 + 原生 iframe,常驻不卸载)
+│   │       └── SubappTabs.vue   # 顶部 Tab 条(切换/关闭,关闭即销毁组件/iframe)
 │   ├── api/yarn.ts / hdfs.ts / auth.ts
 │   ├── store/yarn.ts
 │   └── types/ utils/ styles/
@@ -94,6 +96,7 @@ npm run dev:vite     # 前端
 | `OMD_URL` | `https://omd.corp.shiqiao.com` | OMD |
 | `STINGRAY_URL` | `http://stingray.corp.shiqiao.com` | Stingray |
 | `DSWEB_USER/PASS` | — | 海豚自动登录凭证 |
+| `DS_TOKEN` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,项目列表即该 token 用户可见;任务监控/海豚 UI 免登录均依赖它 |
 | `STINGRAY_USER/PASS` | — | Stingray 自动登录凭证(密码带点!) |
 | `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
 
@@ -176,6 +179,8 @@ npm run dev:vite     # 前端
 13. **`.env.local` 由 server/config.js 启动时加载**(零依赖),已存在 env 优先。改 .env.local 后需重启网关(dev 一键脚本里网关是独立进程,不会自动重启)。
 
 14. **Node 24 的噪音警告处理**:`util._extend` 来自 http-proxy@1.18.1(已停维护),启动参数加 `--no-deprecation` 抑制;`MaxListenersExceededWarning` 由 http-proxy-middleware v3 每个代理实例注册 close 监听导致,`EventEmitter.defaultMaxListeners = 20` 放宽。
+
+15. **iframe 状态保留不能靠 `<KeepAlive>`**:KeepAlive 缓存组件时会 detach DOM,iframe 一旦脱离文档即被浏览器销毁,切回照样重载。子应用状态保留必须让 iframe 常驻挂载,用 `v-show`(display:none)隐藏非激活项;关闭 tab 时才真正卸载释放。子应用路由组件因此改为空壳(`render: () => null`)。原生视图(YARN/HDFS/任务监控)也统一进 Tab 常驻池(组件常驻 `v-show` 切换,`refreshKey` 供顶栏刷新重建),MainLayout 不再用 router-view 渲染内容。
 
 ## 9. 与开发人员的配合规则
 

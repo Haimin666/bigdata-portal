@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { menus } from '@/config/menu'
+import type { MenuItem } from '@/config/menu'
 import { loginToService } from '@/api/auth'
 
 // 海豚 3.x 实例详情 hash 路由:/projects/instance/list/:processInstanceId
@@ -10,21 +10,29 @@ const DS_INSTANCE_DETAIL = (id: number | string) => `#/projects/instance/list/${
 
 defineOptions({ name: 'SubAppView' })
 
+// tab 内容组件:由 MainLayout 的常驻 iframe 池渲染(每个子应用一个实例)
+const props = defineProps<{
+  menu: MenuItem
+  /** 是否为当前激活 tab(激活的才响应刷新重建) */
+  active: boolean
+}>()
+
 const route = useRoute()
 const router = useRouter()
 
-const menu = computed(() => menus.find((m) => m.path === route.path))
-
+// 首次创建时拼一次地址;常驻后 iframe 不重载,后续切换不重新拼接
 const appUrl = computed(() => {
-  const base = menu.value?.url ?? `${route.path}/#/`
+  // 依赖 iframeKey:顶栏刷新重建 iframe 时重新计算(Stingray 时间戳随之更新)
+  void iframeKey.value
+  const base = props.menu.url ?? `${props.menu.path}/#/`
   // Stingray 同源代理:网关对 HTML 已设 no-store,但浏览器可能残留加 no-store 之前
   // 缓存的旧 HTML(无路由注入脚本 → React 读 /apps/stingray/login → 兜底 404 页)。
-  // 每次进菜单追加时间戳,强制走网络拿新 HTML,彻底绕开缓存问题。
-  if (menu.value?.name === 'stingray') return `${base}?_t=${Date.now()}`
+  // 首次创建追加时间戳,强制走网络拿新 HTML,彻底绕开缓存问题。
+  if (props.menu.name === 'stingray') return `${base}?_t=${Date.now()}`
   return base
 })
 // 原生 iframe 直连(同源代理或跨源直连)
-const isNativeIframe = computed(() => menu.value?.iframe ?? false)
+const isNativeIframe = computed(() => props.menu.iframe ?? false)
 // 跨源 iframe(url 为绝对地址):会话在 iframe 自身域,无需门户自动登录
 const isCrossOriginIframe = computed(() => isNativeIframe.value && /^https?:\/\//.test(appUrl.value))
 
@@ -33,7 +41,7 @@ const loginStatus = ref<'loading' | 'success' | 'error'>('loading')
 const loginError = ref('')
 
 async function ensureLogin() {
-  const service = menu.value?.login
+  const service = props.menu.login
   if (!service) {
     loginStatus.value = 'success'
     return
@@ -55,10 +63,10 @@ onMounted(() => {
   else ensureLogin()
 })
 
-// 顶栏刷新联动:iframe 模式下强制重建 iframe 重新加载
+// 顶栏刷新联动:仅激活的 tab 强制重建 iframe 重新加载
 const iframeKey = ref(0)
 function onPortalRefresh() {
-  if (isNativeIframe.value) iframeKey.value++
+  if (props.active && isNativeIframe.value) iframeKey.value++
 }
 onMounted(() => window.addEventListener('portal-refresh', onPortalRefresh))
 onUnmounted(() => window.removeEventListener('portal-refresh', onPortalRefresh))
@@ -67,7 +75,7 @@ onUnmounted(() => window.removeEventListener('portal-refresh', onPortalRefresh))
 const iframeRef = ref<HTMLIFrameElement>()
 // 仅海豚菜单消费 dsTarget query
 const dsTarget = computed(() =>
-  menu.value?.name === 'ds' ? (route.query.dsTarget as string | undefined) : undefined,
+  props.menu.name === 'ds' ? (route.query.dsTarget as string | undefined) : undefined,
 )
 
 let dsNavTimer: ReturnType<typeof setInterval> | undefined
@@ -101,6 +109,18 @@ function onIframeLoad() {
   dsNavTimer = setInterval(navigateDsToInstance, 1500)
   navigateDsToInstance()
 }
+
+// tab 常驻后 iframe 不重载,onIframeLoad 仅首次触发;从任务监控再次携带 dsTarget 跳转时,
+// iframe 已就绪则直接开始定位轮询;首次创建(iframe 未就绪)时由 onIframeLoad 接管
+watch(dsTarget, (target) => {
+  if (!target) return
+  const frame = iframeRef.value
+  if (!frame?.contentWindow) return
+  clearInterval(dsNavTimer)
+  dsNavTries = 0
+  dsNavTimer = setInterval(navigateDsToInstance, 1500)
+  navigateDsToInstance()
+})
 
 onUnmounted(() => clearTimeout(dsNavTimer))
 </script>

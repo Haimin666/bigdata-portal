@@ -124,7 +124,16 @@ function createLoginEndpoint({
         resp.on('end', () => {
           const raw = Buffer.concat(chunks).toString('utf8')
           const cookies = resp.headers['set-cookie'] || []
-          const setCookies = () => res.setHeader('Set-Cookie', cookies.map(rewriteCookie))
+          // 海豚登录 Set-Cookie 无 Path 属性,浏览器会按请求路径 /api/login/ 收窄生效范围,
+          // 导致 /dolphinscheduler/* 请求不带会话 cookie(401)。统一补 Path=/ 全路径生效。
+          const setCookies = () =>
+            res.setHeader(
+              'Set-Cookie',
+              cookies.map((c) => {
+                const rewritten = rewriteCookie(c)
+                return rewritten.includes('Path=') ? rewritten : `${rewritten}; Path=/`
+              })
+            )
           // 成功判定:有 cookie 且 2xx,或 JSON 返回 ok/code 0
           if (cookies.length && resp.statusCode < 400) {
             setCookies()
@@ -199,6 +208,8 @@ app.use(
 app.use('/apps/dsweb', iframeProxy(config.dsWebUrl, '/apps/dsweb'))
 // 海豚 UI 的 HTML 内资源与运行时 API 均为绝对路径 /dolphinscheduler/...(见 ui/index.html),
 // 门户域需提供同路径代理,否则子应用资源会命中 SPA fallback 导致白屏。
+// 配置了 DS_TOKEN 时向所有请求注入 token header(海豚 API token 认证优先于 cookie,
+// 项目列表即 token 用户可见;海豚 UI 免登录同样依赖它)。
 app.use(
   '/dolphinscheduler',
   createProxyMiddleware({
@@ -206,7 +217,12 @@ app.use(
     changeOrigin: true,
     // express 挂载剥掉 /dolphinscheduler 前缀,加回后转发到海豚(dsWebUrl 自带该前缀)
     pathRewrite: { '^/': '/dolphinscheduler/' },
-    on: { proxyRes: onProxyRes(config.dsWebUrl, '/dolphinscheduler') },
+    on: {
+      proxyRes: onProxyRes(config.dsWebUrl, '/dolphinscheduler'),
+      proxyReq: (proxyReq) => {
+        if (config.dsToken) proxyReq.setHeader('token', config.dsToken)
+      }
+    },
     logLevel: 'warn'
   })
 )

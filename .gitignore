@@ -10,3 +10,10 @@ dist/
 *.log
 .idea
 .vscode
+
+# npmctl 运行时产物(进程 PID 与日志)
+.portal.pid
+.portal.log
+
+# playwright-cli 会话产物(快照/截图)
+.playwright-cli/

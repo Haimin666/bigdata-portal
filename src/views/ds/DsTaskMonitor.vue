@@ -48,13 +48,15 @@ const rmHost = ref('')
 
 const stateOptions = [
   { label: '全部状态', value: '' },
-  // 注意:本版本海豚运行中状态枚举为 RUNNING_EXEUTION(少一个 C),实测确认
+  // 注意:本版本海豚运行中状态枚举为 RUNNING_EXEUTION(少一个 C),
+  // 展示与筛选参数均为该拼写(实测确认,传标准 RUNNING_EXECUTION 会 10113 报错)
   { label: '运行中', value: 'RUNNING_EXEUTION' },
   { label: '成功', value: 'SUCCESS' },
   { label: '失败', value: 'FAILURE' },
   { label: '暂停', value: 'PAUSE' },
   { label: '停止', value: 'STOP' },
-  { label: '已提交', value: 'SUBMITTED_SUCCESS' }
+  { label: '已提交', value: 'SUBMITTED_SUCCESS' },
+  { label: '已终止', value: 'KILL' }
 ]
 
 const stateLabels: Record<string, string> = {
@@ -73,7 +75,10 @@ const stateLabels: Record<string, string> = {
   KILL: '已终止',
   TIMEOUT: '超时',
   WAITING_DEPEND: '等待依赖',
-  WAITING_THREAD: '等待线程'
+  WAITING_THREAD: '等待线程',
+  WAIT_TO_RUN: '等待运行',
+  WAIT_TO_THREAD: '等待线程池',
+  FORCED_SUCCESS: '强制成功'
 }
 
 function dsStateLabel(state: string): string {
@@ -92,7 +97,10 @@ const stateColor: Record<string, string> = {
   TIMEOUT: 'warning',
   SUBMITTED_SUCCESS: 'info',
   WAITING_DEPEND: 'info',
-  SERIAL_WAIT: 'info'
+  SERIAL_WAIT: 'info',
+  WAIT_TO_RUN: 'info',
+  WAIT_TO_THREAD: 'info',
+  FORCED_SUCCESS: 'success'
 }
 
 function stateTagType(state: string): string {
@@ -306,10 +314,11 @@ onMounted(async () => {
       projectName.value = projects.value[0].name
       await load()
     } else {
-      error.value = '无可见项目'
+      error.value = '无可见项目(检查 Token 是否有项目权限)'
     }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    if (!projects.value.length) error.value += '(海豚 token 由网关 DS_TOKEN 配置注入,项目列表即该用户可见项目)'
   }
 })
 </script>
@@ -327,9 +336,9 @@ onMounted(async () => {
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.name" />
       </el-select>
 
-      <el-radio-group v-model="stateType" class="state-group" @change="onFilterChange">
-        <el-radio-button v-for="s in stateOptions" :key="s.value" :label="s.value">{{ s.label }}</el-radio-button>
-      </el-radio-group>
+      <el-select v-model="stateType" class="state-select" clearable placeholder="状态筛选" @change="onFilterChange">
+        <el-option v-for="s in stateOptions" :key="s.value" :label="s.label" :value="s.value" />
+      </el-select>
 
       <el-select v-model="rangeKey" class="range-select" @change="onFilterChange">
         <el-option label="近 1 天" value="1d" />
@@ -572,6 +581,10 @@ onMounted(async () => {
 
 .project-select {
   width: 240px;
+}
+
+.state-select {
+  width: 130px;
 }
 
 .state-select {

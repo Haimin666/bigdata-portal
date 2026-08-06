@@ -1,4 +1,6 @@
-/** 海豚调度(DolphinScheduler)API 封装,经网关 /dolphinscheduler 代理 */
+/** 海豚调度(DolphinScheduler)API 封装,经网关 /dolphinscheduler 代理。
+ *  认证由网关层完成:配置了 DS_TOKEN 时网关自动注入 token header(见 server/index.js),
+ *  前端无需携带凭证;项目列表即该 token 用户可见的项目。 */
 
 export interface DsProject {
   id: number
@@ -43,9 +45,21 @@ async function request<T>(path: string): Promise<T> {
   return data.data as T
 }
 
-/** 项目列表(登录用户可见) */
-export function listProjects(): Promise<DsProject[]> {
-  return request<DsProject[]>('/dolphinscheduler/projects/query-project-list')
+/** 项目列表(当前 token 用户有权限的)。
+ *  用 /projects/list-paging:该接口按认证用户过滤权限;
+ *  /projects/query-project-list 返回全部项目(含无权限项目,选中后才报 30002)。 */
+export async function listProjects(): Promise<DsProject[]> {
+  const result: DsProject[] = []
+  const pageSize = 100
+  for (let pageNo = 1; pageNo <= 10; pageNo++) {
+    const data = await request<DsPage<DsProject>>(
+      `/dolphinscheduler/projects/list-paging?pageNo=${pageNo}&pageSize=${pageSize}`
+    )
+    const list = data.totalList ?? []
+    result.push(...list)
+    if (!list.length || result.length >= (data.total ?? 0)) break
+  }
+  return result
 }
 
 export interface TaskQuery {

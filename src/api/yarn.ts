@@ -1,4 +1,4 @@
-import type { AppFilters, QueueNode, YarnApp } from '@/types/yarn'
+import type { AppFilters, ClusterMetrics, QueueNode, YarnApp } from '@/types/yarn'
 
 async function request<T>(path: string, rm: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -45,6 +45,14 @@ export async function fetchScheduler(rm: string): Promise<QueueNode> {
     rm
   )
   return data?.scheduler?.schedulerInfo ?? {}
+}
+
+export async function fetchMetrics(rm: string): Promise<ClusterMetrics> {
+  const data = await request<{ clusterMetrics?: ClusterMetrics }>(
+    '/hadoopapi/ws/v1/cluster/metrics',
+    rm
+  )
+  return data?.clusterMetrics ?? {}
 }
 
 export async function requestKill(rm: string, appId: string): Promise<void> {

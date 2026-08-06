@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menus } from '@/config/menu'
+import SubAppView from '@/views/subapp/SubAppView.vue'
+import SubappTabs, { type PortalTab } from '@/views/subapp/SubappTabs.vue'
+import YarnView from '@/views/yarn/YarnView.vue'
+import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
+import HdfsView from '@/views/hdfs/HdfsView.vue'
 import {
   Monitor,
   Timer,
@@ -23,7 +28,6 @@ const route = useRoute()
 const router = useRouter()
 
 const collapsed = ref(false)
-const refreshKey = ref(0)
 const fullscreen = ref(false)
 
 const icons: Record<string, Component> = {
@@ -36,17 +40,65 @@ const icons: Record<string, Component> = {
   Cpu
 }
 
+// 原生视图组件映射:按 menu.name 渲染
+const nativeComponents: Record<string, Component> = {
+  yarn: YarnView,
+  dsTask: DsTaskMonitor,
+  hdfs: HdfsView
+}
+
+// ── 模块 Tab 常驻池(原生视图 + 子应用 iframe 统一管理)──────────
+// 原生视图:组件常驻 v-show 切换,状态保留;refreshKey 供刷新按钮重建。
+// 子应用:iframe 常驻,关闭 tab 才销毁。
+const tabs = ref<PortalTab[]>([])
+
+/** 打开模块 tab:已存在则仅激活,否则加入池(组件/iframe 首次创建) */
+function openTab(path: string) {
+  const menu = menus.find((m) => m.path === path)
+  if (!menu) return
+  if (!tabs.value.some((t) => t.path === path)) {
+    tabs.value.push({ path, menu, refreshKey: 0 })
+  }
+}
+
+/** 关闭 tab:销毁对应组件/iframe 释放内存;若关闭的是当前激活,激活相邻 tab(优先右侧) */
+function closeTab(path: string) {
+  const idx = tabs.value.findIndex((t) => t.path === path)
+  if (idx === -1) return
+  tabs.value.splice(idx, 1)
+  if (path === route.path) {
+    const next = tabs.value[idx] ?? tabs.value[idx - 1]
+    router.push(next ? next.path : '/yarn')
+  }
+}
+
+// 路由变化(菜单/URL 直达/关闭后跳转)→ 自动补/切 tab
+watch(
+  () => route.path,
+  (p) => {
+    if (menus.some((m) => m.path === p)) openTab(p)
+  },
+  { immediate: true }
+)
+
 function handleSelect(path: string) {
+  openTab(path)
+  router.push(path)
+}
+
+function handleTabSwitch(path: string) {
   router.push(path)
 }
 
 function handleRefresh() {
-  const kind = menus.find((m) => m.path === route.path)?.kind
-  if (kind === 'native') {
-    // 原生视图:重挂组件重新拉取
-    refreshKey.value++
+  const menu = menus.find((m) => m.path === route.path)
+  if (!menu) return
+  if (menu.kind === 'native') {
+    // 原生视图:重建当前 tab 组件(重新拉取数据)
+    const t = tabs.value.find((x) => x.path === route.path)
+    if (t) t.refreshKey++
   } else {
-    // 子应用:广播刷新事件,由 SubAppView 销毁重建
+    // 子应用:广播刷新事件,由激活的 SubAppView 销毁重建 iframe
     window.dispatchEvent(new Event('portal-refresh'))
   }
 }
@@ -104,7 +156,33 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
         </div>
       </el-header>
       <el-main class="portal-main">
-        <router-view :key="refreshKey" />
+        <!-- 模块 Tab 条 -->
+        <SubappTabs
+          v-if="tabs.length"
+          :tabs="tabs"
+          :active-path="route.path"
+          @switch="handleTabSwitch"
+          @close="closeTab"
+        />
+        <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
+        <div class="view-stage">
+          <template v-for="tab in tabs" :key="tab.path">
+            <div v-show="tab.path === route.path" class="view-item">
+              <!-- 子应用:iframe 常驻 -->
+              <SubAppView
+                v-if="tab.menu.kind === 'subapp'"
+                :menu="tab.menu"
+                :active="tab.path === route.path"
+              />
+              <!-- 原生视图:组件常驻,刷新时按 key 重建 -->
+              <component
+                v-else
+                :is="nativeComponents[tab.menu.name]"
+                :key="tab.refreshKey"
+              />
+            </div>
+          </template>
+        </div>
       </el-main>
     </el-container>
   </el-container>
@@ -166,5 +244,20 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
 .portal-main {
   background: $bg;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.view-stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.view-item {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
 }
 </style>

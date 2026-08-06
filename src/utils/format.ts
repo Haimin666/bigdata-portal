@@ -43,3 +43,18 @@ export function formatElapsed(ms: number, humanize: boolean): string {
   if (sec || parts.length === 0) parts.push(`${sec}秒`)
   return parts.join('')
 }
+
+const MEM_UNITS = ['MB', 'GB', 'TB', 'PB']
+
+/** 内存格式化:MB → 自适应单位(GB/TB),humanize=false 时原样返回数字 */
+export function formatMem(mb: number, humanize: boolean): string {
+  if (!Number.isFinite(mb) || mb < 0) return 'n/a'
+  if (!humanize || mb < 1024) return `${Math.round(mb)} MB`
+  let v = mb
+  let i = 0
+  while (v >= 1024 && i < MEM_UNITS.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(1)} ${MEM_UNITS[i]}`
+}
