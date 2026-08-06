@@ -103,7 +103,7 @@ scripts/npmctl.sh build     # 仅构建前端
 
 ```bash
 docker build -t bigdata-portal .
-docker run -d -p 3000:3000 \
+docker run -d -p 9910:3000 \
   -e YARN_RM_LIST=http://<rm-host>:8088 \
   -e HDFS_URL=http://<nn-host>:9870 \
   -e DS_WEB_URL=http://<ds-host>/dolphinscheduler \

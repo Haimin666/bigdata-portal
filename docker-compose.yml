@@ -17,7 +17,8 @@ services:
     container_name: bigdata-portal
     restart: unless-stopped
     ports:
-      - "3000:9910"
+      # 宿主机 9910 → 容器 3000(容器内网关默认监听 3000,healthcheck 同上)
+      - "9910:3000"
     env_file:
       - .env.local
     environment:
