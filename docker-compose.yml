@@ -17,7 +17,7 @@ services:
     container_name: bigdata-portal
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3000:9910"
     env_file:
       - .env.local
     environment:
