@@ -3,9 +3,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowUp, Document, Folder, HomeFilled, Position, Refresh } from '@element-plus/icons-vue'
-import { listStatus } from '@/api/hdfs'
+import { listStatus, fetchHdfsDiskOverview } from '@/api/hdfs'
 import { formatTimestamp } from '@/utils/format'
-import type { HdfsFileStatus } from '@/types/hdfs'
+import type { HdfsDiskOverview, HdfsFileStatus } from '@/types/hdfs'
+import HdfsDiskOverviewView from './HdfsDiskOverview.vue'
 
 defineOptions({ name: 'HdfsView' })
 
@@ -17,6 +18,21 @@ const pathInput = ref('')
 const entries = ref<HdfsFileStatus[]>([])
 const loading = ref(false)
 const error = ref('')
+
+// 磁盘总览(集群 + 单节点,经 NameNode JMX)
+const diskData = ref<HdfsDiskOverview | null>(null)
+const diskLoading = ref(false)
+
+async function loadDisk() {
+  diskLoading.value = true
+  try {
+    diskData.value = await fetchHdfsDiskOverview()
+  } catch {
+    diskData.value = null
+  } finally {
+    diskLoading.value = false
+  }
+}
 
 // 分页(前端分页:WebHDFS LISTSTATUS 不支持分页参数)
 const page = ref(0)
@@ -81,6 +97,7 @@ function goUp() {
 
 function refresh() {
   load(path.value)
+  loadDisk()
 }
 
 function onSizeChange(size: number) {
@@ -111,6 +128,7 @@ function onRowClick(row: HdfsFileStatus) {
 onMounted(() => {
   const q = route.query.path
   load(typeof q === 'string' && q ? q : '/')
+  loadDisk()
 })
 
 watch(path, (p) => {
@@ -120,6 +138,8 @@ watch(path, (p) => {
 
 <template>
   <div class="hdfs-view">
+    <HdfsDiskOverviewView :data="diskData" :loading="diskLoading" />
+
     <div class="toolbar">
       <el-input
         v-model="pathInput"
