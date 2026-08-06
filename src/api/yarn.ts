@@ -56,7 +56,7 @@ export async function fetchMetrics(rm: string): Promise<ClusterMetrics> {
 }
 
 export async function requestKill(rm: string, appId: string): Promise<void> {
-  await fetch(`/hadoopapi/ws/v1/cluster/apps/${appId}/state`, {
+  const res = await fetch(`/hadoopapi/ws/v1/cluster/apps/${appId}/state`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -64,4 +64,18 @@ export async function requestKill(rm: string, appId: string): Promise<void> {
     },
     body: JSON.stringify({ state: 'KILLED' })
   })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let detail = text
+    try {
+      const data = JSON.parse(text) as { RemoteException?: { exception?: string; message?: string } }
+      if (data?.RemoteException?.message) {
+        const ex = data.RemoteException.exception
+        detail = ex && ex !== 'RemoteException' ? `${ex}: ${data.RemoteException.message}` : data.RemoteException.message
+      }
+    } catch {
+      // text 非 JSON,直接使用原文
+    }
+    throw new Error(`Kill request failed: HTTP ${res.status}${detail ? ` ${detail}` : ''}`)
+  }
 }

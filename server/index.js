@@ -161,15 +161,15 @@ function createLoginEndpoint({
 }
 
 // ── YARN:动态代理(按 X-Resource-Manager 请求头) ───────────────
+const hadoopProxy = createProxyMiddleware({
+  router: (req) => req.get('X-Resource-Manager'),
+  changeOrigin: true,
+  pathRewrite: { '^/hadoopapi': '' },
+  logLevel: 'warn'
+})
 app.use('/hadoopapi', (req, res, next) => {
-  const rm = req.get('X-Resource-Manager')
-  if (!rm) return res.status(400).end('missing X-Resource-Manager header')
-  createProxyMiddleware({
-    target: rm,
-    changeOrigin: true,
-    pathRewrite: { '^/hadoopapi': '' },
-    logLevel: 'warn'
-  })(req, res, next)
+  if (!req.get('X-Resource-Manager')) return res.status(400).end('missing X-Resource-Manager header')
+  hadoopProxy(req, res, next)
 })
 
 // ── HDFS 子应用(/apps/hdfs + 绝对路径 /static + WebHDFS API) ─
