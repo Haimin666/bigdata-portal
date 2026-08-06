@@ -83,18 +83,25 @@ let dsNavTries = 0
 function navigateDsToInstance() {
   const frame = iframeRef.value
   const target = dsTarget.value
-  // 尝试 8 次(约 12s)仍未定位则放弃并清除 query,避免无限轮询
-  if (!frame?.contentWindow || !target || dsNavTries >= 8) {
+  // 目标已被清除(用户切走/URL 变化):停止轮询,但不干预路由,避免把用户拉回 /ds
+  if (!target) {
     clearInterval(dsNavTimer)
-    router.replace({ path: '/ds' })
+    return
+  }
+  // iframe 未就绪(如刷新重建中):跳过本次,等 onIframeLoad 重启轮询
+  if (!frame?.contentWindow) return
+  // 尝试 8 次(约 12s)仍未定位则放弃;仅在用户仍在 /ds 时清除 query
+  if (dsNavTries >= 8) {
+    clearInterval(dsNavTimer)
+    if (route.path === '/ds') router.replace({ path: '/ds' })
     return
   }
   dsNavTries++
   const hash = DS_INSTANCE_DETAIL(target)
   if (frame.contentWindow.location.hash === hash) {
-    // hash 已生效:清除 query 并停止轮询
+    // hash 已生效:停止轮询;仍在 /ds 时清除 query(用户已切走则保留原路径)
     clearInterval(dsNavTimer)
-    router.replace({ path: '/ds' })
+    if (route.path === '/ds') router.replace({ path: '/ds' })
     return
   }
   // 同源 iframe:改 hash 触发 DS SPA 路由,不重载页面(vuex 项目上下文保留)
@@ -122,7 +129,7 @@ watch(dsTarget, (target) => {
   navigateDsToInstance()
 })
 
-onUnmounted(() => clearTimeout(dsNavTimer))
+onUnmounted(() => clearInterval(dsNavTimer))
 </script>
 
 <template>

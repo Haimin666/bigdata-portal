@@ -125,8 +125,12 @@ function rangeDates(): { start?: string; end?: string } {
   return { start: fmt(start), end: fmt(now) }
 }
 
+// 请求序号:防止快速切换筛选/项目/分页时旧响应覆盖新结果
+let loadSeq = 0
+
 async function load() {
   if (!projectName.value) return
+  const seq = ++loadSeq
   loading.value = true
   error.value = ''
   try {
@@ -141,6 +145,7 @@ async function load() {
         startDate: start,
         endDate: end
       })
+      if (seq !== loadSeq) return
       tasks.value = data.totalList || []
       total.value = data.total || 0
     } else {
@@ -152,16 +157,18 @@ async function load() {
         startDate: start,
         endDate: end
       })
+      if (seq !== loadSeq) return
       instances.value = data.totalList || []
       total.value = data.total || 0
     }
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = e instanceof Error ? e.message : String(e)
     instances.value = []
     tasks.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -581,10 +588,6 @@ onMounted(async () => {
 
 .project-select {
   width: 240px;
-}
-
-.state-select {
-  width: 130px;
 }
 
 .state-select {

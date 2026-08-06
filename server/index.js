@@ -86,8 +86,15 @@ function createLoginEndpoint({
   passwordEncode
 }) {
   return (req, res) => {
-    const user = req.body?.user || process.env[envUserKey]
-    const rawPassword = req.body?.password || process.env[envPassKey]
+    // 安全:用户名与密码必须成对提供(任一来自请求体则两者都必须来自请求体),
+    // 禁止用"请求体用户名 + 环境变量密码"的组合冒用账号。
+    const bodyUser = req.body?.user
+    const bodyPass = req.body?.password
+    if (!!bodyUser !== !!bodyPass) {
+      return res.status(400).json({ ok: false, msg: 'user and password must be provided together' })
+    }
+    const user = bodyUser || process.env[envUserKey]
+    const rawPassword = bodyPass || process.env[envPassKey]
     if (!user || !rawPassword) {
       return res.status(400).json({ ok: false, msg: 'missing credentials' })
     }
@@ -161,6 +168,7 @@ function createLoginEndpoint({
 }
 
 // ── YARN:动态代理(按 X-Resource-Manager 请求头) ───────────────
+// 安全:目标必须命中配置的 RM 白名单,防止被当作任意内网代理(SSRF)。
 const hadoopProxy = createProxyMiddleware({
   router: (req) => req.get('X-Resource-Manager'),
   changeOrigin: true,
@@ -168,7 +176,11 @@ const hadoopProxy = createProxyMiddleware({
   logLevel: 'warn'
 })
 app.use('/hadoopapi', (req, res, next) => {
-  if (!req.get('X-Resource-Manager')) return res.status(400).end('missing X-Resource-Manager header')
+  const rm = req.get('X-Resource-Manager')
+  if (!rm) return res.status(400).end('missing X-Resource-Manager header')
+  if (!config.resourceManagers.some((allowed) => rm === allowed || rm.startsWith(`${allowed}/`))) {
+    return res.status(403).end('X-Resource-Manager not in whitelist')
+  }
   hadoopProxy(req, res, next)
 })
 

@@ -58,3 +58,24 @@ export function formatMem(mb: number, humanize: boolean): string {
   }
   return `${v.toFixed(1)} ${MEM_UNITS[i]}`
 }
+
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+
+/** 字节数 → 自适应单位(统一字节格式化) */
+export function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  let v = bytes
+  let i = 0
+  while (v >= 1024 && i < BYTE_UNITS.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${i <= 1 ? Math.round(v) : v.toFixed(1)} ${BYTE_UNITS[i]}`
+}
+
+/** 使用率(%) → 进度条颜色:>=85% 红,>=60% 橙,其余主题蓝 */
+export function progressColor(p: number): string {
+  if (p >= 85) return '#f56c6c'
+  if (p >= 60) return '#e6a23c'
+  return '#5e6ad2'
+}

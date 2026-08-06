@@ -4,7 +4,7 @@ import type { HdfsDiskOverview, HdfsFileStatus } from '@/types/hdfs'
  * WebHDFS 路径编码:按段 encodeURIComponent,避免中文/空格被破坏,
  * 同时保留分隔符 '/'。
  */
-export function encodeHdfsPath(path: string): string {
+function encodeHdfsPath(path: string): string {
   const p = path.startsWith('/') ? path : `/${path}`
   return p
     .split('/')

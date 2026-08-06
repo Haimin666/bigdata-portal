@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineOptions({ name: 'MainLayout' })
+defineOptions({ name: 'AppRoot' })
 </script>
 
 <template>

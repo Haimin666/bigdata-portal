@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { ClusterMetrics, QueueResources } from '@/types/yarn'
-import { formatMem } from '@/utils/format'
+import { formatMem, progressColor } from '@/utils/format'
 
 defineOptions({ name: 'YarnOverview' })
 
@@ -24,13 +24,6 @@ const vcPercent = computed(() =>
 )
 
 // ── 队列资源 ───────────────────────────────────────────
-/** 使用率 → 进度条颜色:>=85% 红,>=60% 橙,其余主题蓝 */
-function progressColor(p: number): string {
-  if (p >= 85) return '#f56c6c'
-  if (p >= 60) return '#e6a23c'
-  return '#5e6ad2'
-}
-
 /** 队列内存配额:capacity 调度 = 集群总量 × 绝对容量;fair 调度 = maxResources(硬上限),缺失回退公平份额/集群总量 */
 function queueMemQuota(q: QueueResources): number {
   if (q.scheduler === 'fair') {
@@ -249,8 +242,8 @@ watch(
 }
 
 @media (max-width: 1100px) {
-  .overview-cards {
-    grid-template-columns: 1fr;
+  .overview-strip {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 </style>

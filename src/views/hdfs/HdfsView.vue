@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowUp, Document, Folder, HomeFilled, Position, Refresh } from '@element-plus/icons-vue'
 import { listStatus, fetchHdfsDiskOverview } from '@/api/hdfs'
-import { formatTimestamp } from '@/utils/format'
+import { formatBytes, formatTimestamp } from '@/utils/format'
 import type { HdfsDiskOverview, HdfsFileStatus } from '@/types/hdfs'
 import HdfsDiskOverviewView from './HdfsDiskOverview.vue'
 
@@ -67,32 +67,27 @@ const pagedEntries = computed(() =>
   sortedEntries.value.slice(page.value * pageSize.value, (page.value + 1) * pageSize.value)
 )
 
-function formatSize(len: number): string {
-  if (len < 1024) return `${len} B`
-  const units = ['KB', 'MB', 'GB', 'TB', 'PB']
-  let v = len
-  let i = -1
-  do {
-    v /= 1024
-    i++
-  } while (v >= 1024 && i < units.length - 1)
-  return `${v.toFixed(1)} ${units[i]}`
-}
+// 请求序号:防止快速切换目录时旧响应覆盖新结果
+let loadSeq = 0
 
 async function load(dir: string): Promise<boolean> {
+  const seq = ++loadSeq
   path.value = dir
   loading.value = true
   error.value = ''
   try {
-    entries.value = await listStatus(dir)
+    const list = await listStatus(dir)
+    if (seq !== loadSeq) return false // 已有更新的请求,丢弃本次结果
+    entries.value = list
     page.value = 0 // 切换目录/刷新后回到第一页
     return true
   } catch (e) {
+    if (seq !== loadSeq) return false
     error.value = e instanceof Error ? e.message : String(e)
     entries.value = []
     return false
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -211,7 +206,7 @@ watch(path, (p) => {
       </el-table-column>
       <el-table-column label="大小" width="110" align="right" sortable>
         <template #default="{ row }">
-          {{ row.type === 'DIRECTORY' ? '—' : formatSize(row.length) }}
+          {{ row.type === 'DIRECTORY' ? '—' : formatBytes(row.length) }}
         </template>
       </el-table-column>
       <el-table-column prop="permission" label="权限" width="90" sortable />

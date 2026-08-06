@@ -33,6 +33,8 @@ export const useYarnStore = defineStore('yarn', {
     /** 队列资源树(总览展示) */
     queueTree: [] as QueueResources[],
     loading: false,
+    // 请求序号:loadApps 防竞态
+    appsSeq: 0,
     error: '',
     filters: {
       states: ['RUNNING'],
@@ -68,10 +70,12 @@ export const useYarnStore = defineStore('yarn', {
     },
     async loadApps() {
       if (!this.rm) return
+      const seq = ++this.appsSeq
       this.loading = true
       this.error = ''
       try {
         const list = await fetchApps(this.rm, this.filters)
+        if (seq !== this.appsSeq) return // 已有更新的请求,丢弃本次结果
         this.availableAppTypes = this.union(
           this.availableAppTypes,
           list.map((a) => a.applicationType)
@@ -79,10 +83,11 @@ export const useYarnStore = defineStore('yarn', {
         this.availableUsers = this.union(this.availableUsers, list.map((a) => a.user))
         this.apps = list
       } catch (e) {
+        if (seq !== this.appsSeq) return
         this.apps = []
         this.error = e instanceof Error ? e.message : String(e)
       } finally {
-        this.loading = false
+        if (seq === this.appsSeq) this.loading = false
       }
     },
     async loadMetrics() {

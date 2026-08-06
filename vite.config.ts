@@ -38,6 +38,8 @@ export default defineConfig({
       '/__/stingray': gatewayProxy,
       '/api': gatewayProxy,
       '/webhdfs': gatewayProxy,
+      // HDFS 磁盘总览经 /static 代理 NameNode JMX,dev 下需转发到网关
+      '/static': gatewayProxy,
       // 海豚调度子应用资源/API 为绝对路径 /dolphinscheduler/*,同样反代到网关
       '/dolphinscheduler': gatewayProxy
     }

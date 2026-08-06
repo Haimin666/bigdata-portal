@@ -32,9 +32,7 @@ const rows = computed(() =>
 )
 
 const paged = computed(() =>
-  props.rowsPerPage === -1
-    ? rows.value
-    : rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
+  rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
 )
 
 function open(url: string) {

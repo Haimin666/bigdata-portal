@@ -30,13 +30,6 @@ export interface DsTaskInstance {
   taskInstancePriority?: string
 }
 
-export interface DsTaskPage {
-  totalList: DsTaskInstance[]
-  total: number
-  currentPage: number
-  totalPage: number
-}
-
 async function request<T>(path: string): Promise<T> {
   const res = await fetch(path)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -72,14 +65,14 @@ export interface TaskQuery {
 }
 
 /** 任务实例分页列表 */
-export async function listTaskInstances(projectName: string, q: TaskQuery): Promise<DsTaskPage> {
+export async function listTaskInstances(projectName: string, q: TaskQuery): Promise<DsPage<DsTaskInstance>> {
   const params = new URLSearchParams({ pageNo: String(q.pageNo), pageSize: String(q.pageSize) })
   if (q.taskName) params.set('taskName', q.taskName)
   if (q.stateType) params.set('stateType', q.stateType)
   if (q.startDate) params.set('startDate', q.startDate)
   if (q.endDate) params.set('endDate', q.endDate)
   const url = `/dolphinscheduler/projects/${encodeURIComponent(projectName)}/task-instance/list-paging?${params}`
-  return request<DsTaskPage>(url)
+  return request<DsPage<DsTaskInstance>>(url)
 }
 
 /** 工作流(流程)实例 */

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { formatBytes, progressColor } from '@/utils/format'
 import type { HdfsDataNodeInfo, HdfsDiskOverview } from '@/types/hdfs'
 
 defineOptions({ name: 'HdfsDiskOverview' })
@@ -8,18 +9,6 @@ const props = defineProps<{
   data: HdfsDiskOverview | null
   loading: boolean
 }>()
-
-function formatSize(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  let v = bytes
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${i <= 1 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
-}
 
 // ── 集群维度 ─────────────────────────────────────────────
 const cluster = computed(() => props.data?.cluster)
@@ -33,13 +22,6 @@ const nonDfsPct = computed(() => {
   const n = cluster.value?.CapacityUsedNonDFS ?? 0
   return t > 0 ? Math.min(100, Math.round((n / t) * 100)) : 0
 })
-
-/** 使用率 → 进度条颜色:>=85% 红,>=60% 橙,其余主题蓝 */
-function progressColor(p: number): string {
-  if (p >= 85) return '#f56c6c'
-  if (p >= 60) return '#e6a23c'
-  return '#5e6ad2'
-}
 
 // ── 节点维度 ─────────────────────────────────────────────
 function nodeUsedPct(n: HdfsDataNodeInfo): number {
@@ -58,17 +40,17 @@ function nodeState(n: HdfsDataNodeInfo): string {
       <div class="mini">
         <span class="mini-label">集群容量</span>
         <el-progress :percentage="usedPct" :stroke-width="8" :show-text="false" :color="progressColor" />
-        <span class="mini-meta">{{ usedPct }}% · {{ formatSize(cluster?.CapacityUsed ?? 0) }}/{{ formatSize(cluster?.CapacityTotal ?? 0) }}</span>
+        <span class="mini-meta">{{ usedPct }}% · {{ formatBytes(cluster?.CapacityUsed ?? 0) }}/{{ formatBytes(cluster?.CapacityTotal ?? 0) }}</span>
       </div>
       <div class="mini">
         <span class="mini-label">剩余</span>
         <el-progress :percentage="100 - usedPct" :stroke-width="8" :show-text="false" :color="progressColor" />
-        <span class="mini-meta">{{ formatSize(cluster?.CapacityRemaining ?? 0) }}</span>
+        <span class="mini-meta">{{ formatBytes(cluster?.CapacityRemaining ?? 0) }}</span>
       </div>
       <div class="mini">
         <span class="mini-label">非DFS</span>
         <el-progress :percentage="nonDfsPct" :stroke-width="8" :show-text="false" :color="progressColor" />
-        <span class="mini-meta">{{ nonDfsPct }}% · {{ formatSize(cluster?.CapacityUsedNonDFS ?? 0) }}</span>
+        <span class="mini-meta">{{ nonDfsPct }}% · {{ formatBytes(cluster?.CapacityUsedNonDFS ?? 0) }}</span>
       </div>
       <div class="mini stat">
         <span class="mini-label">节点</span>
@@ -91,10 +73,10 @@ function nodeState(n: HdfsDataNodeInfo): string {
             </template>
           </el-table-column>
           <el-table-column label="已用 / 容量" min-width="160">
-            <template #default="{ row }">{{ formatSize(row.usedSpace) }} / {{ formatSize(row.capacity) }}</template>
+            <template #default="{ row }">{{ formatBytes(row.usedSpace) }} / {{ formatBytes(row.capacity) }}</template>
           </el-table-column>
           <el-table-column label="剩余" width="100" align="right">
-            <template #default="{ row }">{{ formatSize(row.remaining) }}</template>
+            <template #default="{ row }">{{ formatBytes(row.remaining) }}</template>
           </el-table-column>
           <el-table-column label="块数" width="90" align="right">
             <template #default="{ row }">{{ row.numBlocks ?? '—' }}</template>
@@ -190,13 +172,6 @@ function nodeState(n: HdfsDataNodeInfo): string {
   text-align: right;
   font-size: 12px;
   color: $muted;
-}
-
-.empty {
-  color: $muted;
-  font-size: 13px;
-  padding: 16px 0;
-  text-align: center;
 }
 
 @media (max-width: 1100px) {
