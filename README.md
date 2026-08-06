@@ -87,10 +87,36 @@ scripts/npmctl.sh build     # 仅构建前端
 | `STINGRAY_URL` | `http://stingray.corp.shiqiao.com` | Stingray |
 | `DSWEB_USER/PASS` | — | 海豚自动登录凭证 |
 | `DS_TOKEN` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,任务监控项目列表即该 token 用户可见(无无权限项目);换 token 改此项后重启网关 |
+| `HDFS_SCAN_URL` | — | HDFS 磁盘检测服务地址(如 `http://127.0.0.1:9911`);配置后网关把 `/api/hdfs/*` 代理过去,不配则前端"磁盘检测"提示服务未就绪 |
 | `STINGRAY_USER/PASS` | — | Stingray 自动登录凭证 |
 | `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
 
 凭证只放 `.env.local`(gitignore),不入库;前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先。
+
+## 磁盘检测服务(独立进程,需 hadoop 客户端)
+
+前端"磁盘检测"依赖一个独立服务:下载 NameNode FsImage → 用官方 `hdfs oiv` 转 Delimited → 解析出全量文件 → 只缓存 Top 大/小文件。仅手动触发解析(点击检测按钮时),解析期间并发请求等待同一结果。
+
+**部署(服务器本机,需能执行 `hdfs oiv`)**:
+
+```bash
+scripts/hdfsscan.sh start      # 启动(端口 9911,日志 .hdfsscan.log)
+scripts/hdfsscan.sh stop       # 停止
+scripts/hdfsscan.sh status
+# 环境变量覆盖:HDFS_URL / PORT / OIV_CMD / TOP_N
+```
+
+**网关对接**:在 `.env.local`(或部署环境变量)加 `HDFS_SCAN_URL=http://127.0.0.1:9911`,重启网关后 `/api/hdfs/scan`、`/api/hdfs/delete` 自动代理到该服务。
+
+**服务契约**:
+
+```text
+GET  /health              → { ok:true }
+GET  /scan                → { code:0, data:{ scanTime, files:[{path,size,blocks,mtime}] } }
+POST /delete  {path,trash:true} → { code:0 }  (WebHDFS DELETE,移回收站)
+```
+
+> 未配置 `HDFS_SCAN_URL` 时,网关注入的 `/api/hdfs/*` 返回 `{code:1, msg:'磁盘检测服务未配置(HDFS_SCAN_URL)'}`,前端点击检测即提示。
 
 ## 子应用接入说明
 
