@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ClusterMetrics, QueueResources } from '@/types/yarn'
 import { formatMem } from '@/utils/format'
 
@@ -80,6 +80,15 @@ function queueConfigText(q: QueueResources): string {
 }
 
 const hasData = computed(() => memTotal.value > 0 || props.queueTree.length > 0)
+
+// 队列树数据刷新时重建表格:刷新后回到默认收起(常闭)状态,不再保持上次展开
+const tableKey = ref(0)
+watch(
+  () => props.queueTree,
+  () => {
+    tableKey.value++
+  }
+)
 </script>
 
 <template>
@@ -133,9 +142,9 @@ const hasData = computed(() => memTotal.value > 0 || props.queueTree.length > 0)
       <div class="panel-title">队列资源使用</div>
       <el-table
         v-if="queueTree.length"
+        :key="tableKey"
         :data="queueTree"
         row-key="queueName"
-        default-expand-all
         :tree-props="{ children: 'children' }"
       >
         <el-table-column prop="queueName" label="队列" min-width="170" />
