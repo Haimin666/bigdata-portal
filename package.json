@@ -10,8 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --noEmit",
-    "serve": "node --no-deprecation server/index.js",
-    "hdfs-scan": "node services/hdfs-scan/server.js"
+    "serve": "node --no-deprecation server/index.js"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

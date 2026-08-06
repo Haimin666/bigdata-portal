@@ -29,7 +29,5 @@ export default {
   stingrayUrl: process.env.STINGRAY_URL || 'http://stingray.corp.shiqiao.com',
   // 海豚 API token(配置项,不进前端):所有 /dolphinscheduler 请求由网关注入该 header,
   // 项目列表即该 token 用户可见的项目,天然不存在无权限项目
-  dsToken: process.env.DS_TOKEN || '',
-  // HDFS 磁盘检测服务地址(独立服务,见 services/hdfs-scan);为空则 /api/hdfs/* 返回未配置提示
-  hdfsScanUrl: process.env.HDFS_SCAN_URL || ''
+  dsToken: process.env.DS_TOKEN || ''
 }

@@ -341,25 +341,6 @@ app.get('/api/config', (req, res) =>
   })
 )
 
-// ── HDFS 磁盘检测服务代理(独立服务,见 services/hdfs-scan)────────
-// 配置了 HDFS_SCAN_URL 时把 /api/hdfs/* 转发到该服务(如 http://127.0.0.1:9911);
-// 未配置时返回明确提示,前端"磁盘检测"点击即知服务未就绪。
-if (config.hdfsScanUrl) {
-  app.use(
-    '/api/hdfs',
-    createProxyMiddleware({
-      target: config.hdfsScanUrl,
-      changeOrigin: true,
-      pathRewrite: { '^/api/hdfs': '' },
-      logLevel: 'warn'
-    })
-  )
-} else {
-  app.all('/api/hdfs/*', (req, res) =>
-    res.status(200).json({ code: 1, msg: '磁盘检测服务未配置(HDFS_SCAN_URL)' })
-  )
-}
-
 // ── SPA fallback(仅非 API 的 GET 路由) ────────────────────────
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next()
