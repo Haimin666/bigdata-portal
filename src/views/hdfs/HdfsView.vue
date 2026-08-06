@@ -37,8 +37,6 @@ async function loadDisk() {
 
 // ── 磁盘检测(大/小文件,由自建服务经 /api/hdfs/scan 提供)────────
 const scanPanel = ref<InstanceType<typeof HdfsScanPanel>>()
-// 服务未部署时隐藏检测入口:启动时探测一次,失败则标记不可用
-const scanAvailable = ref(true)
 
 async function onScan() {
   try {
@@ -48,7 +46,9 @@ async function onScan() {
       code?: number
       data?: { scanTime?: string; files?: ScannedFile[] }
     }
-    if (data.code !== 0 || !data.data) throw new Error(data.code ? '扫描失败' : '无数据')
+    if (data.code !== 0 || !data.data) {
+      throw new Error('磁盘检测服务未就绪,请先部署 fsimage 扫描服务')
+    }
     scanPanel.value?.onScanResult({ scanTime: data.data.scanTime, files: data.data.files ?? [] })
     scanPanel.value?.setScanning(false)
   } catch (e) {
@@ -78,14 +78,6 @@ async function onScanDelete(file: ScannedFile) {
 let diskTimer: number | undefined
 onMounted(() => {
   diskTimer = window.setInterval(() => loadDisk(), 30000)
-  // 探测磁盘检测服务是否可用(自建服务未部署时隐藏入口)
-  fetch('/api/hdfs/scan', { method: 'GET' })
-    .then((r) => {
-      if (!r.ok) scanAvailable.value = false
-    })
-    .catch(() => {
-      scanAvailable.value = false
-    })
 })
 onUnmounted(() => {
   if (diskTimer) clearInterval(diskTimer)
@@ -197,7 +189,7 @@ watch(path, (p) => {
   <div class="hdfs-view">
     <HdfsDiskOverviewView :data="diskData" :loading="diskLoading" />
 
-    <HdfsScanPanel ref="scanPanel" :available="scanAvailable" @scan="onScan" @delete="onScanDelete" />
+    <HdfsScanPanel ref="scanPanel" @scan="onScan" @delete="onScanDelete" />
 
     <div class="toolbar">
       <el-input

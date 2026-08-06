@@ -13,11 +13,6 @@ export interface ScannedFile {
   mtime?: number
 }
 
-defineProps<{
-  /** 扫描服务是否可用(服务未部署时为 false,隐藏检测入口) */
-  available: boolean
-}>()
-
 const emit = defineEmits<{
   scan: []
   delete: [file: ScannedFile]
@@ -76,7 +71,7 @@ defineExpose({
 </script>
 
 <template>
-  <div v-if="available" class="hdfs-scan">
+  <div class="hdfs-scan">
     <div class="scan-head">
       <span class="scan-title">磁盘检测</span>
       <el-button

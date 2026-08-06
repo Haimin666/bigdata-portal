@@ -72,7 +72,7 @@ function nodeState(n: HdfsDataNodeInfo): string {
       </div>
       <div class="mini stat">
         <span class="mini-label">节点</span>
-        <span class="mini-stat">{{ cluster?.NumLiveDataNodes ?? 0 }} 活 / {{ cluster?.NumDeadDataNodes ?? 0 }} 死</span>
+        <span class="mini-stat">{{ cluster?.NumLiveDataNodes ?? 0 }} 在线 / {{ cluster?.NumDeadDataNodes ?? 0 }} 离线</span>
         <span class="mini-meta">块 {{ cluster?.BlocksTotal ?? 0 }} · 负载 {{ cluster?.TotalLoad ?? 0 }}</span>
       </div>
     </div>

@@ -93,47 +93,27 @@ watch(
 
 <template>
   <div class="yarn-overview">
-    <!-- 总资源:内存 / CPU(vCores)进度条 + 集群统计 -->
-    <div class="overview-cards">
-      <div class="res-card">
-        <div class="res-head">
-          <span class="res-title">内存</span>
-          <span class="res-num">{{ memPercent }}%</span>
-        </div>
-        <el-progress :percentage="memPercent" :stroke-width="16" :show-text="false" :color="progressColor" />
-        <div class="res-foot">
-          已用 {{ formatMem(memUsed, humanize) }} / 总量 {{ formatMem(memTotal, humanize) }}
-        </div>
+    <!-- 总资源(紧凑条):内存 / CPU / 节点 / 应用 -->
+    <div class="overview-strip">
+      <div class="mini">
+        <span class="mini-label">内存</span>
+        <el-progress :percentage="memPercent" :stroke-width="8" :show-text="false" :color="progressColor" />
+        <span class="mini-meta">{{ memPercent }}% · {{ formatMem(memUsed, humanize) }}/{{ formatMem(memTotal, humanize) }}</span>
       </div>
-
-      <div class="res-card">
-        <div class="res-head">
-          <span class="res-title">CPU (vCores)</span>
-          <span class="res-num">{{ vcPercent }}%</span>
-        </div>
-        <el-progress :percentage="vcPercent" :stroke-width="16" :show-text="false" :color="progressColor" />
-        <div class="res-foot">已用 {{ vcUsed }} / 总量 {{ vcTotal }}</div>
+      <div class="mini">
+        <span class="mini-label">CPU (vCores)</span>
+        <el-progress :percentage="vcPercent" :stroke-width="8" :show-text="false" :color="progressColor" />
+        <span class="mini-meta">{{ vcPercent }}% · {{ vcUsed }}/{{ vcTotal }}</span>
       </div>
-
-      <div class="res-card res-card--stats">
-        <div class="stat-grid">
-          <div class="stat">
-            <div class="stat-label">节点 (活跃/总数)</div>
-            <div class="stat-value">{{ metrics.activeNodes ?? 0 }} / {{ metrics.totalNodes ?? 0 }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">运行应用</div>
-            <div class="stat-value">{{ metrics.appsRunning ?? 0 }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">排队应用</div>
-            <div class="stat-value">{{ metrics.appsPending ?? 0 }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">容器 (已分配/排队)</div>
-            <div class="stat-value">{{ metrics.containersAllocated ?? 0 }} / {{ metrics.containersPending ?? 0 }}</div>
-          </div>
-        </div>
+      <div class="mini stat">
+        <span class="mini-label">节点</span>
+        <span class="mini-stat">{{ metrics.activeNodes ?? 0 }} 在线 / {{ metrics.totalNodes ?? 0 }} 总数</span>
+        <span class="mini-meta">运行 {{ metrics.appsRunning ?? 0 }} · 排队 {{ metrics.appsPending ?? 0 }}</span>
+      </div>
+      <div class="mini stat">
+        <span class="mini-label">容器</span>
+        <span class="mini-stat">{{ metrics.containersAllocated ?? 0 }} 已分配</span>
+        <span class="mini-meta">排队 {{ metrics.containersPending ?? 0 }}</span>
       </div>
     </div>
 
@@ -185,63 +165,46 @@ watch(
 .yarn-overview {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
-.overview-cards {
+.overview-strip {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-
-.res-card {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
-  padding: 14px 16px;
+  padding: 8px 12px;
 }
 
-.res-head {
+.mini {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 10px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
-.res-title {
-  font-size: 14px;
+.mini-label {
+  font-size: 12px;
   color: $muted;
 }
 
-.res-num {
-  font-size: 24px;
-  font-weight: 600;
+.mini-meta {
+  font-size: 12px;
   color: $text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.res-foot {
-  margin-top: 8px;
-  font-size: 12px;
-  color: $muted;
+.mini.stat {
+  justify-content: center;
 }
 
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px 16px;
-  height: 100%;
-  align-content: center;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: $muted;
-}
-
-.stat-value {
-  font-size: 16px;
+.mini-stat {
+  font-size: 13px;
   font-weight: 600;
-  margin-top: 2px;
   color: $text;
 }
 
