@@ -13,7 +13,7 @@ import 'codemirror/mode/sql/sql.js'
 async function loadAddons() {
   // 空:不加载 addon
 }
-import { listDataSources, queryDb, type DbDataSource, type DbQueryResult } from '@/api/db'
+import { listDataSources, queryDb, type DbDataSource } from '@/api/db'
 
 defineOptions({ name: 'DbQueryView' })
 
@@ -23,7 +23,6 @@ const engine = ref<'mysql' | 'oracle' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
-const result = ref<DbQueryResult | null>(null)
 
 // 引擎过滤后的数据源
 const filteredDbs = computed(() =>
@@ -292,32 +291,103 @@ function formatSql() {
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
+interface QueryResultItem {
+  sql: string
+  columns: string[]
+  rows: Record<string, unknown>[]
+  costMs: number
+  truncated: boolean
+  error?: string
+}
+
+const results = ref<QueryResultItem[]>([])
+// 当前激活的结果序号(多条时 tab 切换)
+const activeResult = ref(0)
+
+/** 执行单条 SQL 并记录结果 */
+async function execOne(sql: string, index: number): Promise<void> {
+  try {
+    const r = await queryDb(db.value, sql)
+    results.value[index] = { sql, ...r }
+  } catch (e) {
+    results.value[index] = {
+      sql,
+      columns: [],
+      rows: [],
+      costMs: 0,
+      truncated: false,
+      error: e instanceof Error ? e.message : String(e)
+    }
+  }
+}
+
+/** 拆 SQL 段并过滤空段/纯注释段 */
+function getSegments(text: string): string[] {
+  return splitSqlSegments(text)
+    .map((s) => s.sql.trim())
+    .filter((s) => s && !/^\s*(--|\/\*)/.test(s))
+}
+
+/** 执行目标 SQL 段列表(逐条执行,支持多条) */
+async function execSegments(segs: string[]) {
+  results.value = segs.map((sql) => ({ sql, columns: [], rows: [], costMs: 0, truncated: false }))
+  activeResult.value = 0
+  for (let i = 0; i < segs.length; i++) {
+    await execOne(segs[i], i)
+  }
+}
+
+/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行) */
 async function runQuery() {
   if (!db.value) {
     ElMessage.warning('请先选择数据库')
     return
   }
-  const trimmed = getSqlToRun().trim()
-  if (!trimmed) {
+  const target = getSqlToRun().trim()
+  if (!target) {
     ElMessage.warning('请输入 SQL')
+    return
+  }
+  // 目标内容按分号拆段:选中多段/一段都逐条执行
+  const segs = getSegments(target)
+  if (!segs.length) {
+    ElMessage.warning('没有可执行的 SQL')
     return
   }
   loading.value = true
   error.value = ''
   try {
-    result.value = await queryDb(db.value, trimmed)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-    result.value = null
+    await execSegments(segs)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 执行全部段(分号切分,逐段执行) */
+async function runAllQuery() {
+  if (!db.value) {
+    ElMessage.warning('请先选择数据库')
+    return
+  }
+  if (!cm) return
+  const segs = getSegments(cm.getValue())
+  if (!segs.length) {
+    ElMessage.warning('没有可执行的 SQL')
+    return
+  }
+  loading.value = true
+  error.value = ''
+  try {
+    await execSegments(segs)
   } finally {
     loading.value = false
   }
 }
 
 // ── 数据导出(CSV,含 BOM 防 Excel 乱码)──────────────────────
-function exportCsv() {
-  const r = result.value
-  if (!r || !r.columns.length) {
+function exportCsv(idx?: number) {
+  const r = idx != null ? results.value[idx] : results.value[0]
+  if (!r || r.error || !r.columns.length) {
     ElMessage.warning('没有可导出的数据')
     return
   }
@@ -331,7 +401,8 @@ function exportCsv() {
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `${db.value || 'query'}_${Date.now()}.csv`
+  const suffix = results.value.length > 1 ? `_${(idx ?? 0) + 1}` : ''
+  a.download = `${db.value || 'query'}${suffix}_${Date.now()}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
 }
@@ -345,22 +416,6 @@ async function copyCell(val: unknown) {
     /* 忽略剪贴板权限 */
   }
 }
-
-// ── 结果分页(前端分页)──────────────────────────────────────
-const page = ref(1)
-const pageSize = ref(50)
-const pagedRows = computed(() => {
-  const rows = result.value?.rows ?? []
-  const start = (page.value - 1) * pageSize.value
-  return rows.slice(start, start + pageSize.value)
-})
-
-watch(
-  () => result.value,
-  () => {
-    page.value = 1
-  }
-)
 
 // ── 初始化 ───────────────────────────────────────────────────
 onMounted(async () => {
@@ -406,6 +461,7 @@ function isNumeric(val: unknown): boolean {
       <el-divider direction="vertical" />
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
+      <el-button :loading="loading" @click="runAllQuery">执行全部</el-button>
       <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
         执行<kbd class="exec-kbd">⌘↵</kbd>
       </el-button>
@@ -433,58 +489,51 @@ function isNumeric(val: unknown): boolean {
     <!-- 错误提示 -->
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
 
-    <!-- 结果区 -->
-    <div v-if="result" class="result-wrap">
-      <div class="result-header">
-        <span class="result-meta">
-          {{ result.columns.length }} 列 · {{ result.rows.length }} 行
-          <template v-if="result.truncated">(已截断)</template>
-          · {{ result.costMs }}ms
-        </span>
-        <div class="result-actions">
-          <el-button :icon="Download" size="small" @click="exportCsv">导出 CSV</el-button>
+    <!-- 结果区(支持多条,逐条展示) -->
+    <div v-if="results.length" class="results-wrap">
+      <div v-for="(r, idx) in results" :key="idx" class="result-wrap">
+        <div class="result-header">
+          <span class="result-meta">
+            <template v-if="results.length > 1">#{{ idx + 1 }} · </template>
+            {{ r.error ? '执行失败' : `${r.columns.length} 列 · ${r.rows.length} 行` }}
+            <template v-if="r.truncated">(已截断)</template>
+            <template v-if="!r.error">· {{ r.costMs }}ms</template>
+          </span>
+          <span class="result-sql" :title="r.sql">{{ r.sql }}</span>
+          <div class="result-actions">
+            <el-button v-if="!r.error" :icon="Download" size="small" @click="exportCsv(idx)">导出 CSV</el-button>
+          </div>
         </div>
-      </div>
-      <div v-loading="loading" class="result-table-wrap">
-        <el-table :data="pagedRows" border size="small" class="result-table">
-          <el-table-column type="index" label="#" width="55" align="center" :index="(i: number) => (page - 1) * pageSize + i + 1" />
-          <el-table-column
-            v-for="c in result.columns"
-            :key="c"
-            :prop="c"
-            :label="c"
-            min-width="140"
-            sortable
-            show-overflow-tooltip
-          >
-            <template #default="{ row }">
-              <span
-                v-if="row[c] == null"
-                class="cell-null"
-                @click="copyCell(row[c])"
-              >NULL</span>
-              <span
-                v-else
-                class="cell-val"
-                :class="{ 'cell-num': isNumeric(row[c]) }"
-                :title="`点击复制: ${row[c]}`"
-                @click="copyCell(row[c])"
-              >{{ row[c] }}</span>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-      <!-- 分页条 -->
-      <div v-if="result.rows.length > pageSize" class="result-pagination">
-        <el-pagination
-          v-model:current-page="page"
-          v-model:page-size="pageSize"
-          :total="result.rows.length"
-          :page-sizes="[50, 100, 200]"
-          layout="total, sizes, prev, pager, next"
-          background
-          small
-        />
+        <el-alert v-if="r.error" type="error" :title="r.error" show-icon :closable="false" class="err-alert" />
+        <div v-else v-loading="loading" class="result-table-wrap">
+          <el-table :data="r.rows.slice(0, 200)" border size="small" class="result-table">
+            <el-table-column type="index" label="#" width="55" align="center" />
+            <el-table-column
+              v-for="c in r.columns"
+              :key="c"
+              :prop="c"
+              :label="c"
+              min-width="140"
+              sortable
+              show-overflow-tooltip
+            >
+              <template #default="{ row }">
+                <span
+                  v-if="row[c] == null"
+                  class="cell-null"
+                  @click="copyCell(row[c])"
+                >NULL</span>
+                <span
+                  v-else
+                  class="cell-val"
+                  :class="{ 'cell-num': isNumeric(row[c]) }"
+                  :title="`点击复制: ${row[c]}`"
+                  @click="copyCell(row[c])"
+                >{{ row[c] }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
       </div>
     </div>
 
