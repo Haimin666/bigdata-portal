@@ -78,16 +78,8 @@ async function initEditor() {
     lineWrapping: true,
     theme: 'default'
   })
-  // SQL 关键词提示:输入字母时自动触发,Ctrl/Cmd+Space 手动
-  cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
-    const last = change.text[0] ?? ''
-    if (last && /[\w$]/.test(last)) sqlHint(c, change.to)
-  })
   // 括号匹配(自实现):光标邻接括号时高亮配对
-  cm.on('cursorActivity', (c: CodeMirror.Editor) => {
-    updateBracketMatch(c)
-    if (hintVisible.value) updateHintPos()
-  })
+  cm.on('cursorActivity', (c: CodeMirror.Editor) => updateBracketMatch(c))
   // 自动闭合括号
   cm.on('beforeChange', (c: CodeMirror.Editor, change: CodeMirror.EditorChangeCancellable) => {
     if (change.origin !== '+input') return
@@ -99,7 +91,7 @@ async function initEditor() {
       c.replaceRange(close, cur)
     }
   })
-  // Ctrl/Cmd + Enter 执行;↑↓/Esc/Tab 处理提示浮层
+  // Ctrl/Cmd + Enter 执行;Tab 缩进
   cm.setOption('extraKeys', {
     'Ctrl-Enter': () => {
       void runQuery()
@@ -107,36 +99,10 @@ async function initEditor() {
     'Cmd-Enter': () => {
       void runQuery()
     },
-    'Ctrl-Space': (c: CodeMirror.Editor) => sqlHint(c),
     Tab: (c: CodeMirror.Editor) => {
-      // 提示浮层开着 → 确认选中项;否则 Tab 缩进
-      if (hintVisible.value) {
-        const item = hintItems.value[hintIndex.value]
-        if (item) {
-          applyHint(item)
-          return
-        }
-      }
       const cur = c.getCursor()
       c.replaceSelection('  ')
       c.setCursor({ line: cur.line, ch: cur.ch + 2 })
-    },
-    Up: (c: CodeMirror.Editor) => {
-      if (hintVisible.value) {
-        hintIndex.value = (hintIndex.value - 1 + hintItems.value.length) % hintItems.value.length
-      } else {
-        c.execCommand('goLineUp')
-      }
-    },
-    Down: (c: CodeMirror.Editor) => {
-      if (hintVisible.value) {
-        hintIndex.value = (hintIndex.value + 1) % hintItems.value.length
-      } else {
-        c.execCommand('goLineDown')
-      }
-    },
-    Esc: () => {
-      if (hintVisible.value) closeHint()
     }
   })
 }
@@ -200,79 +166,6 @@ function updateBracketMatch(c: CodeMirror.Editor) {
       }
     }
   }
-}
-
-// ── 提示浮层状态 ─────────────────────────────────────────────
-const SQL_KEYWORDS = [
-  'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
-  'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'OUTER JOIN', 'ON', 'AS',
-  'AND', 'OR', 'NOT', 'NULL', 'IS', 'IN', 'LIKE', 'BETWEEN', 'EXISTS',
-  'DISTINCT', 'UNION', 'ALL', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
-  'ASC', 'DESC', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
-  'FETCH', 'FIRST', 'ROWS', 'ONLY', 'ROWNUM', 'WITH', 'TABLE', 'INSERT',
-  'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'INTO', 'VALUES', 'SET'
-]
-
-// 提示浮层状态
-const hintVisible = ref(false)
-const hintItems = ref<string[]>([])
-const hintIndex = ref(0)
-// 提示浮层位置(相对 canvas,光标移动时更新)
-const hintPos = ref({ left: 0, top: 0 })
-// 提示插入位置
-let hintFrom: { line: number; ch: number } | null = null
-let hintTo: { line: number; ch: number } | null = null
-
-function closeHint() {
-  hintVisible.value = false
-  hintItems.value = []
-  hintFrom = null
-  hintTo = null
-}
-
-/** 更新浮层位置:默认当前光标,可传指定位置(如输入后的 change.to) */
-function updateHintPos(pos?: { line: number; ch: number }) {
-  if (!cm || !canvasRef.value) return
-  const target = pos ?? cm.getCursor()
-  const coords = cm.cursorCoords(target, 'window')
-  const canvasRect = canvasRef.value.getBoundingClientRect()
-  hintPos.value = {
-    left: Math.max(0, coords.left - canvasRect.left),
-    top: Math.max(0, coords.bottom - canvasRect.top + 4)
-  }
-}
-
-function applyHint(item: string) {
-  if (!cm || !hintFrom || !hintTo) return
-  cm.replaceRange(item, hintFrom, hintTo)
-  closeHint()
-  cm.focus()
-}
-
-function sqlHint(c: CodeMirror.Editor, inputPos?: { line: number; ch: number }) {
-  // 用输入后位置(change.to)优先,否则当前光标
-  const cur = inputPos ?? c.getCursor()
-  const line = c.getLine(cur.line)
-  // 当前词边界:向前找字母/数字/下划线
-  let start = cur.ch
-  while (start > 0 && /[\w$]/.test(line[start - 1] ?? '')) start--
-  const token = line.slice(start, cur.ch)
-  if (!token) {
-    closeHint()
-    return
-  }
-  const up = token.toUpperCase()
-  const list = SQL_KEYWORDS.filter((k) => k.toUpperCase().startsWith(up)).slice(0, 12)
-  if (!list.length) {
-    closeHint()
-    return
-  }
-  hintItems.value = list
-  hintIndex.value = 0
-  hintFrom = { line: cur.line, ch: start }
-  hintTo = { line: cur.line, ch: cur.ch }
-  hintVisible.value = true
-  updateHintPos(cur)
 }
 
 onMounted(() => {
@@ -455,18 +348,6 @@ function isNumeric(val: unknown): boolean {
     <!-- SQL 画布(CodeMirror) -->
     <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
       <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
-      <!-- 关键词提示浮层 -->
-      <div v-if="hintVisible" class="sql-hint-popup" :style="{ left: hintPos.left + 'px', top: hintPos.top + 'px' }">
-        <div
-          v-for="(item, i) in hintItems"
-          :key="item"
-          class="hint-item"
-          :class="{ active: i === hintIndex }"
-          @mousedown.prevent="applyHint(item)"
-        >
-          {{ item }}
-        </div>
-      </div>
     </div>
 
     <!-- 拖拽分割条 -->
@@ -779,51 +660,6 @@ function isNumeric(val: unknown): boolean {
 :global(.CodeMirror-hint) {
   padding: 4px 10px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-/* 自绘提示浮层 */
-.sql-hint-popup {
-  position: absolute;
-  z-index: 30;
-  min-width: 140px;
-  max-height: 260px;
-  overflow: auto;
-  background: #2e3135;
-  border: 1px solid #45494f;
-  border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-  padding: 4px 0;
-
-  .sql-canvas.light & {
-    background: #fff;
-    border-color: #dde1e5;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
-  }
-}
-
-.hint-item {
-  padding: 5px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  color: #c8ccd4;
-  cursor: pointer;
-  white-space: nowrap;
-
-  &:hover,
-  &.active {
-    background: rgba(97, 175, 239, 0.2);
-    color: #fff;
-  }
-
-  .sql-canvas.light & {
-    color: #3a3f45;
-
-    &:hover,
-    &.active {
-      background: rgba(9, 105, 218, 0.1);
-      color: #0969da;
-    }
-  }
 }
 
 /* 拖拽分割条 */
