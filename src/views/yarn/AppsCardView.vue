@@ -97,6 +97,10 @@ function onSizeChange(s: number) {
 </template>
 
 <style scoped lang="scss">
+.apps-card-view {
+  flex-shrink: 0;
+}
+
 .app-card {
   margin-bottom: 16px;
 }

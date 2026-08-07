@@ -159,6 +159,7 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .overview-strip {

@@ -578,6 +578,7 @@ onMounted(async () => {
 }
 
 .task-table {
+  flex-shrink: 0;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
