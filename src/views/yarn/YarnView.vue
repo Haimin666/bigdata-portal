@@ -42,9 +42,14 @@ const rowsPerPage = ref(16)
 
 // ── URL 筛选同步 ─────────────────────────────────────────────
 let filtersFromUrl = false
+// URL 原本是否有筛选 query(applyFiltersFromQuery 时记录)
+let hadQuery = false
+// 首次 watch 触发是否已消费(区分"初始化写入"与"用户后续操作")
+let initialized = false
 
 function applyFiltersFromQuery() {
   const qs = route.query
+  hadQuery = Object.keys(qs).length > 0
   store.filters.states = qs.states ? String(qs.states).split(',').filter(Boolean) : ['RUNNING']
   store.filters.appTypes = qs.applicationTypes
     ? String(qs.applicationTypes).split(',').filter(Boolean)
@@ -52,12 +57,19 @@ function applyFiltersFromQuery() {
   store.filters.user = String(qs.user ?? '')
   store.filters.queue = String(qs.queue ?? '')
   filtersFromUrl = true
+  initialized = false
 }
 
 watch(
   () => ({ ...store.filters }),
   (f: AppFilters) => {
     if (!filtersFromUrl) return
+    // 首次触发是初始化写入:仅当 URL 原本有 query 才写回(保持 URL 与筛选一致),
+    // 否则跳过——避免篡改地址栏 + 与导航(router.push)竞态导致页面不跳转
+    if (!initialized) {
+      initialized = true
+      if (!hadQuery) return
+    }
     const query: Record<string, string> = {}
     if (f.states.length) query.states = f.states.join(',')
     if (f.user) query.user = f.user
