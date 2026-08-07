@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, Refresh } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh } from '@element-plus/icons-vue'
+import CodeMirror from 'codemirror'
+import 'codemirror/lib/codemirror.css'
+import 'codemirror/mode/sql/sql.js'
+import 'codemirror/addon/edit/matchbrackets.js'
+import 'codemirror/addon/edit/closebrackets.js'
+import 'codemirror/addon/selection/active-line.js'
 import { listDataSources, queryDb, type DbDataSource, type DbQueryResult } from '@/api/db'
 
 defineOptions({ name: 'DbQueryView' })
@@ -10,87 +16,105 @@ defineOptions({ name: 'DbQueryView' })
 const datasources = ref<DbDataSource[]>([])
 const engine = ref<'mysql' | 'oracle' | ''>('')
 const db = ref('')
-const sql = ref('')
 const loading = ref(false)
 const error = ref('')
 const result = ref<DbQueryResult | null>(null)
-const totalMs = ref(0)
-
-// SQL 编辑器:textarea 底层 + 高亮覆盖层
-const editorRef = ref<HTMLTextAreaElement>()
-const highlightRef = ref<HTMLElement>()
 
 // 引擎过滤后的数据源
 const filteredDbs = computed(() =>
   engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 )
 
-// 默认 SQL 模板
+// ── CodeMirror 编辑器 ───────────────────────────────────────
+const cmRef = ref<HTMLElement>()
+let cm: CodeMirror.Editor | null = null
+
 const DEFAULT_SQL = `-- 在这里编写 SQL 查询(只读)
 -- 快捷键:Ctrl/Cmd + Enter 执行
 SELECT * FROM your_table LIMIT 50;`
 
-// ── SQL 语法高亮(轻量,零依赖)──────────────────────────────
-const KEYWORDS = new Set([
-  'SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET',
-  'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'AS', 'AND', 'OR', 'NOT',
-  'NULL', 'IS', 'IN', 'LIKE', 'BETWEEN', 'DISTINCT', 'UNION', 'ALL', 'CASE',
-  'WHEN', 'THEN', 'ELSE', 'END', 'ASC', 'DESC', 'COUNT', 'SUM', 'AVG', 'MIN',
-  'MAX', 'EXISTS', 'FETCH', 'FIRST', 'ROWS', 'ONLY', 'ROWNUM', 'WITH', 'TABLE'
-])
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-/** 轻量 SQL 高亮:关键字(蓝)、字符串(绿)、注释(灰)、数字(橙) */
-function highlightSql(code: string): string {
-  // 逐 token 处理,保持换行
-  const tokens = code.split(/(\s+|'[^']*'|"[^"]*"|--[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?\*\/|\b\d+(?:\.\d+)?\b)/g)
-  return tokens
-    .map((t) => {
-      if (!t) return ''
-      if (/^\s+$/.test(t)) return escapeHtml(t)
-      if (/^--|^\/\//.test(t)) return `<span class="tok-comment">${escapeHtml(t)}</span>`
-      if (/^\/\*[\s\S]*\*\/$/.test(t)) return `<span class="tok-comment">${escapeHtml(t)}</span>`
-      if (/^'[^']*'$|^"[^"]*"$/.test(t)) return `<span class="tok-string">${escapeHtml(t)}</span>`
-      if (/^\d+(\.\d+)?$/.test(t)) return `<span class="tok-number">${escapeHtml(t)}</span>`
-      const up = t.toUpperCase()
-      if (KEYWORDS.has(up)) return `<span class="tok-keyword">${escapeHtml(up)}</span>`
-      return escapeHtml(t)
-    })
-    .join('')
-}
-
-const highlighted = computed(() => highlightSql(sql.value))
-
-// 编辑器滚动同步(textarea 与高亮层)
-function onScroll() {
-  if (editorRef.value && highlightRef.value) {
-    highlightRef.value.scrollTop = editorRef.value.scrollTop
-    highlightRef.value.scrollLeft = editorRef.value.scrollLeft
-  }
-}
-
-// Tab 键插入两个空格
-function onKeydown(e: KeyboardEvent) {
+function initEditor() {
+  if (!cmRef.value || cm) return
+  cm = CodeMirror(cmRef.value, {
+    value: DEFAULT_SQL,
+    mode: 'text/x-sql',
+    lineNumbers: true,
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    indentWithTabs: false,
+    tabSize: 2,
+    indentUnit: 2,
+    lineWrapping: true,
+    styleActiveLine: true,
+    theme: 'one-dark'
+  })
   // Ctrl/Cmd + Enter 执行
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-    e.preventDefault()
-    runQuery()
-    return
+  cm.setOption('extraKeys', {
+    'Ctrl-Enter': () => {
+      void runQuery()
+    },
+    'Cmd-Enter': () => {
+      void runQuery()
+    },
+    Tab: (c: CodeMirror.Editor) => {
+      const cur = c.getCursor()
+      c.replaceSelection('  ')
+      c.setCursor({ line: cur.line, ch: cur.ch + 2 })
+    }
+  })
+}
+
+onMounted(() => {
+  initEditor()
+})
+
+onUnmounted(() => {
+  if (cm) {
+    const el = cm.getWrapperElement()
+    el.remove()
+    cm = null
   }
-  if (e.key === 'Tab') {
-    e.preventDefault()
-    const el = editorRef.value
-    if (!el) return
-    const start = el.selectionStart
-    const end = el.selectionEnd
-    sql.value = sql.value.slice(0, start) + '  ' + sql.value.slice(end)
-    nextTick(() => {
-      el.selectionStart = el.selectionEnd = start + 2
-    })
+})
+
+// 画布高度(可拖拽)
+const canvasHeight = ref(280)
+const MIN_H = 120
+const MAX_H = 560
+
+function onDragStart(e: MouseEvent) {
+  const startY = e.clientY
+  const startH = canvasHeight.value
+  document.body.style.cursor = 'row-resize'
+  document.body.style.userSelect = 'none'
+  const onMove = (ev: MouseEvent) => {
+    canvasHeight.value = Math.min(MAX_H, Math.max(MIN_H, startH + ev.clientY - startY))
   }
+  const onUp = () => {
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
+/** 当前 SQL 文本 */
+function getSql(): string {
+  return cm ? cm.getValue() : ''
+}
+
+// ── SQL 格式化(简单:关键字换行缩进)─────────────────────────
+function formatSql() {
+  if (!cm) return
+  const s = cm.getValue().trim()
+  if (!s) return
+  const keywords = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'UNION', 'FETCH', 'OFFSET']
+  let out = s
+  for (const kw of keywords) {
+    out = out.replace(new RegExp(`\\b${kw}\\b`, 'gi'), (m: string) => `\n${m.toUpperCase()}`)
+  }
+  cm.setValue(out.replace(/\n{2,}/g, '\n').trim())
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
@@ -99,17 +123,15 @@ async function runQuery() {
     ElMessage.warning('请先选择数据库')
     return
   }
-  const trimmed = sql.value.trim()
+  const trimmed = getSql().trim()
   if (!trimmed) {
     ElMessage.warning('请输入 SQL')
     return
   }
   loading.value = true
   error.value = ''
-  const t0 = performance.now()
   try {
     result.value = await queryDb(db.value, trimmed)
-    totalMs.value = Math.round(performance.now() - t0)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
     result.value = null
@@ -140,13 +162,37 @@ function exportCsv() {
   URL.revokeObjectURL(a.href)
 }
 
+// ── 单元格点击复制 ──────────────────────────────────────────
+async function copyCell(val: unknown) {
+  try {
+    await navigator.clipboard.writeText(val == null ? '' : String(val))
+    ElMessage.success('已复制')
+  } catch {
+    /* 忽略剪贴板权限 */
+  }
+}
+
+// ── 结果分页(前端分页)──────────────────────────────────────
+const page = ref(1)
+const pageSize = ref(50)
+const pagedRows = computed(() => {
+  const rows = result.value?.rows ?? []
+  const start = (page.value - 1) * pageSize.value
+  return rows.slice(start, start + pageSize.value)
+})
+
+watch(
+  () => result.value,
+  () => {
+    page.value = 1
+  }
+)
+
 // ── 初始化 ───────────────────────────────────────────────────
 onMounted(async () => {
-  sql.value = DEFAULT_SQL
   try {
     datasources.value = await listDataSources()
     if (datasources.value.length) {
-      // 默认选中第一个类型
       engine.value = datasources.value[0].type
       db.value = filteredDbs.value[0]?.name || ''
     } else {
@@ -157,12 +203,16 @@ onMounted(async () => {
   }
 })
 
-// 引擎切换 → 重置 db 到该引擎第一个
 watch(engine, (val) => {
   if (!val) return
   const first = datasources.value.find((d) => d.type === val)
   db.value = first?.name || ''
 })
+
+/** 单元格是否数值(右对齐) */
+function isNumeric(val: unknown): boolean {
+  return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
+}
 </script>
 
 <template>
@@ -177,26 +227,27 @@ watch(engine, (val) => {
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       <div class="toolbar-spacer" />
+      <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
-      <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">执行</el-button>
+      <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
+        执行<kbd class="exec-kbd">⌘↵</kbd>
+      </el-button>
     </div>
 
-    <!-- SQL 画布(编辑器 + 高亮) -->
-    <div class="sql-canvas">
-      <div class="sql-gutter" ref="highlightRef">
-        <pre class="sql-highlight" v-html="highlighted"></pre>
-      </div>
-      <textarea
-        ref="editorRef"
-        v-model="sql"
-        class="sql-input"
-        spellcheck="false"
-        autocomplete="off"
-        @scroll="onScroll"
-        @keydown="onKeydown"
-      ></textarea>
+    <!-- SQL 画布(CodeMirror) -->
+    <div class="sql-canvas" :style="{ height: canvasHeight + 'px' }">
+      <div ref="cmRef" class="sql-editor"></div>
     </div>
-    <div class="sql-hint">Ctrl/Cmd + Enter 执行 · Tab 缩进</div>
+
+    <!-- 拖拽分割条 -->
+    <div class="sql-dragbar" @mousedown="onDragStart">
+      <span class="drag-dots">⠿</span>
+    </div>
+    <div class="sql-hint">
+      <span>Ctrl/Cmd + Enter 执行</span>
+      <span>· Tab 缩进</span>
+      <span>· 拖拽分割条调整画布高度</span>
+    </div>
 
     <!-- 错误提示 -->
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
@@ -205,16 +256,17 @@ watch(engine, (val) => {
     <div v-if="result" class="result-wrap">
       <div class="result-header">
         <span class="result-meta">
-          共 {{ result.rows.length }} 行
+          {{ result.columns.length }} 列 · {{ result.rows.length }} 行
           <template v-if="result.truncated">(已截断)</template>
-          · 耗时 {{ result.costMs }}ms
+          · {{ result.costMs }}ms
         </span>
         <div class="result-actions">
           <el-button :icon="Download" size="small" @click="exportCsv">导出 CSV</el-button>
         </div>
       </div>
       <div v-loading="loading" class="result-table-wrap">
-        <el-table :data="result.rows" border size="small" class="result-table">
+        <el-table :data="pagedRows" border size="small" class="result-table">
+          <el-table-column type="index" label="#" width="55" align="center" :index="(i: number) => (page - 1) * pageSize + i + 1" />
           <el-table-column
             v-for="c in result.columns"
             :key="c"
@@ -225,10 +277,33 @@ watch(engine, (val) => {
             show-overflow-tooltip
           >
             <template #default="{ row }">
-              {{ row[c] == null ? 'NULL' : row[c] }}
+              <span
+                v-if="row[c] == null"
+                class="cell-null"
+                @click="copyCell(row[c])"
+              >NULL</span>
+              <span
+                v-else
+                class="cell-val"
+                :class="{ 'cell-num': isNumeric(row[c]) }"
+                :title="`点击复制: ${row[c]}`"
+                @click="copyCell(row[c])"
+              >{{ row[c] }}</span>
             </template>
           </el-table-column>
         </el-table>
+      </div>
+      <!-- 分页条 -->
+      <div v-if="result.rows.length > pageSize" class="result-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="result.rows.length"
+          :page-sizes="[50, 100, 200]"
+          layout="total, sizes, prev, pager, next"
+          background
+          small
+        />
       </div>
     </div>
 
@@ -244,7 +319,7 @@ watch(engine, (val) => {
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
   height: 100%;
   box-sizing: border-box;
   overflow: auto;
@@ -273,73 +348,122 @@ watch(engine, (val) => {
   flex: 1;
 }
 
-/* ── SQL 画布 ─────────────────────────────────────────────── */
+.exec-kbd {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* ── SQL 画布(CodeMirror) ────────────────────────────────── */
 .sql-canvas {
   position: relative;
   display: flex;
-  background: #1e1e1e;
+  background: #282c34;
   border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
-  height: 280px;
 }
 
-.sql-gutter {
+.sql-editor {
   flex: 1;
-  overflow: hidden;
-  padding: 12px 0 12px 16px;
-}
+  min-height: 0;
 
-.sql-highlight {
-  margin: 0;
-  padding: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #d4d4d4;
-  white-space: pre-wrap;
-  word-break: break-all;
-  min-height: 100%;
+  /* CodeMirror One Dark 主题覆写 */
+  :deep(.CodeMirror) {
+    height: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    background: #282c34;
+    color: #abb2bf;
+  }
 
-  :deep(.tok-keyword) {
-    color: #569cd6;
+  :deep(.CodeMirror-gutters) {
+    background: #21252b;
+    border-right: 1px solid #181a1f;
+  }
+
+  :deep(.CodeMirror-linenumber) {
+    color: #495162;
+    padding: 0 8px 0 4px;
+  }
+
+  :deep(.CodeMirror-cursor) {
+    border-left: 2px solid #fff;
+  }
+
+  :deep(.CodeMirror-selected) {
+    background: rgba(97, 175, 239, 0.25);
+  }
+
+  :deep(.CodeMirror-activeline-background) {
+    background: rgba(97, 175, 239, 0.08);
+  }
+
+  /* SQL 关键词/字符串/注释/数字配色(One Dark) */
+  :deep(.cm-keyword) {
+    color: #c678dd;
     font-weight: 600;
   }
-  :deep(.tok-string) {
-    color: #ce9178;
+  :deep(.cm-string) {
+    color: #98c379;
   }
-  :deep(.tok-comment) {
-    color: #6a9955;
+  :deep(.cm-comment) {
+    color: #5c6370;
     font-style: italic;
   }
-  :deep(.tok-number) {
-    color: #b5cea8;
+  :deep(.cm-number) {
+    color: #d19a66;
+  }
+  :deep(.cm-builtin) {
+    color: #61afef;
+  }
+  :deep(.cm-variable) {
+    color: #e06c75;
+  }
+  :deep(.cm-operator) {
+    color: #56b6c2;
+  }
+  :deep(.cm-matchingbracket) {
+    color: #e5c07b;
+    font-weight: 700;
+    background: rgba(229, 192, 123, 0.2);
+    border-radius: 2px;
   }
 }
 
-.sql-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 12px 16px;
-  background: transparent;
-  color: transparent;
-  caret-color: #fff;
-  border: none;
-  outline: none;
-  resize: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
+/* 拖拽分割条 */
+.sql-dragbar {
+  height: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  color: $muted;
+  flex-shrink: 0;
+  user-select: none;
+
+  &:hover {
+    color: $primary;
+    background: rgba(94, 106, 210, 0.06);
+    border-radius: 3px;
+  }
+}
+
+.drag-dots {
+  font-size: 12px;
+  letter-spacing: 2px;
 }
 
 .sql-hint {
   font-size: 12px;
   color: $muted;
   flex-shrink: 0;
+  display: flex;
+  gap: 4px;
 }
 
 .err-alert {
@@ -382,17 +506,45 @@ watch(engine, (val) => {
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
-  /* 与 YARN 表格一致:表头浅灰底、紧凑行距由全局 .el-table 统一 */
 }
 
 .result-table {
   width: 100%;
-  /* 表头吸顶,滚动时表头固定(类似 YARN 表格体验) */
+
   :deep(th.el-table__cell) {
     position: sticky;
     top: 0;
     z-index: 1;
   }
+
+  :deep(.cell-null) {
+    color: $muted;
+    font-style: italic;
+    cursor: pointer;
+  }
+
+  :deep(.cell-val) {
+    cursor: pointer;
+
+    &:hover {
+      color: $primary;
+    }
+  }
+
+  :deep(.cell-num) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: right;
+  }
+}
+
+.result-pagination {
+  display: flex;
+  justify-content: flex-end;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 8px 12px;
+  flex-shrink: 0;
 }
 
 .empty-state {
