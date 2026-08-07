@@ -1,25 +1,15 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { menus } from '@/config/menu'
-import { Expand, Fold, Refresh, FullScreen } from '@element-plus/icons-vue'
+import { Expand, Fold } from '@element-plus/icons-vue'
 
 defineOptions({ name: 'HeaderBar' })
 
 const props = defineProps<{
   collapsed: boolean
-  fullscreen: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-collapse'): void
-  (e: 'refresh'): void
-  (e: 'toggle-fullscreen'): void
 }>()
-
-const route = useRoute()
-
-const title = computed(() => menus.find((m) => m.path === route.path)?.title || '')
 </script>
 
 <template>
@@ -28,11 +18,6 @@ const title = computed(() => menus.find((m) => m.path === route.path)?.title || 
       <Expand v-if="props.collapsed" />
       <Fold v-else />
     </el-icon>
-    <span class="header-title">{{ title }}</span>
-    <div class="header-actions">
-      <el-icon class="header-icon" @click="emit('refresh')"><Refresh /></el-icon>
-      <el-icon class="header-icon" @click="emit('toggle-fullscreen')"><FullScreen /></el-icon>
-    </div>
   </el-header>
 </template>
 
@@ -43,22 +28,13 @@ const title = computed(() => menus.find((m) => m.path === route.path)?.title || 
   gap: 12px;
   background: #fff;
   border-bottom: 1px solid $border;
+  height: 40px;
 }
 
 .header-icon {
   font-size: 18px;
   cursor: pointer;
   color: $muted;
-}
-
-.header-title {
-  font-weight: 600;
-  color: $text;
-}
-
-.header-actions {
-  display: flex;
-  gap: 12px;
-  margin-left: auto;
+  margin-left: 12px;
 }
 </style>

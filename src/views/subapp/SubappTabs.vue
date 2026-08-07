@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Close } from '@element-plus/icons-vue'
+import { Close, Refresh, FullScreen } from '@element-plus/icons-vue'
 import type { MenuItem } from '@/config/menu'
 
 defineOptions({ name: 'SubappTabs' })
@@ -7,7 +7,7 @@ defineOptions({ name: 'SubappTabs' })
 export interface PortalTab {
   path: string
   menu: MenuItem
-  /** 原生视图重建计数(顶栏刷新用),子应用恒为 0 */
+  /** 原生视图重建计数(刷新用),子应用恒为 0 */
   refreshKey: number
 }
 
@@ -19,6 +19,8 @@ defineProps<{
 const emit = defineEmits<{
   switch: [path: string]
   close: [path: string]
+  refresh: []
+  toggleFullscreen: []
 }>()
 </script>
 
@@ -35,6 +37,10 @@ const emit = defineEmits<{
       <el-icon class="tab-close" @click.stop="emit('close', t.path)">
         <Close />
       </el-icon>
+    </div>
+    <div class="tab-actions">
+      <el-icon class="action-icon" title="刷新" @click="emit('refresh')"><Refresh /></el-icon>
+      <el-icon class="action-icon" title="全屏" @click="emit('toggleFullscreen')"><FullScreen /></el-icon>
     </div>
   </div>
 </template>
@@ -86,6 +92,24 @@ const emit = defineEmits<{
   &:hover {
     color: #fff;
     background: $primary;
+  }
+}
+
+.tab-actions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+  padding: 0 4px;
+  align-self: center;
+}
+
+.action-icon {
+  font-size: 16px;
+  cursor: pointer;
+  color: $muted;
+
+  &:hover {
+    color: $primary;
   }
 }
 </style>

@@ -17,6 +17,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'switch', path: string): void
   (e: 'close', path: string): void
+  (e: 'refresh'): void
+  (e: 'toggle-fullscreen'): void
 }>()
 
 const route = useRoute()
@@ -40,6 +42,8 @@ const activePath = computed(() => route.path)
       :active-path="activePath"
       @switch="(p: string) => emit('switch', p)"
       @close="(p: string) => emit('close', p)"
+      @refresh="emit('refresh')"
+      @toggle-fullscreen="emit('toggle-fullscreen')"
     />
     <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
     <div class="view-stage">

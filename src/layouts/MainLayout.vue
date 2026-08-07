@@ -97,13 +97,16 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
     <el-container>
       <HeaderBar
         :collapsed="collapsed"
-        :fullscreen="fullscreen"
         @toggle-collapse="collapsed = !collapsed"
-        @refresh="handleRefresh"
-        @toggle-fullscreen="toggleFullscreen"
       />
       <el-main class="portal-main">
-        <TabStage :tabs="tabs" @switch="handleTabSwitch" @close="closeTab" />
+        <TabStage
+          :tabs="tabs"
+          @switch="handleTabSwitch"
+          @close="closeTab"
+          @refresh="handleRefresh"
+          @toggle-fullscreen="toggleFullscreen"
+        />
       </el-main>
     </el-container>
   </el-container>
