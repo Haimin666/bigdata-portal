@@ -161,7 +161,8 @@ function open(url: string) {
 .apps-pagination {
   display: flex;
   justify-content: flex-end;
-  padding: 12px 16px;
+  align-items: center;
+  padding: 10px 12px;
   border-top: 1px solid $border;
 }
 </style>

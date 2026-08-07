@@ -149,6 +149,10 @@ function onSizeChange(s: number) {
 .apps-pagination {
   display: flex;
   justify-content: flex-end;
-  padding: 8px 0;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid $border;
+  background: $panel;
+  border-radius: 0 0 6px 6px;
 }
 </style>

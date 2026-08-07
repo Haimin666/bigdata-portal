@@ -581,6 +581,7 @@ onMounted(async () => {
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
+  overflow: hidden;
 }
 
 .sub-wrap {

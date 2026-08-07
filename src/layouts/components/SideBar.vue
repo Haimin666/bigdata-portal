@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus } from '@/config/menu'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Expand, Fold } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 defineOptions({ name: 'SideBar' })
@@ -50,12 +50,9 @@ const activePath = computed(() => route.path)
         </template>
       </el-menu-item>
     </el-menu>
-    <!-- 折叠按钮:位于侧边栏右边缘栏线,垂直居中 -->
-    <div class="collapse-bar" @click="emit('toggle-collapse')">
-      <el-icon class="collapse-icon">
-        <Expand v-if="props.collapsed" />
-        <Fold v-else />
-      </el-icon>
+    <!-- 折叠按钮:位于侧边栏右边缘栏线,垂直居中,箭头指示展开方向 -->
+    <div class="collapse-bar" :class="{ collapsed: props.collapsed }" @click="emit('toggle-collapse')">
+      <span class="collapse-arrow"></span>
     </div>
   </el-aside>
 </template>
@@ -66,7 +63,7 @@ const activePath = computed(() => route.path)
   background: #f0f1f5;
   border-right: 1px solid $border;
   transition: width 0.2s;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .portal-logo {
@@ -87,29 +84,41 @@ const activePath = computed(() => route.path)
 
 .collapse-bar {
   position: absolute;
-  right: 0;
+  right: -1px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 44px;
+  width: 16px;
+  height: 40px;
   border: 1px solid $border;
-  border-right: none;
-  border-radius: 6px 0 0 6px;
   background: $panel;
   cursor: pointer;
-  z-index: 10;
-  color: $muted;
+  z-index: 20;
+  border-radius: 0 6px 6px 0;
+  box-shadow: 1px 0 4px rgba(0, 0, 0, 0.06);
 
   &:hover {
-    color: $primary;
-    background: #fff;
+    border-color: $primary;
+    .collapse-arrow {
+      border-color: $primary;
+    }
   }
 }
 
-.collapse-icon {
-  font-size: 14px;
+/* 纯 CSS 箭头:指向折叠后的方向(展开时→ 表示可收,折叠时← 表示可展) */
+.collapse-arrow {
+  width: 6px;
+  height: 6px;
+  border-top: 2px solid $muted;
+  border-right: 2px solid $muted;
+  transform: rotate(45deg);
+  transition: transform 0.2s;
+
+  /* 折叠时箭头反向 */
+  .collapsed & {
+    transform: rotate(225deg);
+  }
 }
 </style>

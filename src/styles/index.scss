@@ -17,3 +17,37 @@ body {
   box-sizing: border-box;
 }
 
+/* ── 统一表格样式:HDFS/YARN/任务监控 共用 ─────────────────────
+   与 HdfsView 的 .file-table 基调一致:$panel 底 + 6px 圆角;
+   默认字号 13px、表头 13px 600,行高紧凑(12px 内边距) */
+.el-table {
+  font-size: 13px;
+  --el-table-header-bg-color: #f7f8fa;
+  --el-table-border-color: $border;
+  --el-table-row-hover-bg-color: #f5f6fa;
+
+  th.el-table__cell {
+    font-size: 13px;
+    font-weight: 600;
+    color: $muted;
+    background: var(--el-table-header-bg-color);
+    padding: 10px 0;
+  }
+
+  td.el-table__cell {
+    padding: 8px 0;
+    color: $text;
+  }
+}
+
+/* 表格分页条(独立 bar,与 HdfsView .pagination-bar 一致) */
+.table-pagination-bar {
+  display: flex;
+  justify-content: flex-end;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+
