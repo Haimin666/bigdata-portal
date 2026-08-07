@@ -67,6 +67,16 @@ uvicorn main:app --host 0.0.0.0 --port 8756
 
 ## 平台接入
 
-平台网关 `server/config.js` 配置 `DB_PROXY_URL`(如 `http://客户机IP:8756`),
-网关 `/api/db/*` 会代理到该地址(带 SSRF 白名单校验)。
+平台网关 `server/config.js` 配置 `DB_PROXY_URL`(如 `http://10.25.15.106:8756`),
+网关 `/api/db/*` 会代理到该地址。
+
+部署时在平台服务器的 `.env.local` 加一行:
+
+```bash
+# 客户机 db-proxy 地址(部署 IP 见上;端口与客户机 LISTEN_PORT 一致)
+DB_PROXY_URL=http://10.25.15.106:8756
+```
+
 前端「即时查询」视图走 `/api/db/query`。
+
+> 提示:客户机防火墙需放行 8756 端口,并确认平台服务器能访问 `10.25.15.106:8756`(可用 `curl http://10.25.15.106:8756/health` 验证)。
