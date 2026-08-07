@@ -5,5 +5,7 @@
 fastapi>=0.100,<0.104
 uvicorn>=0.15,<0.23
 pymysql>=1.0,<2.0
-# Oracle 支持:thin 模式无需 Oracle Instant Client;1.4.x 兼容 Python 3.7
-oracledb>=1.4,<2.0
+# Oracle 支持:thin 模式无需 Oracle Instant Client。
+# 版本兼容 Python 3.7:1.4.x ~ 2.1.x(2.5+ 要求 Python>=3.8)。
+# 2.x thin 模式对 19c 支持更好(解决 1.4 的 DPY-3010)。
+oracledb>=1.4,<2.2
