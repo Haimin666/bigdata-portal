@@ -142,12 +142,17 @@ class DataSource:
         if not _HAS_ORACLE:
             raise RuntimeError("oracledb not installed")
         dsn = f"{self.host}:{self.port}/{self.service}"
-        return oracledb.connect(
-            user=self.user,
-            password=self.password,
-            dsn=dsn,
-            connect_timeout=connect_timeout,
-        )
+        kwargs: Dict[str, Any] = {
+            "user": self.user,
+            "password": self.password,
+            "dsn": dsn,
+        }
+        # oracledb 1.x 不支持 connect_timeout(2.x 才有),按版本自适应:
+        # 传了报 TypeError 就去掉该参数重试
+        try:
+            return oracledb.connect(**kwargs, connect_timeout=connect_timeout)
+        except TypeError:
+            return oracledb.connect(**kwargs)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
