@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -29,9 +29,30 @@ const filteredDbs = computed(() =>
 const cmRef = ref<HTMLElement>()
 let cm: CodeMirror.Editor | null = null
 
-const DEFAULT_SQL = `-- 在这里编写 SQL 查询(只读)
--- 快捷键:Ctrl/Cmd + Enter 执行
-SELECT * FROM your_table LIMIT 50;`
+// 默认 SQL:清空(用户自行编写)
+const DEFAULT_SQL = ''
+
+// 编辑器主题:dark(默认)/ light,持久化到 localStorage
+const THEME_KEY = 'db-query-theme'
+const themeMode = ref<'dark' | 'light'>(
+  localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
+)
+
+// 字体大小(px),默认 15(比原 13 大 2),持久化
+const FONT_KEY = 'db-query-fontsize'
+const fontSize = ref(parseInt(localStorage.getItem(FONT_KEY) || '15', 10) || 15)
+const MIN_FONT = 11
+const MAX_FONT = 24
+
+function toggleTheme() {
+  themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
+  localStorage.setItem(THEME_KEY, themeMode.value)
+}
+
+function adjustFont(delta: number) {
+  fontSize.value = Math.min(MAX_FONT, Math.max(MIN_FONT, fontSize.value + delta))
+  localStorage.setItem(FONT_KEY, String(fontSize.value))
+}
 
 function initEditor() {
   if (!cmRef.value || cm) return
@@ -46,7 +67,7 @@ function initEditor() {
     indentUnit: 2,
     lineWrapping: true,
     styleActiveLine: true,
-    theme: 'one-dark'
+    theme: 'default'
   })
   // Ctrl/Cmd + Enter 执行
   cm.setOption('extraKeys', {
@@ -227,16 +248,24 @@ function isNumeric(val: unknown): boolean {
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       <div class="toolbar-spacer" />
+      <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
+      <span class="font-size">{{ fontSize }}px</span>
+      <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
+      <el-divider direction="vertical" />
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
       <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
         执行<kbd class="exec-kbd">⌘↵</kbd>
       </el-button>
+      <el-divider direction="vertical" />
+      <el-button class="theme-btn" text :title="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" @click="toggleTheme">
+        <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
+      </el-button>
     </div>
 
     <!-- SQL 画布(CodeMirror) -->
-    <div class="sql-canvas" :style="{ height: canvasHeight + 'px' }">
-      <div ref="cmRef" class="sql-editor"></div>
+    <div class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
+      <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
     </div>
 
     <!-- 拖拽分割条 -->
@@ -348,6 +377,24 @@ function isNumeric(val: unknown): boolean {
   flex: 1;
 }
 
+.font-btn {
+  min-width: 28px;
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+.font-size {
+  font-size: 12px;
+  color: $muted;
+  min-width: 34px;
+  text-align: center;
+}
+
+.theme-btn {
+  padding: 4px;
+  font-size: 16px;
+}
+
 .exec-kbd {
   margin-left: 6px;
   padding: 1px 5px;
@@ -365,6 +412,10 @@ function isNumeric(val: unknown): boolean {
   border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
+
+  &.light {
+    background: #fff;
+  }
 }
 
 .sql-editor {
@@ -374,16 +425,14 @@ function isNumeric(val: unknown): boolean {
   display: flex;
   overflow: hidden;
 
-  /* CodeMirror One Dark 主题覆写 */
+  /* CodeMirror 公共(字体由 --cm-font-size 控制) */
   :deep(.CodeMirror) {
     flex: 1;
     width: 100%;
     height: 100%;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 13px;
+    font-size: var(--cm-font-size, 15px);
     line-height: 1.6;
-    background: #282c34;
-    color: #abb2bf;
   }
 
   :deep(.CodeMirror-scroll) {
@@ -392,18 +441,13 @@ function isNumeric(val: unknown): boolean {
     overflow: auto;
   }
 
-  :deep(.CodeMirror-gutters) {
-    background: #21252b;
-    border-right: 1px solid #181a1f;
-  }
-
   :deep(.CodeMirror-linenumber) {
-    color: #495162;
+    font-size: var(--cm-font-size, 15px);
     padding: 0 8px 0 4px;
   }
 
   :deep(.CodeMirror-cursor) {
-    border-left: 2px solid #fff;
+    border-left: 2px solid;
   }
 
   :deep(.CodeMirror-selected) {
@@ -414,35 +458,115 @@ function isNumeric(val: unknown): boolean {
     background: rgba(97, 175, 239, 0.08);
   }
 
-  /* SQL 关键词/字符串/注释/数字配色(One Dark) */
-  :deep(.cm-keyword) {
-    color: #c678dd;
-    font-weight: 600;
-  }
-  :deep(.cm-string) {
-    color: #98c379;
-  }
-  :deep(.cm-comment) {
-    color: #5c6370;
-    font-style: italic;
-  }
-  :deep(.cm-number) {
-    color: #d19a66;
-  }
-  :deep(.cm-builtin) {
-    color: #61afef;
-  }
-  :deep(.cm-variable) {
-    color: #e06c75;
-  }
-  :deep(.cm-operator) {
-    color: #56b6c2;
-  }
   :deep(.cm-matchingbracket) {
-    color: #e5c07b;
     font-weight: 700;
     background: rgba(229, 192, 123, 0.2);
     border-radius: 2px;
+  }
+
+  /* 语法 token 公共字体 */
+  :deep(.cm-keyword),
+  :deep(.cm-string),
+  :deep(.cm-comment),
+  :deep(.cm-number),
+  :deep(.cm-builtin),
+  :deep(.cm-variable),
+  :deep(.cm-operator) {
+    font-size: var(--cm-font-size, 15px);
+  }
+
+  /* ── 深色主题(One Dark) ─────────────────────────────── */
+  .sql-canvas.dark & {
+    :deep(.CodeMirror) {
+      background: #282c34;
+      color: #abb2bf;
+    }
+    :deep(.CodeMirror-gutters) {
+      background: #21252b;
+      border-right: 1px solid #181a1f;
+    }
+    :deep(.CodeMirror-linenumber) {
+      color: #495162;
+    }
+    :deep(.CodeMirror-cursor) {
+      border-left-color: #fff;
+    }
+    :deep(.cm-keyword) {
+      color: #c678dd;
+      font-weight: 600;
+    }
+    :deep(.cm-string) {
+      color: #98c379;
+    }
+    :deep(.cm-comment) {
+      color: #5c6370;
+      font-style: italic;
+    }
+    :deep(.cm-number) {
+      color: #d19a66;
+    }
+    :deep(.cm-builtin) {
+      color: #61afef;
+    }
+    :deep(.cm-variable) {
+      color: #e06c75;
+    }
+    :deep(.cm-operator) {
+      color: #56b6c2;
+    }
+    :deep(.cm-matchingbracket) {
+      color: #e5c07b;
+    }
+  }
+
+  /* ── 浅色主题(GitHub 风格) ───────────────────────────── */
+  .sql-canvas.light & {
+    :deep(.CodeMirror) {
+      background: #fff;
+      color: #24292e;
+    }
+    :deep(.CodeMirror-gutters) {
+      background: #f6f8fa;
+      border-right: 1px solid #d0d7de;
+    }
+    :deep(.CodeMirror-linenumber) {
+      color: #6e7781;
+    }
+    :deep(.CodeMirror-cursor) {
+      border-left-color: #24292e;
+    }
+    :deep(.CodeMirror-selected) {
+      background: rgba(9, 105, 218, 0.2);
+    }
+    :deep(.CodeMirror-activeline-background) {
+      background: rgba(9, 105, 218, 0.05);
+    }
+    :deep(.cm-keyword) {
+      color: #cf222e;
+      font-weight: 600;
+    }
+    :deep(.cm-string) {
+      color: #0a3069;
+    }
+    :deep(.cm-comment) {
+      color: #6e7781;
+      font-style: italic;
+    }
+    :deep(.cm-number) {
+      color: #0550ae;
+    }
+    :deep(.cm-builtin) {
+      color: #8250df;
+    }
+    :deep(.cm-variable) {
+      color: #953800;
+    }
+    :deep(.cm-operator) {
+      color: #0550ae;
+    }
+    :deep(.cm-matchingbracket) {
+      color: #cf222e;
+    }
   }
 }
 
