@@ -325,9 +325,18 @@ def _rows_to_dicts(rows: List[Any], description: List[Any]) -> List[Dict[str, An
 
 
 def fetch(sql: str, db: str) -> Dict[str, Any]:
-    """连接并执行只读查询,返回 {columns, rows, costMs, truncated}。"""
+    """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
+    SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。"""
     ds = get_datasource(db)
     clean_sql = sql.strip().rstrip(";").strip()
+    # 查询类(可追加行数限制)vs 写语句
+    is_select = bool(
+        re.match(
+            r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH)\b",
+            clean_sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
     limit = enforce_limit(clean_sql)
 
     start = time.time()
@@ -336,23 +345,36 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
     try:
-        # 行数模式:配置优先,否则按 Oracle 版本自动推断
-        row_mode = ds.effective_row_limit(conn)
-        if not LIMIT_RE.search(clean_sql):
-            clean_sql = append_row_limit(clean_sql, limit, row_mode)
-        cur = conn.cursor()
-        cur.execute(clean_sql)
-        if ds.type == "mysql":
-            rows = cur.fetchall()  # DictCursor → list[dict]
-            truncated = len(rows) > limit
-            rows = rows[:limit]
-            columns = list(rows[0].keys()) if rows else []
+        # 查询类:追加行数限制并取结果集;写语句:直接执行取受影响行数
+        if is_select:
+            row_mode = ds.effective_row_limit(conn)
+            if not LIMIT_RE.search(clean_sql):
+                clean_sql = append_row_limit(clean_sql, limit, row_mode)
+            cur = conn.cursor()
+            cur.execute(clean_sql)
+            if ds.type == "mysql":
+                rows = cur.fetchall()  # DictCursor → list[dict]
+                truncated = len(rows) > limit
+                rows = rows[:limit]
+                columns = list(rows[0].keys()) if rows else []
+            else:
+                fetched = cur.fetchmany(limit + 1)
+                truncated = len(fetched) > limit
+                rows = _rows_to_dicts(fetched[:limit], cur.description)
+                columns = list(rows[0].keys()) if rows else []
+            cur.close()
         else:
-            fetched = cur.fetchmany(limit + 1)
-            truncated = len(fetched) > limit
-            rows = _rows_to_dicts(fetched[:limit], cur.description)
-            columns = list(rows[0].keys()) if rows else []
-        cur.close()
+            # 写语句(INSERT/UPDATE/DELETE):执行并返回受影响行数
+            cur = conn.cursor()
+            affected = cur.execute(clean_sql)
+            conn.commit()
+            cur.close()
+            return {
+                "columns": ["affected_rows"],
+                "rows": [{"affected_rows": affected}],
+                "costMs": int((time.time() - start) * 1000),
+                "truncated": False,
+            }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"query failed: {e}")
     finally:

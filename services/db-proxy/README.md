@@ -76,8 +76,9 @@ python3.7 main.py
 
 ## 安全约束
 
-1. **只读策略(默认)**:每个数据源 `readOnly` 默认 `true`——SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,`INSERT/UPDATE/DELETE/DROP` 等一律 403。想放开某库可写,配 `"readOnly": false`(预留可写能力)
-2. **多语句防护**:只读库拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许
+1. **只读策略(默认)**:每个数据源 `readOnly` 默认 `true`——SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,`INSERT/UPDATE/DELETE/DROP` 等一律 403
+2. **可写库(后台配置)**:想放开某库可写,配 `"readOnly": false`——该库可执行 `INSERT/UPDATE/DELETE`(返回受影响行数),且**不受行数限制干扰**(写语句不追加 LIMIT/FETCH/ROWNUM);注意该库账号需真有写权限
+3. **多语句防护**:只读库拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许
 3. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
 4. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验
 5. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
