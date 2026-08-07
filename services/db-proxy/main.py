@@ -138,14 +138,37 @@ class DataSource:
         # Oracle service_name / MySQL schema(可选,缺省用 name)
         self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
         # 行数限制语法模式:mysql / fetch(12c+) / rownum(11g)
-        # 默认按类型推断:mysql→mysql;oracle→fetch(11g 需显式配 rownum)
+        # 可选覆盖;不配则 Oracle 连接后自动探测版本(11g→rownum,12c+→fetch)
         self.row_limit: str = str(cfg.get("rowLimit", "")).strip().lower()
-        if not self.row_limit:
-            self.row_limit = "mysql" if self.type == "mysql" else "fetch"
-        if self.row_limit not in ("mysql", "fetch", "rownum"):
+        if self.row_limit and self.row_limit not in ("mysql", "fetch", "rownum"):
             raise ValueError(
                 f"datasource '{self.name}' rowLimit must be mysql/fetch/rownum"
             )
+        # Oracle 主版本缓存(首次连接后探测,-1 表示未知)
+        self._oracle_major: int = -1
+
+    def _detect_oracle_version(self, conn) -> int:
+        """探测 Oracle 主版本(11.2 → 11,19c → 19)。thin/thick 通用。"""
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT version FROM v$instance")
+            ver = str(cur.fetchone()[0])
+            cur.close()
+            major = int(ver.split(".")[0])
+            return major
+        except Exception:
+            return -1
+
+    def effective_row_limit(self, conn) -> str:
+        """确定实际行数限制模式:配置优先,否则按 Oracle 版本自动推断。"""
+        if self.row_limit:
+            return self.row_limit
+        if self.type == "mysql":
+            return "mysql"
+        # Oracle:探测主版本,11g(11)用 rownum,12+ 用 fetch
+        if self._oracle_major < 0:
+            self._oracle_major = self._detect_oracle_version(conn)
+        return "rownum" if self._oracle_major <= 11 else "fetch"
 
     def connect(self, connect_timeout: int, query_timeout: int):
         if self.type == "mysql":
@@ -284,8 +307,6 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     ds = get_datasource(db)
     clean_sql = sql.strip().rstrip(";").strip()
     limit = enforce_limit(clean_sql)
-    if not LIMIT_RE.search(clean_sql):
-        clean_sql = append_row_limit(clean_sql, limit, ds.row_limit)
 
     start = time.time()
     try:
@@ -293,6 +314,10 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
     try:
+        # 行数模式:配置优先,否则按 Oracle 版本自动推断
+        row_mode = ds.effective_row_limit(conn)
+        if not LIMIT_RE.search(clean_sql):
+            clean_sql = append_row_limit(clean_sql, limit, row_mode)
         cur = conn.cursor()
         cur.execute(clean_sql)
         if ds.type == "mysql":
