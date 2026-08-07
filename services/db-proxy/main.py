@@ -61,6 +61,8 @@ LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
 LISTEN_PORT = int(CONFIG.get("listenPort", 8756))
 DEFAULT_LIMIT = int(CONFIG.get("defaultLimit", 100))
 MAX_LIMIT = int(CONFIG.get("maxLimit", 10000))
+# SQL 长度上限(字节),防超大 SQL 拖垮客户机/数据库;默认 32KB
+MAX_SQL_LEN = int(CONFIG.get("maxSqlLen", 32768))
 QUERY_TIMEOUT = int(CONFIG.get("queryTimeout", 60))
 DB_CONNECT_TIMEOUT = int(CONFIG.get("connectTimeout", 5))
 ALLOWED_DBS = [str(s).strip() for s in CONFIG.get("allowedDbs", []) if str(s).strip()]
@@ -441,6 +443,12 @@ def query(
     req: QueryReq, x_db_token: Optional[str] = Header(default=None)
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
+    # SQL 长度上限(防超大 SQL)
+    if len(req.sql) > MAX_SQL_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
+        )
     check_db_allowed(req.db)
     ds = get_datasource(req.db)
     # 查询类(SELECT/SHOW/DESC/EXPLAIN/WITH):默认放行,仅防多语句注入
@@ -476,6 +484,7 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "writableTables": WRITABLE_TABLES,
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,
+            "maxSqlLen": MAX_SQL_LEN,
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),

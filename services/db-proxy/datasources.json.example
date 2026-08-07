@@ -4,6 +4,7 @@
   "listenPort": 8756,
   "defaultLimit": 100,
   "maxLimit": 10000,
+  "maxSqlLen": 32768,
   "queryTimeout": 60,
   "connectTimeout": 5,
   "allowedDbs": [

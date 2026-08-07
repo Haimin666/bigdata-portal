@@ -82,8 +82,9 @@ python3.7 main.py
 4. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
 5. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验
 6. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
-7. **超时**:连接/查询超时可配,防远端卡死
-8. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
+7. **SQL 长度上限**:超过 `maxSqlLen`(默认 32768 字节)拒绝,防超大 SQL
+8. **超时**:连接/查询超时可配,防远端卡死
+9. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
 
 ## Oracle 11g 说明
 
