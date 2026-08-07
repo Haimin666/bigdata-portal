@@ -26,6 +26,8 @@ python3.7 -m pip install -r requirements.txt
 ```
 
 > Oracle 模式:oracledb 1.x thin 模式**无需安装 Oracle Instant Client**,纯 Python。
+> 若连接报 `DPY-3010`(thin 不支持 DB 版本),设置 `ORACLE_CLIENT_LIB`
+> 指向客户端库目录走 **thick 模式**(支持 11.2+,用客户机已有的 SQL*Plus 客户端)。
 
 ## 配置
 

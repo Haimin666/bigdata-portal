@@ -47,9 +47,17 @@ try:
         oracledb.defaults.fetch_lobs = False  # LOB 直接返回字符串
     except AttributeError:
         pass
+    # thick 模式:配置了 ORACLE_CLIENT_LIB(指向 Oracle Instant Client 目录,
+    # 含 libclntsh.so)时启用。thick 模式支持 DB 11.2+,解决 thin 模式对
+    # 某些版本(如 19c)的 DPY-3010 兼容问题。不配置则用 thin。
+    _ORACLE_CLIENT_LIB = os.getenv("ORACLE_CLIENT_LIB", "")
+    if _ORACLE_CLIENT_LIB:
+        oracledb.init_oracle_client(lib_dir=_ORACLE_CLIENT_LIB)
+        log.info("oracledb thick mode enabled (lib_dir=%s)", _ORACLE_CLIENT_LIB)
 except ImportError:  # pragma: no cover
     oracledb = None  # type: ignore
     _HAS_ORACLE = False
+    _ORACLE_CLIENT_LIB = ""
 
 logging.basicConfig(
     level=logging.INFO,
