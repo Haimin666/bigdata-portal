@@ -208,6 +208,76 @@ function getSql(): string {
   return cm ? cm.getValue() : ''
 }
 
+/** 按分号切分 SQL 段(跳过字符串/注释内的分号) */
+function splitSqlSegments(text: string): { start: number; end: number; sql: string }[] {
+  const segs: { start: number; end: number; sql: string }[] = []
+  let segStart = 0
+  let i = 0
+  let inSingle = false
+  let inDouble = false
+  let inLineComment = false
+  let inBlockComment = false
+  while (i < text.length) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false
+    } else if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false
+        i++
+      }
+    } else if (inSingle) {
+      if (ch === "'") {
+        if (next === "'") i++
+        else inSingle = false
+      }
+    } else if (inDouble) {
+      if (ch === '"') inDouble = false
+    } else {
+      if (ch === '-' && next === '-') {
+        inLineComment = true
+        i++
+      } else if (ch === '/' && next === '*') {
+        inBlockComment = true
+        i++
+      } else if (ch === "'") {
+        inSingle = true
+      } else if (ch === '"') {
+        inDouble = true
+      } else if (ch === ';') {
+        segs.push({ start: segStart, end: i + 1, sql: text.slice(segStart, i + 1) })
+        segStart = i + 1
+      }
+    }
+    i++
+  }
+  if (segStart < text.length) {
+    segs.push({ start: segStart, end: text.length, sql: text.slice(segStart) })
+  }
+  return segs
+}
+
+/**
+ * 待执行 SQL:优先选中内容;未选中则取光标所在段(分号切分)。
+ * 找不到段(如全文只有注释)回退全文。
+ */
+function getSqlToRun(): string {
+  if (!cm) return getSql()
+  // 1. 有选区 → 执行选中
+  const sel = cm.getSelection()
+  if (sel.trim()) return sel
+  // 2. 无选区 → 光标所在段
+  const cursorIdx = cm.indexFromPos(cm.getCursor())
+  for (const seg of splitSqlSegments(cm.getValue())) {
+    if (seg.start <= cursorIdx && cursorIdx <= seg.end) {
+      const s = seg.sql.trim()
+      if (s) return s
+    }
+  }
+  return cm.getValue()
+}
+
 // ── SQL 格式化(简单:关键字换行缩进)─────────────────────────
 function formatSql() {
   if (!cm) return
@@ -227,7 +297,7 @@ async function runQuery() {
     ElMessage.warning('请先选择数据库')
     return
   }
-  const trimmed = getSql().trim()
+  const trimmed = getSqlToRun().trim()
   if (!trimmed) {
     ElMessage.warning('请输入 SQL')
     return
