@@ -129,6 +129,13 @@ class DataSource:
         self.charset: str = str(cfg.get("charset", "utf8mb4" if self.type == "mysql" else "AL32UTF8"))
         # Oracle service_name / MySQL schema(可选,缺省用 name)
         self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
+        # 行数限制语法模式:mysql / fetch(12c+) / rownum(11g)
+        # 默认按类型推断:mysql→mysql;oracle→fetch(11g 需显式配 rownum)
+        self.row_limit: str = str(cfg.get("rowLimit", "")).strip().lower()
+        if not self.row_limit:
+            self.row_limit = "mysql" if self.type == "mysql" else "fetch"
+        if self.row_limit not in ("mysql", "fetch", "rownum"):
+            raise ValueError(f"datasource '{self.name}' rowLimit must be mysql/fetch/rownum")
 
     def connect(self, connect_timeout: int, query_timeout: int):
         if self.type == "mysql":
@@ -263,9 +270,15 @@ def enforce_limit(sql: str) -> int:
     return DEFAULT_LIMIT
 
 
-def append_row_limit(sql: str, limit: int, ds_type: str) -> str:
-    """按数据库类型追加行数限制语法。"""
-    if ds_type == "oracle":
+def append_row_limit(sql: str, limit: int, row_limit: str) -> str:
+    """按数据源的行数限制模式追加语法:
+    - mysql:  SELECT ... LIMIT n
+    - fetch:  SELECT ... FETCH FIRST n ROWS ONLY(12c+)
+    - rownum: SELECT * FROM (SELECT ...) WHERE ROWNUM <= n(11g)
+    """
+    if row_limit == "rownum":
+        return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {limit}"
+    if row_limit == "fetch":
         return f"{sql} FETCH FIRST {limit} ROWS ONLY"
     return f"{sql} LIMIT {limit}"
 
@@ -283,7 +296,7 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     clean_sql = sql.strip().rstrip(";").strip()
     limit = enforce_limit(clean_sql)
     if not LIMIT_RE.search(clean_sql):
-        clean_sql = append_row_limit(clean_sql, limit, ds.type)
+        clean_sql = append_row_limit(clean_sql, limit, ds.row_limit)
 
     start = time.time()
     try:

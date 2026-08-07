@@ -7,7 +7,8 @@
       "port": 1521,
       "user": "pre_ccrs",
       "password": "CHANGE_ME",
-      "service": "credzy"
+      "service": "credzy",
+      "rowLimit": "rownum"
     },
     {
       "name": "credzx",
@@ -16,7 +17,8 @@
       "port": 1521,
       "user": "sq_ccrs",
       "password": "CHANGE_ME",
-      "service": "credzx"
+      "service": "credzx",
+      "rowLimit": "rownum"
     },
     {
       "name": "nev",

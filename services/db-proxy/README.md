@@ -51,6 +51,10 @@ python3.7 -m pip install -r requirements.txt
 - `name` = 前端请求的 `db` 参数(如 `/query {db:"credzy"}`)
 - `type`: `mysql` / `oracle`
 - Oracle 用 `service`(服务名);MySQL 用 `schema`(库名)
+- `rowLimit`(可选,Oracle 用):行数限制语法
+  - `fetch`(默认,12c+):`FETCH FIRST n ROWS ONLY`
+  - `rownum`(11g):`SELECT * FROM (...) WHERE ROWNUM <= n`
+  - MySQL 无需配(自动 `LIMIT`)
 - 数据库密码**只存在客户机**,平台不接触
 
 ### 2. 服务配置(env)
@@ -86,7 +90,7 @@ uvicorn main:app --host 0.0.0.0 --port 8756
 1. **只读强制**:SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,其余 403
 2. **库白名单**:请求的 `db` 必须在 `ALLOWED_DBS`(且是已配置数据源)
 3. **表白名单**:开启后从 SQL 提取表名校验
-4. **强制行数上限**:无限制子句自动加(MySQL `LIMIT 100` / Oracle `FETCH FIRST 100 ROWS ONLY`,可配),硬上限 `MAX_LIMIT`
+4. **强制行数上限**:无限制子句自动加(MySQL `LIMIT 100` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`,可配),硬上限 `MAX_LIMIT`
 5. **超时**:连接 5s / 查询 60s(可配),防远端卡死
 6. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
 
