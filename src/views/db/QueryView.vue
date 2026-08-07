@@ -32,6 +32,7 @@ const filteredDbs = computed(() =>
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
+const canvasRef = ref<HTMLElement>()
 let cm: CodeMirror.Editor | null = null
 
 // 默认 SQL:清空(用户自行编写)
@@ -80,10 +81,13 @@ async function initEditor() {
   // SQL 关键词提示:输入字母时自动触发,Ctrl/Cmd+Space 手动
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
     const last = change.text[0] ?? ''
-    if (last && /[\w$]/.test(last)) sqlHint(c)
+    if (last && /[\w$]/.test(last)) sqlHint(c, change.to)
   })
   // 括号匹配(自实现):光标邻接括号时高亮配对
-  cm.on('cursorActivity', (c: CodeMirror.Editor) => updateBracketMatch(c))
+  cm.on('cursorActivity', (c: CodeMirror.Editor) => {
+    updateBracketMatch(c)
+    if (hintVisible.value) updateHintPos()
+  })
   // 自动闭合括号
   cm.on('beforeChange', (c: CodeMirror.Editor, change: CodeMirror.EditorChangeCancellable) => {
     if (change.origin !== '+input') return
@@ -213,6 +217,8 @@ const SQL_KEYWORDS = [
 const hintVisible = ref(false)
 const hintItems = ref<string[]>([])
 const hintIndex = ref(0)
+// 提示浮层位置(相对 canvas,光标移动时更新)
+const hintPos = ref({ left: 0, top: 0 })
 // 提示插入位置
 let hintFrom: { line: number; ch: number } | null = null
 let hintTo: { line: number; ch: number } | null = null
@@ -224,6 +230,18 @@ function closeHint() {
   hintTo = null
 }
 
+/** 更新浮层位置:默认当前光标,可传指定位置(如输入后的 change.to) */
+function updateHintPos(pos?: { line: number; ch: number }) {
+  if (!cm || !canvasRef.value) return
+  const target = pos ?? cm.getCursor()
+  const coords = cm.cursorCoords(target, 'window')
+  const canvasRect = canvasRef.value.getBoundingClientRect()
+  hintPos.value = {
+    left: Math.max(0, coords.left - canvasRect.left),
+    top: Math.max(0, coords.bottom - canvasRect.top + 4)
+  }
+}
+
 function applyHint(item: string) {
   if (!cm || !hintFrom || !hintTo) return
   cm.replaceRange(item, hintFrom, hintTo)
@@ -231,8 +249,9 @@ function applyHint(item: string) {
   cm.focus()
 }
 
-function sqlHint(c: CodeMirror.Editor) {
-  const cur = c.getCursor()
+function sqlHint(c: CodeMirror.Editor, inputPos?: { line: number; ch: number }) {
+  // 用输入后位置(change.to)优先,否则当前光标
+  const cur = inputPos ?? c.getCursor()
   const line = c.getLine(cur.line)
   // 当前词边界:向前找字母/数字/下划线
   let start = cur.ch
@@ -253,17 +272,8 @@ function sqlHint(c: CodeMirror.Editor) {
   hintFrom = { line: cur.line, ch: start }
   hintTo = { line: cur.line, ch: cur.ch }
   hintVisible.value = true
+  updateHintPos(cur)
 }
-
-/** 提示浮层定位:基于 CodeMirror 坐标 */
-const hintStyle = computed(() => {
-  if (!cm || !hintFrom) return {}
-  const coords = cm.cursorCoords(hintFrom, 'window')
-  return {
-    left: `${coords.left}px`,
-    top: `${coords.bottom + 4}px`
-  }
-})
 
 onMounted(() => {
   void initEditor()
@@ -443,10 +453,10 @@ function isNumeric(val: unknown): boolean {
     </div>
 
     <!-- SQL 画布(CodeMirror) -->
-    <div class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
+    <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
       <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
       <!-- 关键词提示浮层 -->
-      <div v-if="hintVisible" class="sql-hint-popup" :style="hintStyle">
+      <div v-if="hintVisible" class="sql-hint-popup" :style="{ left: hintPos.left + 'px', top: hintPos.top + 'px' }">
         <div
           v-for="(item, i) in hintItems"
           :key="item"
