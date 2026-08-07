@@ -382,10 +382,17 @@ watch(engine, (val) => {
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
+  /* 与 YARN 表格一致:表头浅灰底、紧凑行距由全局 .el-table 统一 */
 }
 
 .result-table {
   width: 100%;
+  /* 表头吸顶,滚动时表头固定(类似 YARN 表格体验) */
+  :deep(th.el-table__cell) {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
 }
 
 .empty-state {
