@@ -1,6 +1,9 @@
-# db-proxy 依赖(Python 3.7+ 兼容)
-fastapi>=0.100,<1.0
-uvicorn[standard]>=0.23,<1.0
+# db-proxy 依赖(目标:Python 3.7+)
+# 注意版本上限:
+#   fastapi <0.104(0.104 起要求 Python>=3.8)
+#   uvicorn <0.23 (0.23 起要求 Python>=3.8;不用 [standard],避免 uvloop/httptools 编译)
+fastapi>=0.100,<0.104
+uvicorn>=0.15,<0.23
 pymysql>=1.0,<2.0
 # Oracle 支持:thin 模式无需 Oracle Instant Client;1.4.x 兼容 Python 3.7
 oracledb>=1.4,<2.0
