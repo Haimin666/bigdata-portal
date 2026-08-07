@@ -103,8 +103,10 @@ except ImportError:  # pragma: no cover
     _HAS_ORACLE = False
 
 # 只读 SQL 前缀白名单(正则)
+# 先剥离开头注释(-- 行注释 / /* */ 块注释)与空白,再匹配第一个关键字
 READ_ONLY_RE = re.compile(
-    r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH)\b", re.IGNORECASE
+    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 # 提取 SQL 中出现的表名(粗略:FROM/JOIN/INTO/UPDATE 后跟的表)
 TABLE_RE = re.compile(
