@@ -2,25 +2,10 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menus } from '@/config/menu'
-import SubAppView from '@/views/subapp/SubAppView.vue'
-import SubappTabs, { type PortalTab } from '@/views/subapp/SubappTabs.vue'
-import YarnView from '@/views/yarn/YarnView.vue'
-import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
-import HdfsView from '@/views/hdfs/HdfsView.vue'
-import {
-  Monitor,
-  Timer,
-  Folder,
-  Odometer,
-  Search,
-  DataLine,
-  Cpu,
-  Expand,
-  Fold,
-  Refresh,
-  FullScreen
-} from '@element-plus/icons-vue'
-import type { Component } from 'vue'
+import SideBar from './components/SideBar.vue'
+import HeaderBar from './components/HeaderBar.vue'
+import TabStage from './components/TabStage.vue'
+import type { PortalTab } from '@/views/subapp/SubappTabs.vue'
 
 defineOptions({ name: 'MainLayout' })
 
@@ -29,23 +14,6 @@ const router = useRouter()
 
 const collapsed = ref(false)
 const fullscreen = ref(false)
-
-const icons: Record<string, Component> = {
-  Monitor,
-  Timer,
-  Folder,
-  Odometer,
-  Search,
-  DataLine,
-  Cpu
-}
-
-// 原生视图组件映射:按 menu.name 渲染
-const nativeComponents: Record<string, Component> = {
-  yarn: YarnView,
-  dsTask: DsTaskMonitor,
-  hdfs: HdfsView
-}
 
 // ── 模块 Tab 常驻池(原生视图 + 子应用 iframe 统一管理)──────────
 // 原生视图:组件常驻 v-show 切换,状态保留;refreshKey 供刷新按钮重建。
@@ -125,64 +93,17 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
 
 <template>
   <el-container class="portal-layout">
-    <el-aside :width="collapsed ? '64px' : '220px'" class="portal-aside">
-      <div class="portal-logo">
-        <span class="logo-text">大数据门户</span>
-      </div>
-      <el-menu
-        :default-active="route.path"
-        :collapse="collapsed"
-        class="portal-menu"
-        @select="handleSelect"
-      >
-        <el-menu-item v-for="m in menus" :key="m.path" :index="m.path">
-          <el-icon><component :is="icons[m.icon]" /></el-icon>
-          <template #title>
-            <span>{{ m.title }}</span>
-          </template>
-        </el-menu-item>
-      </el-menu>
-    </el-aside>
+    <SideBar :collapsed="collapsed" @select="handleSelect" />
     <el-container>
-      <el-header class="portal-header">
-        <el-icon class="header-icon" @click="collapsed = !collapsed">
-          <Expand v-if="collapsed" />
-          <Fold v-else />
-        </el-icon>
-        <span class="header-title">{{ menus.find((m) => m.path === route.path)?.title }}</span>
-        <div class="header-actions">
-          <el-icon class="header-icon" @click="handleRefresh"><Refresh /></el-icon>
-          <el-icon class="header-icon" @click="toggleFullscreen"><FullScreen /></el-icon>
-        </div>
-      </el-header>
+      <HeaderBar
+        :collapsed="collapsed"
+        :fullscreen="fullscreen"
+        @toggle-collapse="collapsed = !collapsed"
+        @refresh="handleRefresh"
+        @toggle-fullscreen="toggleFullscreen"
+      />
       <el-main class="portal-main">
-        <!-- 模块 Tab 条 -->
-        <SubappTabs
-          v-if="tabs.length"
-          :tabs="tabs"
-          :active-path="route.path"
-          @switch="handleTabSwitch"
-          @close="closeTab"
-        />
-        <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
-        <div class="view-stage">
-          <template v-for="tab in tabs" :key="tab.path">
-            <div v-show="tab.path === route.path" class="view-item">
-              <!-- 子应用:iframe 常驻 -->
-              <SubAppView
-                v-if="tab.menu.kind === 'subapp'"
-                :menu="tab.menu"
-                :active="tab.path === route.path"
-              />
-              <!-- 原生视图:组件常驻,刷新时按 key 重建 -->
-              <component
-                v-else
-                :is="nativeComponents[tab.menu.name]"
-                :key="tab.refreshKey"
-              />
-            </div>
-          </template>
-        </div>
+        <TabStage :tabs="tabs" @switch="handleTabSwitch" @close="closeTab" />
       </el-main>
     </el-container>
   </el-container>
@@ -193,71 +114,11 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
   height: 100%;
 }
 
-.portal-aside {
-  background: #f0f1f5;
-  border-right: 1px solid $border;
-  transition: width 0.2s;
-  overflow: hidden;
-}
-
-.portal-logo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 56px;
-  font-weight: 700;
-  color: $text;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.portal-menu {
-  border-right: none;
-  background: transparent;
-}
-
-.portal-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: #fff;
-  border-bottom: 1px solid $border;
-}
-
-.header-icon {
-  font-size: 18px;
-  cursor: pointer;
-  color: $muted;
-}
-
-.header-title {
-  font-weight: 600;
-  color: $text;
-}
-
-.header-actions {
-  display: flex;
-  gap: 12px;
-  margin-left: auto;
-}
-
 .portal-main {
   background: $bg;
   padding: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-}
-
-.view-stage {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
-.view-item {
-  position: absolute;
-  inset: 0;
   overflow: hidden;
 }
 </style>

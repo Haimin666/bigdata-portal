@@ -16,6 +16,7 @@ import {
 } from '@/api/ds'
 import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
+import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -46,33 +47,27 @@ const rangeKey = ref('3d')
 // YARN RM 地址(从 /api/config 获取,用于 application id 跳转)
 const rmHost = ref('')
 
-const stateOptions = [
-  { label: '全部状态', value: '' },
+// 状态选项:集中定义,供筛选下拉与展示标签共用(StateSelect + dsStateLabel)
+const stateOptions: StateOption[] = [
   // 注意:本版本海豚运行中状态枚举为 RUNNING_EXEUTION(少一个 C),
   // 展示与筛选参数均为该拼写(实测确认,传标准 RUNNING_EXECUTION 会 10113 报错)
-  { label: '运行中', value: 'RUNNING_EXEUTION' },
-  { label: '成功', value: 'SUCCESS' },
-  { label: '失败', value: 'FAILURE' },
-  { label: '暂停', value: 'PAUSE' },
-  { label: '停止', value: 'STOP' },
-  { label: '已提交', value: 'SUBMITTED_SUCCESS' },
-  { label: '已终止', value: 'KILL' }
+  { label: '运行中', value: 'RUNNING_EXEUTION', type: 'primary', running: true },
+  { label: '成功', value: 'SUCCESS', type: 'success' },
+  { label: '失败', value: 'FAILURE', type: 'danger' },
+  { label: '暂停', value: 'PAUSE', type: 'warning' },
+  { label: '停止', value: 'STOP', type: 'info' },
+  { label: '已提交', value: 'SUBMITTED_SUCCESS', type: 'info', running: true },
+  { label: '已终止', value: 'KILL', type: 'info' }
 ]
 
-const stateLabels: Record<string, string> = {
-  SUBMITTED_SUCCESS: '已提交',
-  RUNNING_EXEUTION: '运行中',
+/** 额外状态映射(不在筛选选项中但可能出现在数据的展示状态) */
+const extraStateLabels: Record<string, string> = {
   RUNNING_EXECUTION: '运行中',
   READY_PAUSE: '待暂停',
-  PAUSE: '暂停',
   READY_STOP: '待停止',
-  STOP: '停止',
-  FAILURE: '失败',
-  SUCCESS: '成功',
   DELAY_EXECUTION: '延迟执行',
   SERIAL_WAIT: '串行等待',
   NEED_FAULT_TOLERANCE: '需容错',
-  KILL: '已终止',
   TIMEOUT: '超时',
   WAITING_DEPEND: '等待依赖',
   WAITING_THREAD: '等待线程',
@@ -82,33 +77,15 @@ const stateLabels: Record<string, string> = {
 }
 
 function dsStateLabel(state: string): string {
-  return stateLabels[state] || state
+  return stateOptions.find((o) => o.value === state)?.label || extraStateLabels[state] || state
 }
 
-const stateColor: Record<string, string> = {
-  SUCCESS: 'success',
-  FAILURE: 'danger',
-  RUNNING_EXEUTION: 'primary',
-  RUNNING_EXECUTION: 'primary',
-  RUNNING_TAIL: 'primary',
-  PAUSE: 'warning',
-  STOP: 'info',
-  KILL: 'info',
-  TIMEOUT: 'warning',
-  SUBMITTED_SUCCESS: 'info',
-  WAITING_DEPEND: 'info',
-  SERIAL_WAIT: 'info',
-  WAIT_TO_RUN: 'info',
-  WAIT_TO_THREAD: 'info',
-  FORCED_SUCCESS: 'success'
-}
-
-function stateTagType(state: string): string {
-  return stateColor[state] || 'info'
+function stateTagType(state: string): StateOption['type'] {
+  return stateOptions.find((o) => o.value === state)?.type || 'info'
 }
 
 function isRunning(state: string): boolean {
-  return ['RUNNING_EXEUTION', 'RUNNING_EXECUTION', 'SUBMITTED_SUCCESS', 'DELAY_EXECUTION', 'SERIAL_WAIT'].includes(state)
+  return stateOptions.some((o) => o.value === state && o.running) || ['DELAY_EXECUTION', 'SERIAL_WAIT'].includes(state)
 }
 
 /** 时间范围 → [startDate, endDate],海豚 API 格式 yyyy-MM-dd HH:mm:ss */
@@ -343,9 +320,7 @@ onMounted(async () => {
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.name" />
       </el-select>
 
-      <el-select v-model="stateType" class="state-select" clearable placeholder="状态筛选" @change="onFilterChange">
-        <el-option v-for="s in stateOptions" :key="s.value" :label="s.label" :value="s.value" />
-      </el-select>
+      <StateSelect v-model="stateType" :options="stateOptions" @change="onFilterChange" />
 
       <el-select v-model="rangeKey" class="range-select" @change="onFilterChange">
         <el-option label="近 1 天" value="1d" />
@@ -588,10 +563,6 @@ onMounted(async () => {
 
 .project-select {
   width: 240px;
-}
-
-.state-select {
-  width: 130px;
 }
 
 .range-select {
