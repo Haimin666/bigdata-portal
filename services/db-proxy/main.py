@@ -3,19 +3,25 @@
 运行在可直连数据库的客户机上,把"查询"能力以 HTTP API 暴露给平台。
 支持 MySQL 与 Oracle 的**多数据源**(一个服务连多套库,按 db 参数路由)。
 
+**所有配置集中在 datasources.json 一个文件**(代码写死路径,无需其他配置):
+  - 服务配置:authToken / listenHost / listenPort / 超时 / 行数限制
+  - 白名单:allowedDbs / allowedTables
+  - Oracle thick 模式:oracleClientLib
+  - 数据源:datasources 数组(每个源独立 type/host/port/账密/service)
+
 设计目标:
   - 只读强制(SELECT/SHOW/DESC/EXPLAIN/WITH),杜绝写操作
-  - 多数据源:JSON 配置,每个源独立 type/host/port/账密/schema
   - 库级 + 表级白名单,防越权访问
-  - 强制行数上限,防大结果集拖垮(MySQL 用 LIMIT,Oracle 用 FETCH FIRST)
+  - 强制行数上限,防大结果集拖垮(MySQL LIMIT / Oracle 12c+ FETCH / 11g ROWNUM)
   - 连接信息只存在于客户机,平台永远不接触数据库密码
-  - 可选 AUTH_TOKEN 鉴权,防内网随意调用
+  - AUTH_TOKEN 鉴权,防内网随意调用
   - 执行审计日志
 
 依赖:
   - MySQL:  pymysql(Python 3.7 兼容)
-  - Oracle: oracledb>=1.4,<2.0(Python 3.7 兼容,thin 模式无需 Oracle 客户端库)
-用法:DATASOURCES=datasources.json AUTH_TOKEN=... python main.py
+  - Oracle: oracledb>=1.4,<2.2(Python 3.7 兼容,thin 模式无需客户端库;
+            连 11g 需配 oracleClientLib 走 thick 模式)
+用法:python main.py
 """
 
 from __future__ import annotations
@@ -30,7 +36,48 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-# 驱动按需导入(避免未使用的驱动阻塞启动)
+# ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
+CONFIG_FILE = "datasources.json"
+
+
+def _read_config() -> Dict[str, Any]:
+    if not os.path.exists(CONFIG_FILE):
+        raise RuntimeError(
+            f"config file '{CONFIG_FILE}' not found. "
+            "复制 datasources.json.example 为 datasources.json 并填写配置。"
+        )
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if "datasources" not in cfg or not isinstance(cfg["datasources"], list):
+        raise ValueError("datasources.json must contain a 'datasources' array")
+    return cfg
+
+
+CONFIG = _read_config()
+
+# 服务配置(JSON 顶层,缺失用默认值)
+AUTH_TOKEN = str(CONFIG.get("authToken", ""))
+LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
+LISTEN_PORT = int(CONFIG.get("listenPort", 8756))
+DEFAULT_LIMIT = int(CONFIG.get("defaultLimit", 100))
+MAX_LIMIT = int(CONFIG.get("maxLimit", 10000))
+QUERY_TIMEOUT = int(CONFIG.get("queryTimeout", 60))
+DB_CONNECT_TIMEOUT = int(CONFIG.get("connectTimeout", 5))
+ALLOWED_DBS = [str(s).strip() for s in CONFIG.get("allowedDbs", []) if str(s).strip()]
+ALLOWED_TABLES = [
+    str(s).strip() for s in CONFIG.get("allowedTables", []) if str(s).strip()
+]
+# Oracle thick 模式:客户端库目录(含 libclntsh.so),连 11g 必配
+ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("db-proxy")
+
+# 驱动按需导入(未装对应驱动不阻塞另一个类型)
 try:
     import pymysql  # type: ignore
 
@@ -43,58 +90,17 @@ try:
     import oracledb  # type: ignore
 
     _HAS_ORACLE = True
+    # thick 模式:连 11g 必须用客户端库(thin 不支持 11g)
+    if ORACLE_CLIENT_LIB:
+        oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_LIB)
+        log.info("oracledb thick mode enabled (lib_dir=%s)", ORACLE_CLIENT_LIB)
     try:
         oracledb.defaults.fetch_lobs = False  # LOB 直接返回字符串
     except AttributeError:
         pass
-    # thick 模式:配置了 ORACLE_CLIENT_LIB(指向 Oracle Instant Client 目录,
-    # 含 libclntsh.so)时启用。thick 模式支持 DB 11.2+,解决 thin 模式对
-    # 某些版本(如 19c)的 DPY-3010 兼容问题。不配置则用 thin。
-    _ORACLE_CLIENT_LIB = os.getenv("ORACLE_CLIENT_LIB", "")
-    if _ORACLE_CLIENT_LIB:
-        oracledb.init_oracle_client(lib_dir=_ORACLE_CLIENT_LIB)
-        log.info("oracledb thick mode enabled (lib_dir=%s)", _ORACLE_CLIENT_LIB)
 except ImportError:  # pragma: no cover
     oracledb = None  # type: ignore
     _HAS_ORACLE = False
-    _ORACLE_CLIENT_LIB = ""
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("db-proxy")
-
-# ── 配置(环境变量驱动,客户机侧)───────────────────────────────
-# 多数据源配置文件路径(JSON)
-DATASOURCES_FILE = os.getenv("DATASOURCES", "datasources.json")
-# 兼容旧的单源 env(未配置 DATASOURCES 时使用;datasources.json 不存在时回退)
-DB_TYPE = os.getenv("DB_TYPE", "mysql").strip().lower()
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASS = os.getenv("DB_PASS", "")
-DB_CHARSET = os.getenv("DB_CHARSET", "utf8mb4")
-ORACLE_SERVICE = os.getenv("ORACLE_SERVICE", "")
-# 连接超时(秒),防止远端库不可达时卡死
-DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
-# 查询超时(秒)
-QUERY_TIMEOUT = int(os.getenv("QUERY_TIMEOUT", "60"))
-
-# 允许访问的数据库白名单(逗号分隔),为空 = 允许所有已配置数据源
-ALLOWED_DBS = [s.strip() for s in os.getenv("ALLOWED_DBS", "").split(",") if s.strip()]
-# 允许访问的表白名单(逗号分隔,库.表 或 表),为空 = 不校验表
-ALLOWED_TABLES = [s.strip() for s in os.getenv("ALLOWED_TABLES", "").split(",") if s.strip()]
-# 请求鉴权 token:请求头 X-DB-Token 需匹配;为空 = 不鉴权
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
-# 无 LIMIT 时自动追加的行数
-DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", "100"))
-# 硬上限,防止恶意传超大 LIMIT
-MAX_LIMIT = int(os.getenv("MAX_LIMIT", "10000"))
-# 监听端口
-LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8756"))
-LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 
 # 只读 SQL 前缀白名单(正则)
 READ_ONLY_RE = re.compile(
@@ -110,7 +116,7 @@ LIMIT_RE = re.compile(
     r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS)", re.IGNORECASE
 )
 
-app = FastAPI(title="db-proxy", version="2.0.0")
+app = FastAPI(title="db-proxy", version="2.1.0")
 
 
 # ── 数据源注册表 ──────────────────────────────────────────────
@@ -126,7 +132,9 @@ class DataSource:
         self.port: int = int(cfg.get("port", 3306 if self.type == "mysql" else 1521))
         self.user: str = str(cfg.get("user", ""))
         self.password: str = str(cfg.get("password", ""))
-        self.charset: str = str(cfg.get("charset", "utf8mb4" if self.type == "mysql" else "AL32UTF8"))
+        self.charset: str = str(
+            cfg.get("charset", "utf8mb4" if self.type == "mysql" else "AL32UTF8")
+        )
         # Oracle service_name / MySQL schema(可选,缺省用 name)
         self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
         # 行数限制语法模式:mysql / fetch(12c+) / rownum(11g)
@@ -135,7 +143,9 @@ class DataSource:
         if not self.row_limit:
             self.row_limit = "mysql" if self.type == "mysql" else "fetch"
         if self.row_limit not in ("mysql", "fetch", "rownum"):
-            raise ValueError(f"datasource '{self.name}' rowLimit must be mysql/fetch/rownum")
+            raise ValueError(
+                f"datasource '{self.name}' rowLimit must be mysql/fetch/rownum"
+            )
 
     def connect(self, connect_timeout: int, query_timeout: int):
         if self.type == "mysql":
@@ -153,7 +163,7 @@ class DataSource:
                 write_timeout=query_timeout,
                 cursorclass=pymysql.cursors.DictCursor,
             )
-        # Oracle thin 模式
+        # Oracle
         if not _HAS_ORACLE:
             raise RuntimeError("oracledb not installed")
         dsn = f"{self.host}:{self.port}/{self.service}"
@@ -162,8 +172,7 @@ class DataSource:
             "password": self.password,
             "dsn": dsn,
         }
-        # oracledb 1.x 不支持 connect_timeout(2.x 才有),按版本自适应:
-        # 传了报 TypeError 就去掉该参数重试
+        # oracledb 1.x 不支持 connect_timeout(2.x 才有),按版本自适应
         try:
             return oracledb.connect(**kwargs, connect_timeout=connect_timeout)
         except TypeError:
@@ -176,36 +185,15 @@ class DataSource:
             "host": self.host,
             "port": self.port,
             "user": self.user,
+            "rowLimit": self.row_limit,
         }
 
 
 def _load_datasources() -> Dict[str, DataSource]:
-    """加载数据源配置:优先 datasources.json,兼容旧单源 env。"""
     sources: Dict[str, DataSource] = {}
-    if os.path.exists(DATASOURCES_FILE):
-        with open(DATASOURCES_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        items = raw.get("datasources", raw if isinstance(raw, list) else [])
-        for cfg in items:
-            ds = DataSource(cfg)
-            sources[ds.name] = ds
-        log.info("loaded %d datasource(s) from %s", len(sources), DATASOURCES_FILE)
-        return sources
-    # 回退:旧单源 env
-    if DB_TYPE in ("mysql", "oracle"):
-        ds = DataSource(
-            {
-                "name": ORACLE_SERVICE if DB_TYPE == "oracle" else "default",
-                "type": DB_TYPE,
-                "host": DB_HOST,
-                "port": DB_PORT,
-                "user": DB_USER,
-                "password": DB_PASS,
-                "service": ORACLE_SERVICE or "default",
-            }
-        )
+    for cfg in CONFIG["datasources"]:
+        ds = DataSource(cfg)
         sources[ds.name] = ds
-        log.info("no %s, fallback to single env datasource '%s'", DATASOURCES_FILE, ds.name)
     return sources
 
 
@@ -223,7 +211,7 @@ def get_datasource(db: str) -> DataSource:
 
 # ── 安全工具 ──────────────────────────────────────────────────
 def require_auth(x_db_token: Optional[str]) -> None:
-    """鉴权:配置了 AUTH_TOKEN 则必须匹配。"""
+    """鉴权:配置了 authToken 则必须匹配。"""
     if AUTH_TOKEN and x_db_token != AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -238,7 +226,8 @@ def check_db_allowed(db: str) -> None:
 def check_read_only(sql: str) -> None:
     if not READ_ONLY_RE.match(sql):
         raise HTTPException(
-            status_code=403, detail="only SELECT/SHOW/DESC/EXPLAIN allowed (read-only)"
+            status_code=403,
+            detail="only SELECT/SHOW/DESC/EXPLAIN allowed (read-only)",
         )
 
 
@@ -348,7 +337,6 @@ def health() -> Dict[str, Any]:
 @app.get("/dbs")
 def dbs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_auth(x_db_token)
-    # 已配置数据源(白名单过滤后)直接返回
     names = sorted(DATASOURCES.keys())
     if ALLOWED_DBS:
         names = [n for n in names if n in ALLOWED_DBS]
@@ -383,12 +371,13 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         "code": 0,
         "data": {
             "datasources": [ds.to_dict() for ds in DATASOURCES.values()],
-            "allowedDbs": ALLOWED_DBS or [d for d in DATASOURCES],
+            "allowedDbs": ALLOWED_DBS or sorted(DATASOURCES.keys()),
             "allowedTables": ALLOWED_TABLES,
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
+            "oracleThick": bool(ORACLE_CLIENT_LIB),
         },
     }
 
@@ -397,10 +386,11 @@ if __name__ == "__main__":
     import uvicorn
 
     log.info(
-        "db-proxy listening on %s:%s (%d datasource(s), auth=%s)",
+        "db-proxy listening on %s:%s (%d datasource(s), auth=%s, oracleThick=%s)",
         LISTEN_HOST,
         LISTEN_PORT,
         len(DATASOURCES),
         "on" if AUTH_TOKEN else "off",
+        "on" if ORACLE_CLIENT_LIB else "off",
     )
     uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info")

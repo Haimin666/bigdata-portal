@@ -1,4 +1,14 @@
 {
+  "authToken": "CHANGE_ME",
+  "listenHost": "0.0.0.0",
+  "listenPort": 8756,
+  "defaultLimit": 100,
+  "maxLimit": 10000,
+  "queryTimeout": 60,
+  "connectTimeout": 5,
+  "allowedDbs": ["credzy", "credzx", "finance_order_trade"],
+  "allowedTables": [],
+  "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
   "datasources": [
     {
       "name": "credzy",
@@ -21,13 +31,13 @@
       "rowLimit": "rownum"
     },
     {
-      "name": "nev",
+      "name": "finance_order_trade",
       "type": "mysql",
-      "host": "mysql3334-r.corp.shiqiao.com",
-      "port": 3334,
-      "user": "dsj_reader",
+      "host": "10.26.2.23",
+      "port": 3343,
+      "user": "financemxh_o0",
       "password": "CHANGE_ME",
-      "schema": "nev"
+      "schema": "finance_order_trade"
     }
   ]
 }
