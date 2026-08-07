@@ -369,16 +369,27 @@ function isNumeric(val: unknown): boolean {
 
 .sql-editor {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  display: flex;
+  overflow: hidden;
 
   /* CodeMirror One Dark 主题覆写 */
   :deep(.CodeMirror) {
+    flex: 1;
+    width: 100%;
     height: 100%;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     line-height: 1.6;
     background: #282c34;
     color: #abb2bf;
+  }
+
+  :deep(.CodeMirror-scroll) {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
   }
 
   :deep(.CodeMirror-gutters) {
