@@ -6,28 +6,70 @@
   "maxLimit": 10000,
   "queryTimeout": 60,
   "connectTimeout": 5,
-  "allowedDbs": ["credzy", "credzx", "finance_order_trade"],
+  "allowedDbs": [
+    "sq_ccrs2",
+    "sq_ccrs",
+    "th_ccrs",
+    "sqqy_ccrs",
+    "pre_ccrs",
+    "finance_order_trade"
+  ],
   "allowedTables": [],
   "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
   "datasources": [
     {
-      "name": "credzy",
+      "name": "sq_ccrs2",
+      "label": "etc",
       "type": "oracle",
-      "host": "10.25.2.82",
+      "host": "10.25.2.87",
       "port": 1521,
-      "user": "pre_ccrs",
+      "user": "sq_ccrs2",
       "password": "CHANGE_ME",
-      "service": "credzy",
+      "service": "credzx",
       "rowLimit": "rownum"
     },
     {
-      "name": "credzx",
+      "name": "sq_ccrs",
+      "label": "狮桥个人",
       "type": "oracle",
       "host": "10.25.2.87",
       "port": 1521,
       "user": "sq_ccrs",
       "password": "CHANGE_ME",
       "service": "credzx",
+      "rowLimit": "rownum"
+    },
+    {
+      "name": "th_ccrs",
+      "label": "通汇",
+      "type": "oracle",
+      "host": "10.25.2.82",
+      "port": 1521,
+      "user": "th_ccrs",
+      "password": "CHANGE_ME",
+      "service": "credzy",
+      "rowLimit": "rownum"
+    },
+    {
+      "name": "sqqy_ccrs",
+      "label": "狮桥企业",
+      "type": "oracle",
+      "host": "10.25.2.82",
+      "port": 1521,
+      "user": "sqqy_ccrs",
+      "password": "CHANGE_ME",
+      "service": "credzy",
+      "rowLimit": "rownum"
+    },
+    {
+      "name": "pre_ccrs",
+      "label": "卓远",
+      "type": "oracle",
+      "host": "10.25.2.82",
+      "port": 1521,
+      "user": "pre_ccrs",
+      "password": "CHANGE_ME",
+      "service": "credzy",
       "rowLimit": "rownum"
     },
     {

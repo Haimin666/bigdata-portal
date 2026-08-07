@@ -3,6 +3,8 @@
 
 export interface DbDataSource {
   name: string
+  /** 显示别名(缺省回退 name) */
+  label?: string
   type: 'mysql' | 'oracle'
   host: string
   port: number

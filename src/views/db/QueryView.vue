@@ -174,7 +174,7 @@ watch(engine, (val) => {
         <el-option label="Oracle" value="oracle" />
       </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
-        <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.name} (${d.type})`" :value="d.name" />
+        <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       <div class="toolbar-spacer" />
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>

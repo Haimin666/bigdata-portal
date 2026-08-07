@@ -127,6 +127,8 @@ class DataSource:
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         self.name: str = str(cfg["name"])
+        # 显示别名:下拉/展示用,缺省回退到 name
+        self.label: str = str(cfg.get("label", "")).strip() or self.name
         self.type: str = str(cfg.get("type", "mysql")).strip().lower()
         if self.type not in ("mysql", "oracle"):
             raise ValueError(f"datasource '{self.name}' type must be mysql/oracle")
@@ -206,6 +208,7 @@ class DataSource:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
+            "label": self.label,
             "type": self.type,
             "host": self.host,
             "port": self.port,
