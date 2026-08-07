@@ -141,6 +141,9 @@ class DataSource:
         )
         # Oracle service_name / MySQL schema(可选,缺省用 name)
         self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
+        # 只读策略(默认 true = 只读,拒绝写操作):
+        # 配 readOnly:false 的库放行 INSERT/UPDATE/DELETE 等(预留可写能力)
+        self.read_only: bool = bool(cfg.get("readOnly", True))
         # 行数限制语法模式:mysql / fetch(12c+) / rownum(11g)
         # 可选覆盖;不配则 Oracle 连接后自动探测版本(11g→rownum,12c+→fetch)
         self.row_limit: str = str(cfg.get("rowLimit", "")).strip().lower()
@@ -214,6 +217,7 @@ class DataSource:
             "port": self.port,
             "user": self.user,
             "rowLimit": self.row_limit,
+            "readOnly": self.read_only,
         }
 
 
@@ -256,6 +260,19 @@ def check_read_only(sql: str) -> None:
         raise HTTPException(
             status_code=403,
             detail="only SELECT/SHOW/DESC/EXPLAIN allowed (read-only)",
+        )
+
+
+def check_single_statement(sql: str) -> None:
+    """多语句注入防护:只读库拒绝包含多个分号分隔语句的 SQL。
+    允许末尾一个结尾分号(如 'SELECT 1;'),其余分号视为多语句。"""
+    s = sql.strip()
+    # 去掉末尾分号后,若仍含分号 → 多语句
+    body = s.rstrip(";").rstrip()
+    if ";" in body:
+        raise HTTPException(
+            status_code=403,
+            detail="multiple statements not allowed (read-only)",
         )
 
 
@@ -379,7 +396,11 @@ def query(
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
     check_db_allowed(req.db)
-    check_read_only(req.sql)
+    ds = get_datasource(req.db)
+    # 只读库(默认):拒绝写操作 + 多语句注入
+    if ds.read_only:
+        check_read_only(req.sql)
+        check_single_statement(req.sql)
     check_tables_allowed(req.sql)
     result = fetch(req.sql, req.db)
     # 审计日志:时间/库/SQL/行数/耗时

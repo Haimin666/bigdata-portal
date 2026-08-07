@@ -76,12 +76,13 @@ python3.7 main.py
 
 ## 安全约束
 
-1. **只读强制**:SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,其余 403
-2. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
-3. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验
-4. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
-5. **超时**:连接/查询超时可配,防远端卡死
-6. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
+1. **只读策略(默认)**:每个数据源 `readOnly` 默认 `true`——SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,`INSERT/UPDATE/DELETE/DROP` 等一律 403。想放开某库可写,配 `"readOnly": false`(预留可写能力)
+2. **多语句防护**:只读库拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许
+3. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
+4. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验
+5. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
+6. **超时**:连接/查询超时可配,防远端卡死
+7. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
 
 ## Oracle 11g 说明
 
