@@ -490,50 +490,69 @@ function isNumeric(val: unknown): boolean {
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
 
     <!-- 结果区(支持多条,逐条展示) -->
+    <!-- 结果区(左侧竖 tab + 右侧内容) -->
     <div v-if="results.length" class="results-wrap">
-      <div v-for="(r, idx) in results" :key="idx" class="result-wrap">
-        <div class="result-header">
-          <span class="result-meta">
-            <template v-if="results.length > 1">#{{ idx + 1 }} · </template>
-            {{ r.error ? '执行失败' : `${r.columns.length} 列 · ${r.rows.length} 行` }}
-            <template v-if="r.truncated">(已截断)</template>
-            <template v-if="!r.error">· {{ r.costMs }}ms</template>
+      <!-- 左侧竖排 tab 列表 -->
+      <div class="result-tabs">
+        <div
+          v-for="(r, idx) in results"
+          :key="idx"
+          class="result-tab"
+          :class="{ active: idx === activeResult }"
+          @click="activeResult = idx"
+        >
+          <span class="tab-no">#{{ idx + 1 }}</span>
+          <span class="tab-label" :class="{ err: r.error }">
+            {{ r.error ? '失败' : `${r.columns.length}列/${r.rows.length}行` }}
           </span>
-          <span class="result-sql" :title="r.sql">{{ r.sql }}</span>
-          <div class="result-actions">
-            <el-button v-if="!r.error" :icon="Download" size="small" @click="exportCsv(idx)">导出 CSV</el-button>
+          <span class="tab-sql" :title="r.sql">{{ r.sql }}</span>
+        </div>
+      </div>
+      <!-- 右侧当前结果内容 -->
+      <div class="result-content">
+        <template v-if="results[activeResult]">
+          <div class="result-header">
+            <span class="result-meta">
+              #{{ activeResult + 1 }} ·
+              {{ results[activeResult].error ? '执行失败' : `${results[activeResult].columns.length} 列 · ${results[activeResult].rows.length} 行` }}
+              <template v-if="results[activeResult].truncated">(已截断)</template>
+              <template v-if="!results[activeResult].error">· {{ results[activeResult].costMs }}ms</template>
+            </span>
+            <div class="result-actions">
+              <el-button v-if="!results[activeResult].error" :icon="Download" size="small" @click="exportCsv(activeResult)">导出 CSV</el-button>
+            </div>
           </div>
-        </div>
-        <el-alert v-if="r.error" type="error" :title="r.error" show-icon :closable="false" class="err-alert" />
-        <div v-else v-loading="loading" class="result-table-wrap">
-          <el-table :data="r.rows.slice(0, 200)" border size="small" class="result-table">
-            <el-table-column type="index" label="#" width="55" align="center" />
-            <el-table-column
-              v-for="c in r.columns"
-              :key="c"
-              :prop="c"
-              :label="c"
-              min-width="140"
-              sortable
-              show-overflow-tooltip
-            >
-              <template #default="{ row }">
-                <span
-                  v-if="row[c] == null"
-                  class="cell-null"
-                  @click="copyCell(row[c])"
-                >NULL</span>
-                <span
-                  v-else
-                  class="cell-val"
-                  :class="{ 'cell-num': isNumeric(row[c]) }"
-                  :title="`点击复制: ${row[c]}`"
-                  @click="copyCell(row[c])"
-                >{{ row[c] }}</span>
-              </template>
-            </el-table-column>
-          </el-table>
-        </div>
+          <el-alert v-if="results[activeResult].error" type="error" :title="results[activeResult].error" show-icon :closable="false" class="err-alert" />
+          <div v-else v-loading="loading" class="result-table-wrap">
+            <el-table :data="results[activeResult].rows.slice(0, 200)" border size="small" class="result-table">
+              <el-table-column type="index" label="#" width="55" align="center" />
+              <el-table-column
+                v-for="c in results[activeResult].columns"
+                :key="c"
+                :prop="c"
+                :label="c"
+                min-width="140"
+                sortable
+                show-overflow-tooltip
+              >
+                <template #default="{ row }">
+                  <span
+                    v-if="row[c] == null"
+                    class="cell-null"
+                    @click="copyCell(row[c])"
+                  >NULL</span>
+                  <span
+                    v-else
+                    class="cell-val"
+                    :class="{ 'cell-num': isNumeric(row[c]) }"
+                    :title="`点击复制: ${row[c]}`"
+                    @click="copyCell(row[c])"
+                  >{{ row[c] }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -816,14 +835,79 @@ function isNumeric(val: unknown): boolean {
   flex-shrink: 0;
 }
 
-/* ── 结果区 ───────────────────────────────────────────────── */
-.result-wrap {
+/* ── 结果区(左侧竖 tab + 右侧内容) ────────────────────────── */
+.results-wrap {
   display: flex;
-  flex-direction: column;
   gap: 8px;
   flex: 1;
   min-height: 200px;
   flex-shrink: 0;
+  min-width: 0;
+}
+
+.result-tabs {
+  width: 180px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  max-height: 100%;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.result-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid transparent;
+
+  &:hover {
+    background: rgba(94, 106, 210, 0.06);
+  }
+
+  &.active {
+    background: rgba(94, 106, 210, 0.1);
+    border-color: $primary;
+  }
+}
+
+.tab-no {
+  font-size: 11px;
+  color: $muted;
+  font-weight: 600;
+}
+
+.tab-label {
+  font-size: 12px;
+  color: $text;
+
+  &.err {
+    color: #f56c6c;
+  }
+}
+
+.tab-sql {
+  font-size: 11px;
+  color: $muted;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .result-header {
