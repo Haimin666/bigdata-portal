@@ -77,7 +77,7 @@ python3.7 main.py
 ## 安全约束
 
 1. **默认只读**:所有库默认只读——SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,`INSERT/UPDATE/DELETE/DROP` 等一律 403
-2. **可写白名单(后台配置)**:`writableTables` 支持 `"db.*"`(整库可写)/ `"db.table"`(单表可写),命中才放行写操作;未配 = 全只读
+2. **可写白名单(后台配置)**:`writableTables` 支持 `"name.*"`(该数据源全表可写)/ `"name.table"`(单表可写),**name = 数据源唯一标识**(前端请求的 db 参数,多个数据源可指向同一真实库)。SQL 里写真实库名或裸表名都会归一化到当前数据源 name 再匹配;未配 = 全只读
 3. **多语句防护**:拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许
 4. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
 5. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验

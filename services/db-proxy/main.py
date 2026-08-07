@@ -282,24 +282,34 @@ def check_single_statement(sql: str) -> None:
 
 
 def check_writable(sql: str, db: str) -> None:
-    """写操作权限:SQL 涉及的所有表必须命中 WRITABLE_TABLES(db.* 或 db.table)。
-    未配置任何可写白名单 → 全库只读,写操作一律拒绝。"""
+    """写操作权限:SQL 涉及的所有表必须命中 WRITABLE_TABLES(name.表 或 name.*)。
+    name = 数据源唯一标识(前端请求的 db 参数),多个数据源可指向同一真实库
+    (service),权限绑定到数据源而不是库名。SQL 里写真实库名(service)或裸表名
+    都会归一化到当前数据源的 name 再匹配。未配置 → 全库只读。"""
+    ds = get_datasource(db)
     # 提取写操作涉及的表(INSERT INTO / UPDATE / DELETE FROM)
     tables = [m.group(1) for m in TABLE_RE.finditer(sql)]
     if not tables:
         # 无法识别表名(如 VALUES 常量),保守拒绝
         raise HTTPException(status_code=403, detail="cannot determine target table")
     for t in tables:
-        # 构造 "db.table" 形式(裸表名补当前库前缀)
-        full = t if "." in t else f"{db}.{t}"
+        # 归一化为 "name.table":
+        # - 裸表名 → 补当前数据源 name
+        # - 带前缀且前缀=当前库 service(真实库名)→ 归一化为 name
+        # - 其他前缀(跨库引用)→ 按原样
+        if "." in t:
+            prefix, tbl = t.split(".", 1)
+            full = f"{db}.{tbl}" if prefix == ds.service else t
+        else:
+            full = f"{db}.{t}"
         allowed = False
         for w in WRITABLE_TABLES:
             if w.endswith(".*"):
-                # db.* 匹配该库所有表
-                if full.startswith(w[:-1]) or t == w[:-2]:
+                # name.* 匹配该数据源所有表
+                if full.startswith(w[:-1]):
                     allowed = True
                     break
-            elif w == full or w == t:
+            elif w == full:
                 allowed = True
                 break
         if not allowed:
