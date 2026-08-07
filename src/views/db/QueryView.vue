@@ -5,9 +5,14 @@ import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon } from '@element
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
-import 'codemirror/addon/edit/matchbrackets.js'
-import 'codemirror/addon/edit/closebrackets.js'
-import 'codemirror/addon/selection/active-line.js'
+
+// CodeMirror 5 的 addon 是 UMD,在 Vite 的 CJS 转换下注册不稳定
+// (addon 挂到内部 require 的实例,与我们 import 的实例可能不一致)。
+// 本项目全部自实现所需功能(括号匹配/自动闭合/当前行/提示浮层),
+// 不依赖任何 addon —— 避免构建/加载兼容问题。
+async function loadAddons() {
+  // 空:不加载 addon
+}
 import { listDataSources, queryDb, type DbDataSource, type DbQueryResult } from '@/api/db'
 
 defineOptions({ name: 'DbQueryView' })
@@ -54,22 +59,43 @@ function adjustFont(delta: number) {
   localStorage.setItem(FONT_KEY, String(fontSize.value))
 }
 
-function initEditor() {
+async function initEditor() {
   if (!cmRef.value || cm) return
+  // 先动态加载 addon(注册到 window.CodeMirror),再创建编辑器
+  try {
+    await loadAddons()
+  } catch (e) {
+    console.warn('[db-query] CodeMirror addon 加载失败:', e)
+  }
   cm = CodeMirror(cmRef.value, {
     value: DEFAULT_SQL,
     mode: 'text/x-sql',
     lineNumbers: true,
-    matchBrackets: true,
-    autoCloseBrackets: true,
     indentWithTabs: false,
     tabSize: 2,
     indentUnit: 2,
     lineWrapping: true,
-    styleActiveLine: true,
     theme: 'default'
   })
-  // Ctrl/Cmd + Enter 执行
+  // SQL 关键词提示:输入字母时自动触发,Ctrl/Cmd+Space 手动
+  cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
+    const last = change.text[0] ?? ''
+    if (last && /[\w$]/.test(last)) sqlHint(c)
+  })
+  // 括号匹配(自实现):光标邻接括号时高亮配对
+  cm.on('cursorActivity', (c: CodeMirror.Editor) => updateBracketMatch(c))
+  // 自动闭合括号
+  cm.on('beforeChange', (c: CodeMirror.Editor, change: CodeMirror.EditorChangeCancellable) => {
+    if (change.origin !== '+input') return
+    const ch = change.text[0] ?? ''
+    if (!ch || ch.length !== 1) return
+    if (['(', '[', '{'].includes(ch)) {
+      const close = ch === '(' ? ')' : ch === '[' ? ']' : '}'
+      const cur = c.getCursor()
+      c.replaceRange(close, cur)
+    }
+  })
+  // Ctrl/Cmd + Enter 执行;↑↓/Esc/Tab 处理提示浮层
   cm.setOption('extraKeys', {
     'Ctrl-Enter': () => {
       void runQuery()
@@ -77,16 +103,170 @@ function initEditor() {
     'Cmd-Enter': () => {
       void runQuery()
     },
+    'Ctrl-Space': (c: CodeMirror.Editor) => sqlHint(c),
     Tab: (c: CodeMirror.Editor) => {
+      // 提示浮层开着 → 确认选中项;否则 Tab 缩进
+      if (hintVisible.value) {
+        const item = hintItems.value[hintIndex.value]
+        if (item) {
+          applyHint(item)
+          return
+        }
+      }
       const cur = c.getCursor()
       c.replaceSelection('  ')
       c.setCursor({ line: cur.line, ch: cur.ch + 2 })
+    },
+    Up: (c: CodeMirror.Editor) => {
+      if (hintVisible.value) {
+        hintIndex.value = (hintIndex.value - 1 + hintItems.value.length) % hintItems.value.length
+      } else {
+        c.execCommand('goLineUp')
+      }
+    },
+    Down: (c: CodeMirror.Editor) => {
+      if (hintVisible.value) {
+        hintIndex.value = (hintIndex.value + 1) % hintItems.value.length
+      } else {
+        c.execCommand('goLineDown')
+      }
+    },
+    Esc: () => {
+      if (hintVisible.value) closeHint()
     }
   })
 }
 
+// ── 括号匹配(自实现,markText 高亮)──────────────────────────
+let bracketMarks: CodeMirror.TextMarker[] = []
+
+function updateBracketMatch(c: CodeMirror.Editor) {
+  // 清除旧标记
+  bracketMarks.forEach((m) => m.clear())
+  bracketMarks = []
+  const pos = c.getCursor().ch
+  const line = c.getLine(c.getCursor().line)
+  if (!line) return
+  const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
+  const openers: Record<string, string> = { '(': ')', '[': ']', '{': '}' }
+  const ch = line[pos] ?? ''
+  const prev = line[pos - 1] ?? ''
+  const mark = (from: { line: number; ch: number }, to: { line: number; ch: number }) => {
+    const m = c.markText(from, to, { className: 'bracket-match' })
+    bracketMarks.push(m)
+  }
+  const curLine = c.getCursor().line
+  // 光标前是闭合括号 → 向前找
+  if (pairs[prev]) {
+    const openCh = pairs[prev] ?? ''
+    let depth = 0
+    const text = c.getValue()
+    const idx = c.indexFromPos({ line: curLine, ch: pos - 1 })
+    for (let i = idx; i >= 0; i--) {
+      const ch2 = text[i] ?? ''
+      if (ch2 === prev) depth++
+      else if (ch2 === openCh) {
+        depth--
+        if (depth === 0) {
+          const openPos = c.posFromIndex(i)
+          mark({ line: curLine, ch: pos - 1 }, { line: curLine, ch: pos })
+          mark(openPos, { line: openPos.line, ch: openPos.ch + 1 })
+          return
+        }
+      }
+    }
+  }
+  // 光标后是开括号 → 向后找
+  if (openers[ch]) {
+    const closeCh = openers[ch] ?? ''
+    let depth = 0
+    const text = c.getValue()
+    const idx = c.indexFromPos({ line: curLine, ch: pos })
+    for (let i = idx; i < text.length; i++) {
+      const ch2 = text[i] ?? ''
+      if (ch2 === ch) depth++
+      else if (ch2 === closeCh) {
+        depth--
+        if (depth === 0) {
+          const closePos = c.posFromIndex(i)
+          mark({ line: curLine, ch: pos }, { line: curLine, ch: pos + 1 })
+          mark(closePos, { line: closePos.line, ch: closePos.ch + 1 })
+          return
+        }
+      }
+    }
+  }
+}
+
+// ── 提示浮层状态 ─────────────────────────────────────────────
+const SQL_KEYWORDS = [
+  'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
+  'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'OUTER JOIN', 'ON', 'AS',
+  'AND', 'OR', 'NOT', 'NULL', 'IS', 'IN', 'LIKE', 'BETWEEN', 'EXISTS',
+  'DISTINCT', 'UNION', 'ALL', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+  'ASC', 'DESC', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
+  'FETCH', 'FIRST', 'ROWS', 'ONLY', 'ROWNUM', 'WITH', 'TABLE', 'INSERT',
+  'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'INTO', 'VALUES', 'SET'
+]
+
+// 提示浮层状态
+const hintVisible = ref(false)
+const hintItems = ref<string[]>([])
+const hintIndex = ref(0)
+// 提示插入位置
+let hintFrom: { line: number; ch: number } | null = null
+let hintTo: { line: number; ch: number } | null = null
+
+function closeHint() {
+  hintVisible.value = false
+  hintItems.value = []
+  hintFrom = null
+  hintTo = null
+}
+
+function applyHint(item: string) {
+  if (!cm || !hintFrom || !hintTo) return
+  cm.replaceRange(item, hintFrom, hintTo)
+  closeHint()
+  cm.focus()
+}
+
+function sqlHint(c: CodeMirror.Editor) {
+  const cur = c.getCursor()
+  const line = c.getLine(cur.line)
+  // 当前词边界:向前找字母/数字/下划线
+  let start = cur.ch
+  while (start > 0 && /[\w$]/.test(line[start - 1] ?? '')) start--
+  const token = line.slice(start, cur.ch)
+  if (!token) {
+    closeHint()
+    return
+  }
+  const up = token.toUpperCase()
+  const list = SQL_KEYWORDS.filter((k) => k.toUpperCase().startsWith(up)).slice(0, 12)
+  if (!list.length) {
+    closeHint()
+    return
+  }
+  hintItems.value = list
+  hintIndex.value = 0
+  hintFrom = { line: cur.line, ch: start }
+  hintTo = { line: cur.line, ch: cur.ch }
+  hintVisible.value = true
+}
+
+/** 提示浮层定位:基于 CodeMirror 坐标 */
+const hintStyle = computed(() => {
+  if (!cm || !hintFrom) return {}
+  const coords = cm.cursorCoords(hintFrom, 'window')
+  return {
+    left: `${coords.left}px`,
+    top: `${coords.bottom + 4}px`
+  }
+})
+
 onMounted(() => {
-  initEditor()
+  void initEditor()
 })
 
 onUnmounted(() => {
@@ -249,7 +429,6 @@ function isNumeric(val: unknown): boolean {
       </el-select>
       <div class="toolbar-spacer" />
       <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
-      <span class="font-size">{{ fontSize }}px</span>
       <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
@@ -266,6 +445,18 @@ function isNumeric(val: unknown): boolean {
     <!-- SQL 画布(CodeMirror) -->
     <div class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
       <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
+      <!-- 关键词提示浮层 -->
+      <div v-if="hintVisible" class="sql-hint-popup" :style="hintStyle">
+        <div
+          v-for="(item, i) in hintItems"
+          :key="item"
+          class="hint-item"
+          :class="{ active: i === hintIndex }"
+          @mousedown.prevent="applyHint(item)"
+        >
+          {{ item }}
+        </div>
+      </div>
     </div>
 
     <!-- 拖拽分割条 -->
@@ -383,13 +574,6 @@ function isNumeric(val: unknown): boolean {
   font-weight: 700;
 }
 
-.font-size {
-  font-size: 12px;
-  color: $muted;
-  min-width: 34px;
-  text-align: center;
-}
-
 .theme-btn {
   padding: 4px;
   font-size: 16px;
@@ -408,13 +592,13 @@ function isNumeric(val: unknown): boolean {
 .sql-canvas {
   position: relative;
   display: flex;
-  background: #282c34;
+  background: #34373c;
   border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
 
   &.light {
-    background: #fff;
+    background: #f7f8fa;
   }
 }
 
@@ -464,6 +648,11 @@ function isNumeric(val: unknown): boolean {
     border-radius: 2px;
   }
 
+  :deep(.bracket-match) {
+    background: rgba(229, 192, 123, 0.35);
+    border-radius: 2px;
+  }
+
   /* 语法 token 公共字体 */
   :deep(.cm-keyword),
   :deep(.cm-string),
@@ -475,38 +664,38 @@ function isNumeric(val: unknown): boolean {
     font-size: var(--cm-font-size, 15px);
   }
 
-  /* ── 深色主题(One Dark) ─────────────────────────────── */
+  /* ── 深色主题(柔和深灰蓝) ───────────────────────────── */
   .sql-canvas.dark & {
     :deep(.CodeMirror) {
-      background: #282c34;
-      color: #abb2bf;
+      background: #34373c;
+      color: #c8ccd4;
     }
     :deep(.CodeMirror-gutters) {
-      background: #21252b;
-      border-right: 1px solid #181a1f;
+      background: #2e3135;
+      border-right: 1px solid #26292d;
     }
     :deep(.CodeMirror-linenumber) {
-      color: #495162;
+      color: #7a818c;
     }
     :deep(.CodeMirror-cursor) {
-      border-left-color: #fff;
+      border-left-color: #e6e8ec;
     }
     :deep(.cm-keyword) {
-      color: #c678dd;
+      color: #d19a66;
       font-weight: 600;
     }
     :deep(.cm-string) {
       color: #98c379;
     }
     :deep(.cm-comment) {
-      color: #5c6370;
+      color: #7a818c;
       font-style: italic;
     }
     :deep(.cm-number) {
-      color: #d19a66;
+      color: #61afef;
     }
     :deep(.cm-builtin) {
-      color: #61afef;
+      color: #56b6c2;
     }
     :deep(.cm-variable) {
       color: #e06c75;
@@ -519,53 +708,110 @@ function isNumeric(val: unknown): boolean {
     }
   }
 
-  /* ── 浅色主题(GitHub 风格) ───────────────────────────── */
+  /* ── 浅色主题(柔和米白) ─────────────────────────────── */
   .sql-canvas.light & {
     :deep(.CodeMirror) {
-      background: #fff;
-      color: #24292e;
+      background: #f7f8fa;
+      color: #3a3f45;
     }
     :deep(.CodeMirror-gutters) {
-      background: #f6f8fa;
-      border-right: 1px solid #d0d7de;
+      background: #eceff2;
+      border-right: 1px solid #dde1e5;
     }
     :deep(.CodeMirror-linenumber) {
-      color: #6e7781;
+      color: #8a9199;
     }
     :deep(.CodeMirror-cursor) {
-      border-left-color: #24292e;
+      border-left-color: #3a3f45;
     }
     :deep(.CodeMirror-selected) {
-      background: rgba(9, 105, 218, 0.2);
+      background: rgba(9, 105, 218, 0.15);
     }
     :deep(.CodeMirror-activeline-background) {
       background: rgba(9, 105, 218, 0.05);
     }
     :deep(.cm-keyword) {
-      color: #cf222e;
+      color: #c2185b;
       font-weight: 600;
     }
     :deep(.cm-string) {
-      color: #0a3069;
+      color: #0a5f5f;
     }
     :deep(.cm-comment) {
-      color: #6e7781;
+      color: #8a9199;
       font-style: italic;
     }
     :deep(.cm-number) {
-      color: #0550ae;
+      color: #0b4f8a;
     }
     :deep(.cm-builtin) {
-      color: #8250df;
+      color: #6f42c1;
     }
     :deep(.cm-variable) {
       color: #953800;
     }
     :deep(.cm-operator) {
-      color: #0550ae;
+      color: #0b4f8a;
     }
     :deep(.cm-matchingbracket) {
-      color: #cf222e;
+      color: #c2185b;
+    }
+  }
+}
+
+/* 自动补全提示框:跟随主题配色(CodeMirror-hints 是 body 级,用全局选择器) */
+:global(.CodeMirror-hints) {
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+}
+
+:global(.CodeMirror-hint) {
+  padding: 4px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 自绘提示浮层 */
+.sql-hint-popup {
+  position: absolute;
+  z-index: 30;
+  min-width: 140px;
+  max-height: 260px;
+  overflow: auto;
+  background: #2e3135;
+  border: 1px solid #45494f;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  padding: 4px 0;
+
+  .sql-canvas.light & {
+    background: #fff;
+    border-color: #dde1e5;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  }
+}
+
+.hint-item {
+  padding: 5px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: #c8ccd4;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover,
+  &.active {
+    background: rgba(97, 175, 239, 0.2);
+    color: #fff;
+  }
+
+  .sql-canvas.light & {
+    color: #3a3f45;
+
+    &:hover,
+    &.active {
+      background: rgba(9, 105, 218, 0.1);
+      color: #0969da;
     }
   }
 }
