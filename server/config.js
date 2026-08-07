@@ -31,5 +31,8 @@ export default {
   // 项目列表即该 token 用户可见的项目,天然不存在无权限项目
   dsToken: process.env.DS_TOKEN || '',
   // 客户机 DB 代理服务地址(如 http://客户机IP:8756),空则 /api/db 代理不可用
-  dbProxyUrl: process.env.DB_PROXY_URL || ''
+  dbProxyUrl: process.env.DB_PROXY_URL || '',
+  // db-proxy 鉴权 token(与客户机 datasources.json 的 authToken 一致),
+  // 由网关注入 X-DB-Token 请求头,前端不感知
+  dbProxyToken: process.env.DB_PROXY_TOKEN || ''
 }

@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus } from '@/config/menu'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 defineOptions({ name: 'SideBar' })
@@ -25,7 +25,8 @@ const icons: Record<string, Component> = {
   Odometer,
   Search,
   DataLine,
-  Cpu
+  Cpu,
+  Coin
 }
 
 // 当前激活菜单(直接按路由路径)

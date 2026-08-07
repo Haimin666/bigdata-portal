@@ -35,6 +35,11 @@ const router = createRouter({
           name: 'hdfs',
           component: () => import('@/views/hdfs/HdfsView.vue')
         },
+        {
+          path: 'db-query',
+          name: 'dbQuery',
+          component: () => import('@/views/db/QueryView.vue')
+        },
         ...subappRoutes
       ]
     },

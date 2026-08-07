@@ -27,6 +27,13 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
+    path: '/db-query',
+    title: '数据库查询',
+    name: 'dbQuery',
+    icon: 'Coin',
+    kind: 'native'
+  },
+  {
     path: '/ds',
     title: '海豚调度',
     name: 'ds',

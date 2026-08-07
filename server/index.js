@@ -337,7 +337,13 @@ if (config.dbProxyUrl) {
     target: config.dbProxyUrl,
     changeOrigin: true,
     pathRewrite: { '^/api/db': '' },
-    logLevel: 'warn'
+    logLevel: 'warn',
+    on: {
+      proxyReq: (proxyReq) => {
+        // 由网关注入鉴权 token,前端不感知(与客户机 datasources.json authToken 一致)
+        if (config.dbProxyToken) proxyReq.setHeader('X-DB-Token', config.dbProxyToken)
+      }
+    }
   })
   app.use('/api/db', (req, res, next) => {
     dbProxy(req, res, next)
