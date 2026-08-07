@@ -17,6 +17,7 @@
   ],
   "allowedTables": [],
   "writableTables": ["finance_order_trade.*"],
+  "executableProcedures": ["credzy.update_balance"],
   "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
   "datasources": [
     {

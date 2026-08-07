@@ -74,6 +74,12 @@ ALLOWED_TABLES = [
 WRITABLE_TABLES = [
     str(s).strip() for s in CONFIG.get("writableTables", []) if str(s).strip()
 ]
+# 可执行过程白名单:格式 "name.procedure"(数据源名.过程名),
+# 如 ["credzy.update_balance"]。命中才放行 CALL/BEGIN/EXEC 过程调用;
+# 过程内部操作对代理是黑盒,单独授权更清晰。未配 = 禁止执行过程
+EXECUTABLE_PROCEDURES = [
+    str(s).strip() for s in CONFIG.get("executableProcedures", []) if str(s).strip()
+]
 # Oracle thick 模式:客户端库目录(含 libclntsh.so),连 11g 必配
 ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
 
@@ -319,6 +325,32 @@ def check_writable(sql: str, db: str) -> None:
             )
 
 
+def check_executable_procedure(sql: str, db: str) -> None:
+    """过程调用校验:提取过程名,命中 EXECUTABLE_PROCEDURES(name.procedure)才放行。
+    支持 CALL proc、BEGIN proc; END;、EXEC proc。未配白名单 → 一律拒绝。"""
+    s = sql.strip()
+    m = re.match(
+        r"^(?:CALL|EXEC)\s+([A-Za-z0-9_$.]+)", s, re.IGNORECASE
+    ) or re.match(
+        r"^BEGIN\s+([A-Za-z0-9_$.]+)\b", s, re.IGNORECASE
+    )
+    if not m:
+        # 非过程语法但也没表名可校验 → 保守拒绝
+        raise HTTPException(status_code=403, detail="unsupported statement type")
+    proc = m.group(1)
+    # 归一化:白名单按 name 配
+    # - 裸过程名 "proc" → db.proc
+    # - "包.过程" → db.pkg.proc
+    # - 已带 db 前缀 "db.proc" / "db.pkg.proc" → 原样
+    first = proc.split(".")[0]
+    full = proc if first == db or proc.count(".") >= 2 else f"{db}.{proc}"
+    if full not in EXECUTABLE_PROCEDURES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"procedure '{proc}' not in executableProcedures",
+        )
+
+
 def check_tables_allowed(sql: str) -> None:
     """表级白名单:从 SQL 提取表名,不在白名单拒绝。"""
     if not ALLOWED_TABLES:
@@ -466,9 +498,12 @@ def query(
     if check_read_only_sql(req.sql):
         check_single_statement(req.sql)
     else:
-        # 写操作(INSERT/UPDATE/DELETE):必须命中可写白名单(db.* / db.table)
-        check_single_statement(req.sql)
-        check_writable(req.sql, req.db)
+        # 过程调用(CALL/BEGIN/EXEC)→ 单独过程白名单,块内多分号属正常语法
+        if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
+            check_executable_procedure(req.sql, req.db)
+        else:
+            check_single_statement(req.sql)
+            check_writable(req.sql, req.db)
     check_tables_allowed(req.sql)
     result = fetch(req.sql, req.db)
     # 审计日志:时间/库/SQL/行数/耗时
@@ -493,6 +528,7 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "allowedDbs": ALLOWED_DBS or sorted(DATASOURCES.keys()),
             "allowedTables": ALLOWED_TABLES,
             "writableTables": WRITABLE_TABLES,
+            "executableProcedures": EXECUTABLE_PROCEDURES,
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,
             "maxSqlLen": MAX_SQL_LEN,
