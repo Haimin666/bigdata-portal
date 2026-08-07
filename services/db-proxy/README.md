@@ -2,12 +2,12 @@
 
 在**可直连数据库的客户机**上运行,把数据库查询能力以 HTTP API 暴露给平台。
 平台服务器无需直连数据库,也永远不接触数据库密码。
-**支持 MySQL 与 Oracle**(`DB_TYPE` 切换)。
+**支持 MySQL 与 Oracle 多数据源**(一个服务连多套库,按 `db` 参数路由)。
 
 ## 架构
 
 ```
-[平台服务器] --HTTP--> [客户机(本服务)] --MySQL/Oracle--> [数据库]
+[平台服务器] --HTTP--> [客户机(本服务)] --MySQL/Oracle--> [数据库们]
   /api/db/*            :8756                     (客户机可直连)
 ```
 
@@ -25,23 +25,39 @@ python3.7 -m pip install -r requirements.txt
 #   pip install --no-index --find-links=/path/to/wheels -r requirements.txt
 ```
 
-> Oracle 模式:oracledb 1.x thin 模式**无需安装 Oracle Instant Client**,
-> 纯 Python 实现,老旧机器友好。
+> Oracle 模式:oracledb 1.x thin 模式**无需安装 Oracle Instant Client**,纯 Python。
 
 ## 配置
 
-复制 `env.example` 为 `.env`(或直接 export),关键项:
+### 1. 数据源(核心)
+
+复制 `datasources.json.example` 为 `datasources.json`,填真实密码:
+
+```json
+{
+  "datasources": [
+    { "name": "credzy", "type": "oracle", "host": "10.25.2.82", "port": 1521,
+      "user": "pre_ccrs", "password": "真实密码", "service": "credzy" },
+    { "name": "credzx", "type": "oracle", "host": "10.25.2.87", "port": 1521,
+      "user": "sq_ccrs", "password": "真实密码", "service": "credzx" },
+    { "name": "nev", "type": "mysql", "host": "mysql3334-r.corp.shiqiao.com", "port": 3334,
+      "user": "dsj_reader", "password": "真实密码", "schema": "nev" }
+  ]
+}
+```
+
+- `name` = 前端请求的 `db` 参数(如 `/query {db:"credzy"}`)
+- `type`: `mysql` / `oracle`
+- Oracle 用 `service`(服务名);MySQL 用 `schema`(库名)
+- 数据库密码**只存在客户机**,平台不接触
+
+### 2. 服务配置(env)
 
 ```bash
-export DB_TYPE=mysql            # mysql 或 oracle
-export DB_HOST=127.0.0.1        # 客户机可直连的库地址
-export DB_PORT=3306             # MySQL 3306 / Oracle 1521
-export DB_USER=your_user
-export DB_PASS=your_password    # 密码只留在客户机
-export ORACLE_SERVICE=ORCLPDB1  # 仅 Oracle:服务名(不填则用请求的 db 参数)
-export ALLOWED_DBS=lion_dw,test # 库白名单(逗号分隔)
-export ALLOWED_TABLES=          # 表白名单(可选,支持 库.表 或裸表名)
-export AUTH_TOKEN=change_me     # 请求鉴权(可选,建议开启)
+export DATASOURCES=datasources.json
+export ALLOWED_DBS=credzy,credzx,nev   # 库白名单(逗号分隔)
+export ALLOWED_TABLES=                  # 表白名单(可选)
+export AUTH_TOKEN=change_me             # 请求鉴权(建议开启)
 ```
 
 ## 启动
@@ -57,16 +73,16 @@ uvicorn main:app --host 0.0.0.0 --port 8756
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET  | `/health` | 探活 |
-| GET  | `/dbs`    | 列出可用库(白名单内) |
-| POST | `/query`  | 执行只读查询,body `{db, sql}` |
-| GET  | `/acl`    | 回显白名单配置(排查) |
+| GET  | `/dbs`    | 列出可用数据源(白名单过滤) |
+| POST | `/query`  | 执行只读查询,body `{db, sql}`(db=数据源 name) |
+| GET  | `/acl`    | 回显数据源/白名单配置(脱敏,排查) |
 
 鉴权:配置了 `AUTH_TOKEN` 后,请求需带请求头 `X-DB-Token: <token>`。
 
 ## 安全约束
 
-1. **只读强制**:SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN` 开头,其余 403
-2. **库白名单**:请求的 `db` 必须在 `ALLOWED_DBS`
+1. **只读强制**:SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,其余 403
+2. **库白名单**:请求的 `db` 必须在 `ALLOWED_DBS`(且是已配置数据源)
 3. **表白名单**:开启后从 SQL 提取表名校验
 4. **强制行数上限**:无限制子句自动加(MySQL `LIMIT 100` / Oracle `FETCH FIRST 100 ROWS ONLY`,可配),硬上限 `MAX_LIMIT`
 5. **超时**:连接 5s / 查询 60s(可配),防远端卡死
@@ -80,7 +96,7 @@ uvicorn main:app --host 0.0.0.0 --port 8756
 部署时在平台服务器的 `.env.local` 加一行:
 
 ```bash
-# 客户机 db-proxy 地址(部署 IP 见上;端口与客户机 LISTEN_PORT 一致)
+# 客户机 db-proxy 地址(端口与客户机 LISTEN_PORT 一致)
 DB_PROXY_URL=http://10.25.15.106:8756
 ```
 

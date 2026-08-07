@@ -1,0 +1,31 @@
+{
+  "datasources": [
+    {
+      "name": "credzy",
+      "type": "oracle",
+      "host": "10.25.2.82",
+      "port": 1521,
+      "user": "pre_ccrs",
+      "password": "CHANGE_ME",
+      "service": "credzy"
+    },
+    {
+      "name": "credzx",
+      "type": "oracle",
+      "host": "10.25.2.87",
+      "port": 1521,
+      "user": "sq_ccrs",
+      "password": "CHANGE_ME",
+      "service": "credzx"
+    },
+    {
+      "name": "nev",
+      "type": "mysql",
+      "host": "mysql3334-r.corp.shiqiao.com",
+      "port": 3334,
+      "user": "dsj_reader",
+      "password": "CHANGE_ME",
+      "schema": "nev"
+    }
+  ]
+}
