@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus } from '@/config/menu'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Expand, Fold } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 defineOptions({ name: 'SideBar' })
@@ -50,11 +50,19 @@ const activePath = computed(() => route.path)
         </template>
       </el-menu-item>
     </el-menu>
+    <!-- 折叠按钮:位于侧边栏右边缘栏线,垂直居中 -->
+    <div class="collapse-bar" @click="emit('toggle-collapse')">
+      <el-icon class="collapse-icon">
+        <Expand v-if="props.collapsed" />
+        <Fold v-else />
+      </el-icon>
+    </div>
   </el-aside>
 </template>
 
 <style scoped lang="scss">
 .portal-aside {
+  position: relative;
   background: #f0f1f5;
   border-right: 1px solid $border;
   transition: width 0.2s;
@@ -75,5 +83,33 @@ const activePath = computed(() => route.path)
 .portal-menu {
   border-right: none;
   background: transparent;
+}
+
+.collapse-bar {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 44px;
+  border: 1px solid $border;
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  background: $panel;
+  cursor: pointer;
+  z-index: 10;
+  color: $muted;
+
+  &:hover {
+    color: $primary;
+    background: #fff;
+  }
+}
+
+.collapse-icon {
+  font-size: 14px;
 }
 </style>

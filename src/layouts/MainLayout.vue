@@ -3,7 +3,6 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menus } from '@/config/menu'
 import SideBar from './components/SideBar.vue'
-import HeaderBar from './components/HeaderBar.vue'
 import TabStage from './components/TabStage.vue'
 import type { PortalTab } from '@/views/subapp/SubappTabs.vue'
 
@@ -93,12 +92,8 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
 
 <template>
   <el-container class="portal-layout">
-    <SideBar :collapsed="collapsed" @select="handleSelect" />
+    <SideBar :collapsed="collapsed" @select="handleSelect" @toggle-collapse="collapsed = !collapsed" />
     <el-container>
-      <HeaderBar
-        :collapsed="collapsed"
-        @toggle-collapse="collapsed = !collapsed"
-      />
       <el-main class="portal-main">
         <TabStage
           :tabs="tabs"
