@@ -21,7 +21,7 @@ app.use(express.static(DIST_DIR))
 
 // 代理路径不解析请求体:express.json() 会消费 stream 导致 http-proxy-middleware
 // 转发时 Content-Length 与实际数据不匹配,下游(海豚登录/YARN kill 等)挂起超时。
-const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi']
+const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db']
 app.use((req, res, next) => {
   if (PROXY_PATHS.some((p) => req.path.startsWith(p))) return next()
   express.json()(req, res, next)
@@ -328,6 +328,26 @@ app.use(
 
 // Stingray API(cookie 代理)
 app.use('/__/stingray', iframeProxy(config.stingrayUrl + '/__/stingray', '/__/stingray'))
+
+// ── DB 代理(客户机侧 services/db-proxy)─────────────────────────
+// 平台无法直连数据库,经客户机的只读 HTTP 代理执行查询。
+// 安全:目标必须命中配置的 DB_PROXY_URL(SSRF 防护);未配置时代理不可用。
+if (config.dbProxyUrl) {
+  const dbProxy = createProxyMiddleware({
+    target: config.dbProxyUrl,
+    changeOrigin: true,
+    pathRewrite: { '^/api/db': '' },
+    logLevel: 'warn'
+  })
+  app.use('/api/db', (req, res, next) => {
+    dbProxy(req, res, next)
+  })
+} else {
+  app.use('/api/db', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  )
+}
+
 app.post(
   '/api/login/stingray',
   createLoginEndpoint({

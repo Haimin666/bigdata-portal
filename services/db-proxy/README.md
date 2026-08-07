@@ -1,0 +1,72 @@
+# db-proxy:数据库只读 HTTP 代理(客户机侧)
+
+在**可直连数据库的客户机**上运行,把数据库查询能力以 HTTP API 暴露给平台。
+平台服务器无需直连数据库,也永远不接触数据库密码。
+
+## 架构
+
+```
+[平台服务器] --HTTP--> [客户机(本服务)] --MySQL--> [数据库]
+  /api/db/*            :8756                     (客户机可直连)
+```
+
+## 环境要求
+
+- Python 3.7+(老旧机器可用 3.7.6)
+- 客户机能直连目标 MySQL
+
+## 安装
+
+```bash
+cd services/db-proxy
+python3.7 -m pip install -r requirements.txt
+# 或离线安装:将 fastapi/uvicorn/pymysql 的 wheel 拷到客户机
+#   pip install --no-index --find-links=/path/to/wheels -r requirements.txt
+```
+
+## 配置
+
+复制 `env.example` 为 `.env`(或直接 export),关键项:
+
+```bash
+export DB_HOST=127.0.0.1        # 客户机可直连的库地址
+export DB_USER=your_user
+export DB_PASS=your_password    # 密码只留在客户机
+export ALLOWED_DBS=lion_dw,test # 库白名单(逗号分隔)
+export ALLOWED_TABLES=          # 表白名单(可选,支持 库.表 或裸表名)
+export AUTH_TOKEN=change_me     # 请求鉴权(可选,建议开启)
+```
+
+## 启动
+
+```bash
+python3.7 main.py
+# 或
+uvicorn main:app --host 0.0.0.0 --port 8756
+```
+
+## 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET  | `/health` | 探活 |
+| GET  | `/dbs`    | 列出可用库(白名单内) |
+| POST | `/query`  | 执行只读查询,body `{db, sql}` |
+| GET  | `/acl`    | 回显白名单配置(排查) |
+
+鉴权:配置了 `AUTH_TOKEN` 后,请求需带请求头 `X-DB-Token: <token>`。
+
+## 安全约束
+
+1. **只读强制**:SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN` 开头,其余 403
+2. **库白名单**:请求的 `db` 必须在 `ALLOWED_DBS`
+3. **表白名单**:开启后从 SQL 提取表名校验
+4. **强制 LIMIT**:无 LIMIT 自动加 `LIMIT 100`(可配),硬上限 `MAX_LIMIT`
+5. **超时**:连接 5s / 查询 60s(可配),防远端卡死
+6. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
+
+## 平台接入
+
+平台网关 `server/config.js` 配置 `DB_PROXY_URL`(如 `http://客户机IP:8756`),
+网关 `/api/db/*` 会代理到该地址(带 SSRF 白名单校验)。
+前端「即时查询」视图走 `/api/db/query`。
