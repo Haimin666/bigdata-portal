@@ -116,7 +116,8 @@ TABLE_RE = re.compile(
 )
 # 行数上限检测(MySQL/Oracle 通用):LIMIT n 或 FETCH FIRST n ROWS
 LIMIT_RE = re.compile(
-    r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS)", re.IGNORECASE
+    r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
+    re.IGNORECASE,
 )
 
 app = FastAPI(title="db-proxy", version="2.1.0")
@@ -324,10 +325,10 @@ def check_tables_allowed(sql: str) -> None:
 
 
 def enforce_limit(sql: str) -> int:
-    """提取行数上限:MySQL 的 LIMIT n 或 Oracle 的 FETCH FIRST n ROWS。"""
+    """提取行数上限:MySQL LIMIT / Oracle FETCH FIRST / Oracle ROWNUM(11g)。"""
     m = LIMIT_RE.search(sql)
     if m:
-        limit = int(m.group(1) or m.group(2))
+        limit = int(next(g for g in (m.group(1), m.group(2), m.group(3)) if g is not None))
         if limit > MAX_LIMIT:
             raise HTTPException(
                 status_code=400, detail=f"row limit exceeds MAX_LIMIT({MAX_LIMIT})"
