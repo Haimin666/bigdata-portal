@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import * as echarts from 'echarts/core'
+import { TreeChart } from 'echarts/charts'
+import { TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import {
   fetchWorkflowTree,
   rerunCascade,
@@ -9,6 +13,8 @@ import {
   type CascadeNode
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
+
+echarts.use([TreeChart, TooltipComponent, CanvasRenderer])
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -45,6 +51,96 @@ function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
   return out
 }
 
+// ── ECharts 依赖树(下游,当前为根向右展开,自动分叉) ─────────
+const chartRef = ref<HTMLDivElement>()
+let chart: echarts.ECharts | null = null
+
+/** 下游节点 → ECharts tree 结构 */
+function toEChartNode(n: DepNode): Record<string, unknown> {
+  const inst = n.instance?.state
+  let color = '#909399'
+  if (inst === 'FAILURE') color = '#f56c6c'
+  else if (inst === 'SUCCESS') color = '#67c23a'
+  else if (inst && inst.includes('RUNNING')) color = '#5e6ad2'
+  return {
+    name: n.processName,
+    projectName: n.projectName,
+    processId: n.processId,
+    itemStyle: { color, borderColor: color },
+    children: (n.downstream || []).map(toEChartNode)
+  }
+}
+
+function renderChart() {
+  if (!chartRef.value || !tree.value) return
+  if (!chart) {
+    chart = echarts.init(chartRef.value)
+    chart.on('click', (params: unknown) => {
+      const p = params as { data?: { processId?: number; projectName?: string; processName?: string } }
+      if (p.data?.processId) {
+        onJump({
+          processId: p.data.processId,
+          projectName: p.data.projectName || '',
+          processName: p.data.processName || ''
+        })
+      }
+    })
+  }
+  const root: Record<string, unknown> = {
+    name: tree.value.processName,
+    projectName: tree.value.projectName,
+    processId: tree.value.processId,
+    itemStyle: { color: '#5e6ad2', borderColor: '#5e6ad2', borderWidth: 2 },
+    children: (tree.value.downstream || []).map(toEChartNode)
+  }
+  chart.setOption({
+    tooltip: {
+      formatter: (p: unknown) => {
+        const d = (p as { data?: { name?: string; projectName?: string } }).data || {}
+        return `<b>${d.name || ''}</b><br/>项目:${d.projectName || ''}`
+      }
+    },
+    series: [
+      {
+        type: 'tree',
+        data: [root],
+        left: '10%',
+        right: '5%',
+        top: '5%',
+        bottom: '5%',
+        orient: 'LR',
+        symbol: 'circle',
+        symbolSize: 8,
+        expandAndCollapse: true,
+        initialTreeDepth: 3,
+        label: {
+          position: 'left',
+          verticalAlign: 'middle',
+          align: 'right',
+          fontSize: 11,
+          formatter: (p: unknown) => (p as { name?: string }).name || ''
+        },
+        leaves: {
+          label: {
+            position: 'right',
+            verticalAlign: 'middle',
+            align: 'left'
+          }
+        },
+        emphasis: {
+          focus: 'descendant'
+        },
+        lineStyle: { color: '#c9cdd6', width: 1.5 }
+      }
+    ]
+  })
+  chart.resize()
+}
+
+function onChartResize() {
+  chart?.resize()
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -54,6 +150,9 @@ async function load() {
     // 默认勾选:当前 + 所有下游(上游不重跑)
     const downs = collectDownstream(tree.value?.downstream)
     checked.value = new Set([currentKey.value, ...downs.map((n) => String(n.processId))])
+    // 等 DOM 就绪后渲染 ECharts 下游树
+    await nextTick()
+    renderChart()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -126,7 +225,14 @@ async function doRerun() {
 }
 
 onMounted(() => {
+  window.addEventListener('resize', onChartResize)
   if (props.modelValue) load()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', onChartResize)
+  chart?.dispose()
+  chart = null
 })
 </script>
 
@@ -164,16 +270,11 @@ onMounted(() => {
               <span class="proj">{{ projectName }}</span>
             </div>
           </div>
-          <!-- 下游分支(向右) -->
-          <DepBranch
-            v-if="tree.downstream?.length"
-            :nodes="tree.downstream"
-            direction="right"
-            :current-key="currentKey"
-            :checked="checked"
-            @toggle="toggle"
-            @jump="onJump"
-          />
+          <!-- 下游依赖:ECharts 树(自动分叉,可折叠) -->
+          <div class="dep-chart" :class="{ empty: !tree.downstream?.length }">
+            <div v-if="tree.downstream?.length" ref="chartRef" class="chart-canvas" />
+            <div v-else class="dep-empty">无下游依赖</div>
+          </div>
         </div>
         <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
       </template>
@@ -224,6 +325,26 @@ onMounted(() => {
   gap: 8px;
   min-width: max-content;
   padding: 12px 4px;
+}
+
+/* ECharts 下游树容器 */
+.dep-chart {
+  flex: 1;
+  min-width: 400px;
+  height: 100%;
+  min-height: 320px;
+
+  &.empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
 }
 
 /* 当前节点样式(与 DepBranch 卡片一致) */
