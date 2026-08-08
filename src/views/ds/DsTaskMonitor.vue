@@ -112,6 +112,17 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
+    // 全部项目模式下必须有搜索词(避免并发请求全部项目,打垮海豚/卡顿)
+    if (!projectName.value) {
+      const kw = (viewMode.value === 'task' ? searchTask.value : searchProcess.value)?.trim()
+      if (!kw) {
+        instances.value = []
+        tasks.value = []
+        total.value = 0
+        if (seq === loadSeq) loading.value = false
+        return
+      }
+    }
     const { start, end } = rangeDates()
     // 填写任务名 → 任务实例视图;否则工作流实例视图
     if (viewMode.value === 'task') {
@@ -152,23 +163,22 @@ async function loadAllOrOne<T>(
   // 全部项目
   const kw = (mode === 'task' ? searchTask.value : searchProcess.value)?.trim()
   const targets: { projectName: string; processName?: string; processId?: number }[] = []
-  if (kw) {
-    // 有搜索词:用依赖缓存定位(快,不发海豚搜索请求)
-    const hits = await searchWorkflows(kw)
-    const byProject = new Map<string, { projectName: string }>()
-    for (const h of hits) {
-      if (h.matchedTask || h.processName.toLowerCase().includes(kw.toLowerCase())) {
-        targets.push({ projectName: h.projectName, processName: h.processName, processId: h.processId })
-      } else {
-        byProject.set(h.projectName, { projectName: h.projectName })
-      }
-    }
-    for (const p of byProject.values()) targets.push(p)
-    if (!targets.length) return { totalList: [], total: 0 }
-  } else {
-    // 无搜索词:全部项目并发查(限并发,避免打垮海豚)
-    targets.push(...projects.value.map((p) => ({ projectName: p.name })))
+  if (!kw) {
+    // 全部项目必须有搜索词才跨项目查(避免并发请求全部项目,打垮海豚/页面卡顿)
+    return { totalList: [], total: 0 }
   }
+  // 有搜索词:用依赖缓存定位(快,不发海豚搜索请求)
+  const hits = await searchWorkflows(kw)
+  const byProject = new Map<string, { projectName: string }>()
+  for (const h of hits) {
+    if (h.matchedTask || h.processName.toLowerCase().includes(kw.toLowerCase())) {
+      targets.push({ projectName: h.projectName, processName: h.processName, processId: h.processId })
+    } else {
+      byProject.set(h.projectName, { projectName: h.projectName })
+    }
+  }
+  for (const p of byProject.values()) targets.push(p)
+  if (!targets.length) return { totalList: [], total: 0 }
   // 并发查询(限 3)
   const results: T[] = []
   let cursor = 0
@@ -587,7 +597,7 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="暂无工作流实例" />
+        <el-empty :description="!projectName && !searchProcess.trim() ? '全部项目下请输入工作流名称搜索' : '暂无工作流实例'" />
       </template>
     </el-table>
 
@@ -641,7 +651,7 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="暂无任务实例" />
+        <el-empty :description="!projectName && !searchTask.trim() ? '全部项目下请输入任务名称搜索' : '暂无任务实例'" />
       </template>
     </el-table>
 
