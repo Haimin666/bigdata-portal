@@ -29,9 +29,14 @@ const sortBy = ref<string | null>(null)
 const sortDir = ref<'asc' | 'desc'>('asc')
 
 const rows = computed(() => {
-  const filtered = props.apps.filter((a) =>
-    a.name.toLowerCase().includes(props.searchByAppName.toLowerCase())
-  )
+  const kw = props.searchByAppName.trim().toLowerCase()
+  const filtered = props.apps.filter((a) => {
+    if (!kw) return true
+    return (
+      a.name.toLowerCase().includes(kw) ||
+      a.id.toLowerCase().includes(kw)
+    )
+  })
   if (!sortBy.value) return filtered
   const dir = sortDir.value === 'asc' ? 1 : -1
   return [...filtered].sort((a, b) => {

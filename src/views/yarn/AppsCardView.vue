@@ -25,11 +25,16 @@ const emit = defineEmits<{
 
 const visibleHeaders = computed(() => props.headers.filter((h) => h.visible))
 
-const rows = computed(() =>
-  props.apps.filter((a) =>
-    a.name.toLowerCase().includes(props.searchByAppName.toLowerCase())
-  )
-)
+const rows = computed(() => {
+  const kw = props.searchByAppName.trim().toLowerCase()
+  return props.apps.filter((a) => {
+    if (!kw) return true
+    return (
+      a.name.toLowerCase().includes(kw) ||
+      a.id.toLowerCase().includes(kw)
+    )
+  })
+})
 
 const paged = computed(() =>
   rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)

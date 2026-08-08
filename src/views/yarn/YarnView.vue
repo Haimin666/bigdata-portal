@@ -234,7 +234,7 @@ function onRowsChange(s: number) {
       <el-input
         v-model="store.searchByAppName"
         class="toolbar-item search-input"
-        placeholder="按应用名搜索"
+        placeholder="按应用名/ID 搜索"
         clearable
       />
 
