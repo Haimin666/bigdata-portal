@@ -69,21 +69,10 @@ function stateText(state?: string): string {
   return map[state] || state
 }
 
-/** crontab → 每天执行时间描述(如 '0 3 * * *' → '每天 03:00') */
+/** crontab → 展示(直接显示原始值,如 '0 3 * * *') */
 function crontabDesc(crontab?: string | null): string {
   if (!crontab) return ''
-  const parts = crontab.trim().split(/\s+/)
-  if (parts.length < 3) return `cron:${crontab}`
-  const h = parts[1]
-  const m = parts[0]
-  if (h === '*' && m === '*') return '每分钟'
-  if (h === '*' && m !== '*') return `每小时 ${m} 分`
-  if (h !== '*') {
-    const hour = h.length === 1 ? '0' + h : h
-    const min = m === '0' ? '00' : m
-    return `每天 ${hour}:${min}`
-  }
-  return `cron:${crontab}`
+  return `cron ${crontab.trim()}`
 }
 
 /** 状态 → 边框色 */

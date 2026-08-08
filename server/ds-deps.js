@@ -127,9 +127,7 @@ function parseProcessDefinition(data) {
   return {
     tasks: tasks.map((t) => ({ id: t.id, name: t.name, type: t.type || t.taskType })),
     connects,
-    upstream,
-    // 定时调度(crontab,如 '0 3 * * *' 每天 03:00),None=无定时
-    crontab: data.crontab || null
+    upstream
   }
 }
 
@@ -180,6 +178,29 @@ async function collect() {
         if (String(f.scheduleReleaseState).toUpperCase() !== 'ONLINE') continue
         allWorkflows.push({ projectId: p.id, projectName: p.name, processId: f.id, processName: f.name })
       }
+      // 每项目拉一次调度列表,收集 crontab 映射(processDefinitionId → crontab)
+      // 避免逐个工作流查调度(2344 次),每项目 1 次即可(156 次)
+      const schedMap = new Map()
+      try {
+        let sp = 1
+        for (;;) {
+          const sd = await dsApi(`/projects/${encodeURIComponent(p.name)}/schedule/list-paging`, {
+            pageNo: sp,
+            pageSize: 100
+          })
+          const sl = sd?.data?.totalList || []
+          for (const s of sl) {
+            const did = s.processDefinitionCode || s.processDefinitionId
+            if (did) schedMap.set(String(did), s.crontab || null)
+          }
+          if (!sl.length || sl.length < 100) break
+          sp++
+          if (sp > 20) break
+        }
+      } catch {
+        /* 调度列表失败不影响 */
+      }
+      crontabMap = schedMap
     } catch (e) {
       console.warn(`[ds-deps] 项目 ${p.name} 工作流列表失败: ${e.message}`)
     }
@@ -187,6 +208,7 @@ async function collect() {
   console.log(`[ds-deps] 工作流总数: ${allWorkflows.length}`)
   // 3. 并发逐个拉定义解析
   const nodes = new Map()
+  let crontabMap = new Map() // processDefinitionId → crontab(调度列表收集)
   let cursor = 0
   const worker = async () => {
     while (cursor < allWorkflows.length) {
@@ -202,6 +224,7 @@ async function collect() {
             projectName: wf.projectName,
             processId: wf.processId,
             processName: wf.processName,
+            crontab: crontabMap.get(String(wf.processId)) || null,
             ...parsed
           })
         }
