@@ -127,7 +127,9 @@ function parseProcessDefinition(data) {
   return {
     tasks: tasks.map((t) => ({ id: t.id, name: t.name, type: t.type || t.taskType })),
     connects,
-    upstream
+    upstream,
+    // 定时调度(crontab,如 '0 3 * * *' 每天 03:00),None=无定时
+    crontab: data.crontab || null
   }
 }
 
@@ -309,7 +311,7 @@ function buildFullTree(processId) {
 }
 
 /** 查某工作流最近实例(按 defId + 时间倒序),返回最新一条或 null */
-async function fetchLatestInstance(projectName, processId, days = 1) {
+async function fetchLatestInstance(projectName, processId, days = 7) {
   try {
     const now = Date.now()
     const start = new Date(now - days * 86400000).toISOString().slice(0, 19).replace('T', ' ')
@@ -321,7 +323,13 @@ async function fetchLatestInstance(projectName, processId, days = 1) {
     const list = d?.data?.totalList || []
     if (!list.length) return null
     const i = list[0]
-    return { instanceId: i.id, name: i.name, state: i.state }
+    return {
+      instanceId: i.id,
+      name: i.name,
+      state: i.state,
+      // 实例开始时间(展示"最近执行时间")
+      startTime: i.startTime || null
+    }
   } catch {
     return null
   }
@@ -415,7 +423,11 @@ export function dsDepsRouter() {
     const annotate = async (nodes) => {
       for (const n of nodes || []) {
         queue.push(async () => {
+          // 近 1 天实例状态(成功/失败/运行中/无实例)
           n.instance = await fetchLatestInstance(n.projectName, n.processId, 1)
+          // 补 crontab(每天执行时间)到节点
+          const node = findNode(n.processId)
+          n.crontab = node?.crontab || null
         })
         await annotate(n.downstream)
       }

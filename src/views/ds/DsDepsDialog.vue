@@ -2,7 +2,7 @@
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts/core'
-import { TreeChart } from 'echarts/charts'
+import { TreeChart, GraphChart } from 'echarts/charts'
 import { TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import {
@@ -14,7 +14,7 @@ import {
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
 
-echarts.use([TreeChart, TooltipComponent, CanvasRenderer])
+echarts.use([TreeChart, GraphChart, TooltipComponent, CanvasRenderer])
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -51,24 +51,113 @@ function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
   return out
 }
 
-// ── ECharts 依赖树(下游,当前为根向右展开,自动分叉) ─────────
+// ── ECharts 依赖图(graph 关系图:统一卡片 + 可拖拽) ─────────
 const chartRef = ref<HTMLDivElement>()
 let chart: echarts.ECharts | null = null
 
-/** 下游节点 → ECharts tree 结构 */
-function toEChartNode(n: DepNode): Record<string, unknown> {
-  const inst = n.instance?.state
-  let color = '#909399'
-  if (inst === 'FAILURE') color = '#f56c6c'
-  else if (inst === 'SUCCESS') color = '#67c23a'
-  else if (inst && inst.includes('RUNNING')) color = '#5e6ad2'
-  return {
-    name: n.processName,
-    projectName: n.projectName,
-    processId: n.processId,
-    itemStyle: { color, borderColor: color },
-    children: (n.downstream || []).map(toEChartNode)
+/** 状态 → 文本(近 1 天) */
+function stateText(state?: string): string {
+  if (!state) return '近1天无实例'
+  const map: Record<string, string> = {
+    SUCCESS: '成功',
+    FAILURE: '失败',
+    RUNNING_EXEUTION: '运行中',
+    RUNNING_EXECUTION: '运行中',
+    PAUSE: '暂停',
+    STOP: '停止'
   }
+  return map[state] || state
+}
+
+/** crontab → 每天执行时间描述(如 '0 3 * * *' → '每天 03:00') */
+function crontabDesc(crontab?: string | null): string {
+  if (!crontab) return ''
+  const parts = crontab.trim().split(/\s+/)
+  if (parts.length < 3) return `cron:${crontab}`
+  const h = parts[1]
+  const m = parts[0]
+  if (h === '*' && m === '*') return '每分钟'
+  if (h === '*' && m !== '*') return `每小时 ${m} 分`
+  if (h !== '*') {
+    const hour = h.length === 1 ? '0' + h : h
+    const min = m === '0' ? '00' : m
+    return `每天 ${hour}:${min}`
+  }
+  return `cron:${crontab}`
+}
+
+/** 状态 → 边框色 */
+function stateBorder(state?: string): string {
+  if (state === 'FAILURE') return '#f56c6c'
+  if (state === 'SUCCESS') return '#67c23a'
+  if (state && state.includes('RUNNING')) return '#5e6ad2'
+  return '#c9cdd6'
+}
+
+/** 拍平上下游为 graph 节点+边(层用于初始布局) */
+function buildGraph() {
+  const nodes: Record<string, unknown>[] = []
+  const edges: { source: string; target: string }[] = []
+  const seen = new Set<string>()
+  const layerMap = new Map<string, number>()
+
+  const addNode = (n: DepNode, layer: number) => {
+    const k = String(n.processId)
+    layerMap.set(k, layer)
+    if (seen.has(k)) return
+    seen.add(k)
+    const inst = n.instance?.state
+    nodes.push({
+      name: n.processName,
+      projectName: n.projectName,
+      processId: n.processId,
+      stateText: stateText(inst),
+      crontabText: crontabDesc(n.crontab),
+      border: stateBorder(inst),
+      isCurrent: false
+    })
+  }
+
+  const walkUp = (ns: DepNode[] | undefined, layer: number) => {
+    for (const n of ns || []) {
+      addNode(n, layer)
+      walkUp(n.upstream, layer - 1)
+      for (const ch of n.upstream || []) {
+        edges.push({ source: String(ch.processId), target: String(n.processId) })
+      }
+    }
+  }
+  const walkDown = (ns: DepNode[] | undefined, layer: number) => {
+    for (const n of ns || []) {
+      addNode(n, layer)
+      walkDown(n.downstream, layer + 1)
+      for (const ch of n.downstream || []) {
+        edges.push({ source: String(n.processId), target: String(ch.processId) })
+      }
+    }
+  }
+  if (!tree.value) return { nodes: [], edges: [] }
+  walkUp(tree.value.upstream, -1)
+  addNode(tree.value, 0)
+  const curNode = nodes.find((x) => x.processId === tree.value?.processId)
+  if (curNode) curNode.isCurrent = true
+  walkDown(tree.value.downstream, 1)
+
+  // 初始布局:按层横向排,同层纵向均分
+  const byLayer = new Map<number, number[]>()
+  for (const k of seen) {
+    const l = layerMap.get(k) || 0
+    if (!byLayer.has(l)) byLayer.set(l, [])
+    byLayer.get(l)!.push(Number(k))
+  }
+  for (const n of nodes) {
+    const l = layerMap.get(String(n.processId)) || 0
+    const arr = byLayer.get(l) || []
+    const idx = arr.indexOf(Number(n.processId))
+    ;(n as Record<string, unknown>).x = l * 280
+    ;(n as Record<string, unknown>).y = (idx - (arr.length - 1) / 2) * 100
+  }
+  return { nodes, edges }
 }
 
 function renderChart() {
@@ -76,61 +165,63 @@ function renderChart() {
   if (!chart) {
     chart = echarts.init(chartRef.value)
     chart.on('click', (params: unknown) => {
-      const p = params as { data?: { processId?: number; projectName?: string; processName?: string } }
+      const p = params as { data?: { processId?: number; projectName?: string; name?: string } }
       if (p.data?.processId) {
         onJump({
           processId: p.data.processId,
           projectName: p.data.projectName || '',
-          processName: p.data.processName || ''
+          processName: p.data.name || ''
         })
       }
     })
   }
-  const root: Record<string, unknown> = {
-    name: tree.value.processName,
-    projectName: tree.value.projectName,
-    processId: tree.value.processId,
-    itemStyle: { color: '#5e6ad2', borderColor: '#5e6ad2', borderWidth: 2 },
-    children: (tree.value.downstream || []).map(toEChartNode)
-  }
+  const { nodes, edges } = buildGraph()
   chart.setOption({
     tooltip: {
       formatter: (p: unknown) => {
-        const d = (p as { data?: { name?: string; projectName?: string } }).data || {}
-        return `<b>${d.name || ''}</b><br/>项目:${d.projectName || ''}`
+        const d = (p as { data?: Record<string, unknown> }).data || {}
+        return `<b>${d.name || ''}</b><br/>项目:${d.projectName || ''}<br/>状态:${d.stateText || ''}${d.crontabText ? '<br/>' + d.crontabText : ''}`
       }
     },
     series: [
       {
-        type: 'tree',
-        data: [root],
-        left: '10%',
-        right: '5%',
-        top: '5%',
-        bottom: '5%',
-        orient: 'LR',
-        symbol: 'circle',
-        symbolSize: 8,
-        expandAndCollapse: true,
-        initialTreeDepth: 3,
-        label: {
-          position: 'left',
-          verticalAlign: 'middle',
-          align: 'right',
-          fontSize: 11,
-          formatter: (p: unknown) => (p as { name?: string }).name || ''
+        type: 'graph',
+        layout: 'none',
+        draggable: true,
+        roam: true,
+        data: nodes,
+        links: edges,
+        symbol: 'rect',
+        symbolSize: [220, 72],
+        itemStyle: {
+          color: '#ffffff',
+          borderColor: '#d0d4db',
+          borderWidth: 1,
+          borderRadius: 8
         },
-        leaves: {
-          label: {
-            position: 'right',
-            verticalAlign: 'middle',
-            align: 'left'
+        label: {
+          show: true,
+          position: 'inside',
+          fontSize: 11,
+          lineHeight: 15,
+          color: '#333',
+          formatter: (p: unknown) => {
+            const d = (p as { data: Record<string, unknown> }).data || {}
+            const st = d.stateText || ''
+            let mark = ''
+            if (st === '成功') mark = '✓ '
+            else if (st === '失败') mark = '✗ '
+            else if (st === '运行中') mark = '● '
+            const name = d.name || ''
+            const sub = `${d.projectName || ''} | ${mark}${st}`
+            return d.crontabText ? `${name}\n${sub}\n${d.crontabText}` : `${name}\n${sub}`
           }
         },
+        lineStyle: { color: '#c9cdd6', width: 1.2, curveness: 0.1 },
         emphasis: {
-          focus: 'descendant'
-        },
-        lineStyle: { color: '#c9cdd6', width: 1.5 }
+          focus: 'adjacency',
+          itemStyle: { borderWidth: 2, borderColor: '#5e6ad2' }
+        }
       }
     ]
   })

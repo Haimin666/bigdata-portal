@@ -9,7 +9,9 @@ export interface DepNode {
   upstream?: DepNode[]
   downstream?: DepNode[]
   /** 下游节点最近实例(有则显示状态/可重跑) */
-  instance?: { instanceId: number; name: string; state: string } | null
+  instance?: { instanceId: number; name: string; state: string; startTime?: string | null } | null
+  /** 定时调度 crontab(每天执行时间,如 '0 3 * * *') */
+  crontab?: string | null
 }
 
 export interface WorkflowTree {
