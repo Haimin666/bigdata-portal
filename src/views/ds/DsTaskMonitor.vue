@@ -18,7 +18,7 @@ import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import DsDepsDialog from './DsDepsDialog.vue'
-import { searchWorkflows } from '@/api/dsDeps'
+import { searchWorkflows, rerunInstances } from '@/api/dsDeps'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -186,19 +186,21 @@ async function loadAllOrOne<T>(
     while (cursor < targets.length) {
       const t = targets[cursor++]
       try {
+        const tag = (list: unknown[]) =>
+          (list as Array<Record<string, unknown>>).map((x) => ({ ...x, _projectName: t.projectName }))
         if (t.processId) {
           // 精确工作流:按工作流名搜索实例
           const d =
             mode === 'task'
               ? await listTaskInstances(t.projectName, { ...common, taskName: t.processName })
               : await listProcessInstances(t.projectName, { ...common, searchVal: t.processName })
-          results.push(...((d.totalList || []) as T[]))
+          results.push(...(tag(d.totalList || []) as T[]))
         } else {
           const d =
             mode === 'task'
               ? await listTaskInstances(t.projectName, { ...common, taskName: kw || undefined })
               : await listProcessInstances(t.projectName, { ...common, searchVal: kw || undefined })
-          results.push(...((d.totalList || []) as T[]))
+          results.push(...(tag(d.totalList || []) as T[]))
         }
       } catch {
         /* 单个项目失败跳过 */
@@ -374,6 +376,39 @@ function onDepsJump(node: { projectName: string; processName: string }) {
   load()
 }
 
+/** 一键拉起失败:批量重跑当前列表中的失败实例(二次确认) */
+async function rerunAllFailed() {
+  const failed = instances.value.filter((i) => i.state === 'FAILURE')
+  if (!failed.length) {
+    ElMessage.info('当前列表没有失败实例')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定要重跑当前列表中的 ${failed.length} 个失败工作流实例吗?\n(项目: ${projectName.value || '全部'},将逐个重跑)`,
+      '一键拉起失败',
+      { confirmButtonText: '确认重跑', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const targets = failed.map((i) => ({
+      projectName: i._projectName || projectName.value,
+      instanceId: i.id,
+      name: i.name
+    }))
+    const results = await rerunInstances(targets)
+    const ok = results.filter((r) => r.ok).length
+    const fail = results.filter((r) => !r.ok)
+    ElMessage.success(`拉起完成:成功 ${ok},失败 ${fail.length}`)
+    if (fail.length) ElMessage.warning(fail.map((f) => `${f.name}:${f.msg}`).join(';'))
+    load()
+  } catch (e) {
+    ElMessage.error(`拉起失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
 // ── 任务节点级操作(单任务重跑 / 从节点级联)─────────────────
 /** 从任务实例提取节点定义 id(taskJson.id,如 tasks-41739) */
 function taskNodeId(t: DsTaskInstance): string | null {
@@ -481,6 +516,7 @@ onMounted(async () => {
 
       <div class="toolbar-spacer" />
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+      <el-button type="danger" plain :loading="loading" @click="rerunAllFailed">一键拉起失败</el-button>
     </div>
 
     <el-result v-if="error && !loading" icon="error" title="加载失败" :sub-title="error">

@@ -76,6 +76,17 @@ function onJump(node: DepNode) {
 }
 
 /** 级联重跑:勾选的节点,有实例重跑/无实例后端自动新建 */
+interface RerunDisplayItem {
+  ok: boolean
+  msg: string
+  projectName: string
+  processName: string
+  instanceId?: number
+  newInstance?: boolean
+}
+const rerunResult = ref<RerunDisplayItem[]>([])
+const rerunResultVisible = ref(false)
+
 async function doRerun() {
   if (!props.instanceId && !checked.value.has(currentKey.value)) {
     ElMessage.warning('缺少当前实例')
@@ -96,10 +107,19 @@ async function doRerun() {
   }
   try {
     const results = await rerunCascade(nodes)
-    const ok = results.filter((r) => r.ok)
-    const fail = results.filter((r) => !r.ok)
-    ElMessage.success(`级联重跑完成:成功 ${ok.length},失败 ${fail.length}`)
-    if (fail.length) ElMessage.error(fail.map((f) => `${f.name}:${f.msg}`).join(';'))
+    // 结果与 nodes 顺序一一对应,合并项目名标记(项目-工作流)
+    rerunResult.value = results.map((r, i) => ({
+      ok: r.ok,
+      msg: r.msg,
+      projectName: nodes[i]?.projectName || '',
+      processName: r.name || nodes[i]?.processName || '',
+      instanceId: r.instanceId,
+      newInstance: r.newInstance
+    }))
+    rerunResultVisible.value = true
+    const ok = results.filter((r) => r.ok).length
+    const fail = results.length - ok
+    if (fail) ElMessage.warning(`${fail} 个工作流执行失败,详见结果列表`)
   } catch (e) {
     ElMessage.error(`重跑失败:${e instanceof Error ? e.message : e}`)
   }
@@ -164,6 +184,29 @@ onMounted(() => {
       <el-button v-if="instanceId" type="primary" :disabled="!checked.size" @click="doRerun">
         级联重跑({{ checked.size }})
       </el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 级联重跑结果弹窗:列出每个被执行的工作流(项目-工作流) -->
+  <el-dialog v-model="rerunResultVisible" title="级联重跑结果" width="680px">
+    <el-table :data="rerunResult" border size="small" max-height="420">
+      <el-table-column type="index" label="#" width="50" align="center" />
+      <el-table-column label="状态" width="80" align="center">
+        <template #default="{ row }">
+          <el-tag :type="row.ok ? 'success' : 'danger'" size="small">{{ row.ok ? '已执行' : '失败' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="项目" prop="projectName" min-width="120" show-overflow-tooltip />
+      <el-table-column label="工作流" prop="processName" min-width="180" show-overflow-tooltip />
+      <el-table-column label="实例ID" width="110">
+        <template #default="{ row }">
+          <span>{{ row.instanceId || (row.newInstance ? '新建' : '—') }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="信息" prop="msg" min-width="120" show-overflow-tooltip />
+    </el-table>
+    <template #footer>
+      <el-button @click="rerunResultVisible = false">关闭</el-button>
     </template>
   </el-dialog>
 </template>

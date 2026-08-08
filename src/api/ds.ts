@@ -89,6 +89,8 @@ export interface DsProcessInstance {
   host: string
   processDefinitionId?: number
   processDefinition?: { name?: string }
+  /** 跨项目合并时标记来源项目 */
+  _projectName?: string
 }
 
 export interface DsPage<T> {
