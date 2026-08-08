@@ -505,27 +505,15 @@ function isNumeric(val: unknown): boolean {
           :class="{ active: idx === activeResult }"
           @click="activeResult = idx"
         >
-          <span class="tab-no">#{{ idx + 1 }}</span>
-          <span class="tab-label" :class="{ err: r.error }">
-            {{ r.error ? '失败' : `${r.columns.length}列/${r.rows.length}行` }}
+          <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
+          <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
+            <el-icon><Download /></el-icon>
           </span>
-          <span class="tab-sql" :title="r.sql">{{ r.sql }}</span>
         </div>
       </div>
       <!-- 下方当前结果内容 -->
       <div class="result-content">
         <template v-if="results[activeResult]">
-          <div class="result-header">
-            <span class="result-meta">
-              #{{ activeResult + 1 }} ·
-              {{ results[activeResult].error ? '执行失败' : `${results[activeResult].columns.length} 列 · ${results[activeResult].rows.length} 行` }}
-              <template v-if="results[activeResult].truncated">(已截断)</template>
-              <template v-if="!results[activeResult].error">· {{ results[activeResult].costMs }}ms</template>
-            </span>
-            <div class="result-actions">
-              <el-button v-if="!results[activeResult].error" :icon="Download" size="small" @click="exportCsv(activeResult)">导出 CSV</el-button>
-            </div>
-          </div>
           <el-alert v-if="results[activeResult].error" type="error" :title="results[activeResult].error" show-icon :closable="false" class="err-alert" />
           <div v-else v-loading="loading" class="result-table-wrap">
             <el-table :data="results[activeResult].rows.slice(0, 200)" border size="small" class="result-table">
@@ -555,6 +543,15 @@ function isNumeric(val: unknown): boolean {
                 </template>
               </el-table-column>
             </el-table>
+          </div>
+          <!-- 底部状态条:行数/耗时 -->
+          <div class="result-footer">
+            <span v-if="results[activeResult].error">执行失败</span>
+            <template v-else>
+              <span>{{ results[activeResult].rows.length }} 行</span>
+              <template v-if="results[activeResult].truncated"><span class="footer-muted">(已截断)</span></template>
+              <span class="footer-muted">· {{ results[activeResult].costMs }}ms</span>
+            </template>
           </div>
         </template>
       </div>
@@ -853,60 +850,60 @@ function isNumeric(val: unknown): boolean {
 .result-tabs {
   display: flex;
   flex-direction: row;
-  gap: 4px;
+  align-items: center;
+  gap: 0;
   overflow-x: auto;
   flex-shrink: 0;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
-  padding: 6px;
+  padding: 2px 4px;
 }
 
 .result-tab {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 10px;
-  border-radius: 4px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
   cursor: pointer;
-  border: 1px solid transparent;
-  min-width: 120px;
-  max-width: 180px;
   white-space: nowrap;
-  overflow: hidden;
+  color: $muted;
+  /* 相邻 tab 分隔线 */
+  border-right: 1px solid $border;
+
+  &:last-child {
+    border-right: none;
+  }
 
   &:hover {
-    background: rgba(94, 106, 210, 0.06);
+    color: $text;
   }
 
   &.active {
-    background: rgba(94, 106, 210, 0.1);
-    border-color: $primary;
+    color: $primary;
+    font-weight: 600;
   }
 }
 
-.tab-no {
-  font-size: 11px;
-  color: $muted;
-  font-weight: 600;
-}
-
-.tab-label {
+.tab-name {
   font-size: 12px;
-  color: $text;
 
   &.err {
     color: #f56c6c;
   }
 }
 
-.tab-sql {
-  font-size: 11px;
+.tab-export {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
   color: $muted;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  cursor: pointer;
+
+  &:hover {
+    color: $primary;
+  }
 }
 
 .result-content {
@@ -914,26 +911,7 @@ function isNumeric(val: unknown): boolean {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.result-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
-}
-
-.result-meta {
-  font-size: 13px;
-  color: $muted;
-}
-
-.result-actions {
-  margin-left: auto;
+  gap: 6px;
 }
 
 .result-table-wrap {
@@ -972,6 +950,23 @@ function isNumeric(val: unknown): boolean {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     text-align: right;
   }
+}
+
+.result-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: $muted;
+  flex-shrink: 0;
+}
+
+.footer-muted {
+  color: $muted;
 }
 
 .result-pagination {
