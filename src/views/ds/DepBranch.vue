@@ -185,38 +185,38 @@ function crontabText(n: DepNode): string {
   min-width: 170px;
   max-width: 200px;
   padding: 10px 12px;
-  border: 1px solid #e6e8ec;
+  /* 统一为当前节点样式:主题色粗边框 */
+  border: 2px solid $primary;
   border-radius: 10px;
   background: $panel;
   display: flex;
   flex-direction: column;
   gap: 5px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 4px rgba(94, 106, 210, 0.15);
   flex-shrink: 0;
   cursor: pointer;
   transition: box-shadow 0.15s, border-color 0.15s;
 
   &:hover {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-    border-color: $primary;
+    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.25);
   }
 
   &.current {
-    border-color: $primary;
     border-width: 2px;
-    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.2);
+    box-shadow: 0 2px 12px rgba(94, 106, 210, 0.3);
     cursor: default;
+    background: rgba(94, 106, 210, 0.04);
   }
 
   /* 状态色左边框:失败红/成功绿/运行蓝 */
   &.inst.inst-fail {
-    border-left: 3px solid #f56c6c;
+    border-left: 4px solid #f56c6c;
   }
   &.inst.inst-ok {
-    border-left: 3px solid #67c23a;
+    border-left: 4px solid #67c23a;
   }
   &.inst.inst-run {
-    border-left: 3px solid $primary;
+    border-left: 4px solid $primary;
   }
 }
 
@@ -247,20 +247,13 @@ function crontabText(n: DepNode): string {
   padding: 1px 6px;
   border-radius: 4px;
   flex-shrink: 0;
-  background: $bg;
-  color: $muted;
+  background: rgba(94, 106, 210, 0.1);
+  color: $primary;
 
   &.cur {
-    background: rgba(94, 106, 210, 0.12);
+    background: rgba(94, 106, 210, 0.15);
     color: $primary;
-  }
-  &.down {
-    background: rgba(94, 106, 210, 0.1);
-    color: $primary;
-  }
-  &.up {
-    background: rgba(245, 108, 108, 0.1);
-    color: #f56c6c;
+    font-weight: 600;
   }
 }
 
