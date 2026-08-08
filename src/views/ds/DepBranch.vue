@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { DepNode } from '@/api/dsDeps'
 
 defineOptions({ name: 'DepBranch' })
 
 // 递归横向分支:direction=left 往左展开上游,right 往右展开下游
-// 支持并行:一个节点多个子节点垂直堆叠,经汇聚线分叉
+// 思维导图风格:平滑圆角连接线 + 并行节点可折叠
 const props = defineProps<{
   nodes?: DepNode[]
   direction: 'left' | 'right'
@@ -17,8 +18,27 @@ const emit = defineEmits<{
   (e: 'jump', node: DepNode): void
 }>()
 
+// 折叠状态:key=processId
+const collapsed = ref<Set<string>>(new Set())
+
 function isCurrent(n: DepNode): boolean {
   return String(n.processId) === props.currentKey
+}
+
+function isCollapsed(n: DepNode): boolean {
+  return collapsed.value.has(String(n.processId))
+}
+
+function toggleCollapse(n: DepNode) {
+  const k = String(n.processId)
+  const s = new Set(collapsed.value)
+  if (s.has(k)) s.delete(k)
+  else s.add(k)
+  collapsed.value = s
+}
+
+function hasChildren(n: DepNode): boolean {
+  return props.direction === 'right' ? !!n.downstream?.length : !!n.upstream?.length
 }
 
 function instStateText(n: DepNode): string {
@@ -48,15 +68,13 @@ function crontabText(n: DepNode): string {
 </script>
 
 <template>
-  <!-- 一层节点:垂直堆叠 -->
+  <!-- 一层多个节点:垂直堆叠 -->
   <div class="dep-branch" :class="direction">
     <div v-for="n in nodes" :key="n.processId" class="branch-node">
-      <!-- 上游:子节点在左,递归展开 -->
+      <!-- 上游子节点(向左) -->
       <div v-if="direction === 'left' && n.upstream?.length" class="children-col left">
-        <div class="vert-line" />
-        <div class="children">
-          <div class="child-item" v-for="ch in n.upstream" :key="ch.processId">
-            <div class="hor-line left" />
+        <div class="children" v-show="!isCollapsed(n)">
+          <div class="child-item left" v-for="ch in n.upstream" :key="ch.processId">
             <DepBranch
               :nodes="[ch]"
               direction="left"
@@ -77,9 +95,13 @@ function crontabText(n: DepNode): string {
       >
         <div class="card-head">
           <span class="node-name" :class="{ cur: isCurrent(n) }">{{ isCurrent(n) ? '★ ' : '' }}{{ n.processName }}</span>
-          <span v-if="isCurrent(n)" class="tag cur">当前</span>
-          <span v-else-if="direction === 'right'" class="tag down">下游</span>
-          <span v-else class="tag up">上游</span>
+          <!-- 折叠按钮(有子节点时) -->
+          <span
+            v-if="hasChildren(n)"
+            class="fold-btn"
+            :class="{ folded: isCollapsed(n) }"
+            @click.stop="toggleCollapse(n)"
+          >{{ isCollapsed(n) ? '▸' : '▾' }}</span>
         </div>
         <div class="card-sub">
           <span class="proj">{{ n.projectName }}</span>
@@ -96,12 +118,10 @@ function crontabText(n: DepNode): string {
         >重跑</el-checkbox>
       </div>
 
-      <!-- 下游:子节点在右,垂直堆叠分叉 -->
+      <!-- 下游子节点(向右,平滑曲线分叉) -->
       <div v-if="direction === 'right' && n.downstream?.length" class="children-col right">
-        <div class="vert-line" />
-        <div class="children">
-          <div class="child-item" v-for="ch in n.downstream" :key="ch.processId">
-            <div class="hor-line right" />
+        <div class="children" v-show="!isCollapsed(n)">
+          <div class="child-item right" v-for="ch in n.downstream" :key="ch.processId">
             <DepBranch
               :nodes="[ch]"
               direction="right"
@@ -123,7 +143,7 @@ function crontabText(n: DepNode): string {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .branch-node {
@@ -132,10 +152,9 @@ function crontabText(n: DepNode): string {
   gap: 0;
 }
 
-/* 子节点列(右侧下游/左侧上游) */
+/* 子节点列 */
 .children-col {
   display: flex;
-  align-items: center;
 
   &.right {
     flex-direction: row;
@@ -146,89 +165,97 @@ function crontabText(n: DepNode): string {
   }
 }
 
-/* 父到子:竖直干线 */
-.vert-line {
-  width: 2px;
-  height: 100%;
-  min-height: 12px;
-  background: #c9cdd6;
-  align-self: stretch;
-}
-
 .children {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
+/* 子项:伪元素画平滑圆角连接线(思维导图曲线感) */
 .child-item {
+  position: relative;
   display: flex;
   align-items: center;
-}
-
-/* 父到子的水平线 */
-.hor-line {
-  width: 20px;
-  height: 2px;
-  background: #c9cdd6;
-
-  &.left {
-    margin-right: 0;
-  }
 
   &.right {
-    margin-left: 0;
+    /* 竖线从主干弯出 + 圆角过渡到卡片 */
+    &::before {
+      content: '';
+      position: absolute;
+      right: 100%;
+      top: -50%;
+      width: 18px;
+      height: 50%;
+      border-left: 2px solid #c9cdd6;
+      border-bottom: 2px solid #c9cdd6;
+      border-bottom-left-radius: 10px;
+    }
+  }
+
+  &.left {
+    &::before {
+      content: '';
+      position: absolute;
+      left: 100%;
+      top: -50%;
+      width: 18px;
+      height: 50%;
+      border-right: 2px solid #c9cdd6;
+      border-bottom: 2px solid #c9cdd6;
+      border-bottom-right-radius: 10px;
+    }
   }
 }
 
 .node-card {
-  min-width: 170px;
-  max-width: 200px;
-  padding: 10px 12px;
-  /* 统一为当前节点样式:主题色粗边框 */
-  border: 2px solid $primary;
-  border-radius: 10px;
+  min-width: 150px;
+  max-width: 180px;
+  padding: 7px 10px;
+  border: 1px solid #e6e8ec;
+  border-radius: 8px;
   background: $panel;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  box-shadow: 0 1px 4px rgba(94, 106, 210, 0.15);
+  gap: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   flex-shrink: 0;
   cursor: pointer;
   transition: box-shadow 0.15s, border-color 0.15s;
 
   &:hover {
-    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.25);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    border-color: $primary;
   }
 
   &.current {
+    border-color: $primary;
     border-width: 2px;
-    box-shadow: 0 2px 12px rgba(94, 106, 210, 0.3);
+    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.2);
     cursor: default;
     background: rgba(94, 106, 210, 0.04);
   }
 
-  /* 状态色左边框:失败红/成功绿/运行蓝 */
+  /* 状态色左边框 */
   &.inst.inst-fail {
-    border-left: 4px solid #f56c6c;
+    border-left: 3px solid #f56c6c;
   }
   &.inst.inst-ok {
-    border-left: 4px solid #67c23a;
+    border-left: 3px solid #67c23a;
   }
   &.inst.inst-run {
-    border-left: 4px solid $primary;
+    border-left: 3px solid $primary;
   }
 }
 
 .card-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .node-name {
-  font-size: 13px;
+  font-size: 12px;
   color: $text;
   font-weight: 500;
   overflow: hidden;
@@ -242,9 +269,23 @@ function crontabText(n: DepNode): string {
   }
 }
 
+.fold-btn {
+  font-size: 10px;
+  color: $muted;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0 2px;
+  border-radius: 3px;
+
+  &:hover {
+    color: $primary;
+    background: rgba(94, 106, 210, 0.1);
+  }
+}
+
 .tag {
   font-size: 10px;
-  padding: 1px 6px;
+  padding: 0 5px;
   border-radius: 4px;
   flex-shrink: 0;
   background: rgba(94, 106, 210, 0.1);
@@ -255,12 +296,20 @@ function crontabText(n: DepNode): string {
     color: $primary;
     font-weight: 600;
   }
+  &.down {
+    background: rgba(94, 106, 210, 0.1);
+    color: $primary;
+  }
+  &.up {
+    background: rgba(245, 108, 108, 0.1);
+    color: #f56c6c;
+  }
 }
 
 .card-sub {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .proj {
@@ -297,5 +346,8 @@ function crontabText(n: DepNode): string {
   font-size: 10px;
   color: #c0c4cc;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>
