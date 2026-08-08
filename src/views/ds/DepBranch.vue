@@ -13,6 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'toggle', processId: number): void
+  (e: 'jump', node: DepNode): void
 }>()
 
 function isCurrent(n: DepNode): boolean {
@@ -53,12 +54,17 @@ function instStateCls(state?: string): string {
           :current-key="currentKey"
           :checked="checked"
           @toggle="emit('toggle', $event)"
+          @jump="emit('jump', $event)"
         />
         <div class="conn-line left" />
       </div>
 
-      <!-- 节点卡片 -->
-      <div class="node-card" :class="{ current: isCurrent(n), down: direction === 'right', up: direction !== 'right' && !isCurrent(n) }">
+      <!-- 节点卡片:点击跳转到任务监控实例 -->
+      <div
+        class="node-card"
+        :class="{ current: isCurrent(n) }"
+        @click="emit('jump', n)"
+      >
         <div class="card-head">
           <span class="node-name" :class="{ cur: isCurrent(n) }">{{ isCurrent(n) ? '★ ' : '' }}{{ n.processName }}</span>
           <span v-if="isCurrent(n)" class="tag cur">当前</span>
@@ -69,15 +75,15 @@ function instStateCls(state?: string): string {
           <span class="proj">{{ n.projectName }}</span>
           <span class="inst" :class="instStateCls(n.instance?.state)">{{ instStateText(n) }}</span>
         </div>
-        <!-- 勾选(仅下游可勾选重跑) -->
+        <!-- 勾选(仅下游可勾选重跑),stop 阻止冒泡到卡片跳转 -->
         <el-checkbox
           v-if="direction === 'right' && !isCurrent(n)"
           :model-value="checked.has(String(n.processId))"
           size="small"
+          @click.stop
           @change="emit('toggle', n.processId)"
         >重跑</el-checkbox>
       </div>
-
       <!-- 下游分支:继续向右展开 -->
       <div v-if="direction === 'right'" class="branch-col">
         <div class="conn-line right" />
@@ -88,6 +94,7 @@ function instStateCls(state?: string): string {
           :current-key="currentKey"
           :checked="checked"
           @toggle="emit('toggle', $event)"
+          @jump="emit('jump', $event)"
         />
       </div>
     </template>
@@ -132,42 +139,42 @@ function instStateCls(state?: string): string {
 }
 
 .node-card {
-  min-width: 150px;
-  max-width: 180px;
-  padding: 8px 10px;
-  border: 1px solid $border;
-  border-radius: 8px;
+  min-width: 170px;
+  max-width: 200px;
+  padding: 10px 12px;
+  border: 1px solid #e6e8ec;
+  border-radius: 10px;
   background: $panel;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  gap: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   flex-shrink: 0;
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+
+  &:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    border-color: $primary;
+  }
 
   &.current {
     border-color: $primary;
     border-width: 2px;
-    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.25);
-  }
-
-  &.down {
-    border-left: 3px solid $primary;
-  }
-
-  &.up {
-    border-left: 3px solid #f56c6c;
+    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.2);
+    cursor: default;
   }
 }
 
 .card-head {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
 .node-name {
-  font-size: 12px;
+  font-size: 13px;
   color: $text;
   font-weight: 500;
   overflow: hidden;
@@ -183,9 +190,11 @@ function instStateCls(state?: string): string {
 
 .tag {
   font-size: 10px;
-  padding: 0 5px;
-  border-radius: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
   flex-shrink: 0;
+  background: $bg;
+  color: $muted;
 
   &.cur {
     background: rgba(94, 106, 210, 0.12);

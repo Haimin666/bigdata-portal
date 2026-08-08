@@ -25,6 +25,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void
+  (e: 'jump', node: DepNode): void
 }>()
 
 const tree = ref<WorkflowTree | null>(null)
@@ -68,6 +69,12 @@ function toggle(processId: number) {
   checked.value = s
 }
 
+/** 点击节点卡片 → 关闭弹窗并跳转到任务监控对应工作流实例 */
+function onJump(node: DepNode) {
+  emit('update:modelValue', false)
+  emit('jump', node)
+}
+
 /** 级联重跑:勾选的节点,有实例重跑/无实例后端自动新建 */
 async function doRerun() {
   if (!props.instanceId && !checked.value.has(currentKey.value)) {
@@ -107,7 +114,8 @@ onMounted(() => {
   <el-dialog
     :model-value="modelValue"
     title="工作流依赖与级联重跑"
-    width="920px"
+    width="94vw"
+    top="4vh"
     @update:model-value="emit('update:modelValue', $event)"
     @open="load"
   >
@@ -124,6 +132,7 @@ onMounted(() => {
             :current-key="currentKey"
             :checked="checked"
             @toggle="toggle"
+            @jump="onJump"
           />
           <!-- 当前节点 -->
           <div class="node-card current">
@@ -143,6 +152,7 @@ onMounted(() => {
             :current-key="currentKey"
             :checked="checked"
             @toggle="toggle"
+            @jump="onJump"
           />
         </div>
         <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>

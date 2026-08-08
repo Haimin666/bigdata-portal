@@ -354,6 +354,16 @@ function openDeps(inst: DsProcessInstance) {
   depsDialogVisible.value = true
 }
 
+/** 依赖树节点点击 → 跳到对应工作流实例(切项目+搜索工作流名) */
+function onDepsJump(node: { projectName: string; processName: string }) {
+  projectName.value = node.projectName
+  searchProcess.value = node.processName
+  searchTask.value = ''
+  viewMode.value = 'process'
+  pageNo.value = 1
+  load()
+}
+
 // ── 任务节点级操作(单任务重跑 / 从节点级联)─────────────────
 /** 从任务实例提取节点定义 id(taskJson.id,如 tasks-41739) */
 function taskNodeId(t: DsTaskInstance): string | null {
@@ -644,6 +654,7 @@ onMounted(async () => {
       :project-name="depsTarget.projectName"
       :instance-id="depsTarget.instanceId"
       :instance-name="depsTarget.instanceName"
+      @jump="onDepsJump"
     />
 
     <div class="pagination-bar">
