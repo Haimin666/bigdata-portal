@@ -8,6 +8,7 @@ import {
   type DepNode,
   type CascadeNode
 } from '@/api/dsDeps'
+import DepBranch from './DepBranch.vue'
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -29,21 +30,19 @@ const emit = defineEmits<{
 const tree = ref<WorkflowTree | null>(null)
 const loading = ref(false)
 const error = ref('')
-// 勾选重跑的节点(递归收集)
+// 勾选重跑的节点(递归收集下游)
 const checked = ref<Set<string>>(new Set())
-
-// 把树拍平成带路径的节点列表(用于勾选)
-interface FlatNode {
-  processId: number
-  processName: string
-  projectName: string
-  level: number
-  isCurrent: boolean
-  /** 下游节点的最近实例(有实例才可重跑) */
-  instance?: { instanceId: number; name: string; state: string } | null
-}
-const flatNodes = ref<FlatNode[]>([])
 const currentKey = ref('')
+
+/** 递归收集下游节点 */
+function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
+  const out: DepNode[] = []
+  for (const n of nodes || []) {
+    out.push(n)
+    out.push(...collectDownstream(n.downstream))
+  }
+  return out
+}
 
 async function load() {
   loading.value = true
@@ -51,37 +50,9 @@ async function load() {
   try {
     tree.value = await fetchWorkflowTree(props.processId)
     currentKey.value = String(props.processId)
-    // 拍平:上游(倒序) + 当前 + 下游
-    const flat: FlatNode[] = []
-    const walkUp = (nodes: DepNode[] | undefined, level: number) => {
-      for (const n of nodes || []) {
-        walkUp(n.upstream, level + 1)
-        flat.push({ processId: n.processId, processName: n.processName, projectName: n.projectName, level, isCurrent: false })
-      }
-    }
-    walkUp(tree.value?.upstream, 1)
-    flat.push({
-      processId: props.processId,
-      processName: props.processName,
-      projectName: props.projectName,
-      level: 0,
-      isCurrent: true
-    })
-    const walkDown = (nodes: DepNode[] | undefined, level: number) => {
-      for (const n of nodes || []) {
-        flat.push({ processId: n.processId, processName: n.processName, projectName: n.projectName, level, isCurrent: false, instance: n.instance })
-        walkDown(n.downstream, level + 1)
-      }
-    }
-    walkDown(tree.value?.downstream, 1)
-    flatNodes.value = flat
     // 默认勾选:当前 + 所有下游(上游不重跑)
-    checked.value = new Set([currentKey.value])
-    for (const n of flat) {
-      if (!n.isCurrent && flat.indexOf(n) >= flat.findIndex((x) => x.isCurrent)) checked.value.add(String(n.processId))
-    }
-    // 简单方式:勾选当前和所有下游节点
-    checked.value = new Set([currentKey.value, ...flat.filter((n) => !n.isCurrent && n.level >= 1).map((n) => String(n.processId))])
+    const downs = collectDownstream(tree.value?.downstream)
+    checked.value = new Set([currentKey.value, ...downs.map((n) => String(n.processId))])
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -89,33 +60,12 @@ async function load() {
   }
 }
 
-function toggle(node: FlatNode) {
-  const k = String(node.processId)
+function toggle(processId: number) {
+  const k = String(processId)
   const s = new Set(checked.value)
   if (s.has(k)) s.delete(k)
   else s.add(k)
   checked.value = s
-}
-
-/** 下游实例状态文本 */
-function instStateText(inst: FlatNode['instance']): string {
-  if (!inst) return '近1天无实例'
-  const map: Record<string, string> = {
-    SUCCESS: '成功',
-    FAILURE: '失败',
-    RUNNING_EXEUTION: '运行中',
-    RUNNING_EXECUTION: '运行中',
-    PAUSE: '暂停',
-    STOP: '停止'
-  }
-  return map[inst.state] || inst.state
-}
-
-function instStateCls(state?: string): string {
-  if (state === 'FAILURE') return 'inst-fail'
-  if (state === 'SUCCESS') return 'inst-ok'
-  if (state === 'RUNNING_EXEUTION' || state === 'RUNNING_EXECUTION') return 'inst-run'
-  return ''
 }
 
 /** 级联重跑:勾选的节点,有实例重跑/无实例后端自动新建 */
@@ -124,13 +74,12 @@ async function doRerun() {
     ElMessage.warning('缺少当前实例')
     return
   }
-  // 勾选节点:当前 + 下游(上游不重跑)
   const nodes: CascadeNode[] = []
   if (checked.value.has(currentKey.value)) {
     nodes.push({ projectName: props.projectName, processId: props.processId, processName: props.processName, instanceId: props.instanceId })
   }
-  for (const n of flatNodes.value) {
-    if (!n.isCurrent && checked.value.has(String(n.processId)) && n.level >= 1) {
+  for (const n of collectDownstream(tree.value?.downstream)) {
+    if (checked.value.has(String(n.processId))) {
       nodes.push({ projectName: n.projectName, processId: n.processId, processName: n.processName, instanceId: n.instance?.instanceId })
     }
   }
@@ -158,40 +107,47 @@ onMounted(() => {
   <el-dialog
     :model-value="modelValue"
     title="工作流依赖与级联重跑"
-    width="720px"
+    width="920px"
     @update:model-value="emit('update:modelValue', $event)"
     @open="load"
   >
     <div v-loading="loading" class="deps-body">
       <div v-if="error" class="deps-error">{{ error }}</div>
-      <!-- 上游链 -->
+      <!-- 横向思维导图:上游(左) + 当前(中) + 下游(右) -->
       <template v-if="tree">
-        <div class="dep-section-title">上游依赖(→ 当前)</div>
-        <div v-if="!flatNodes.filter((n) => n.level >= 1 && !n.isCurrent && tree?.downstream?.length === 0).length && flatNodes.filter((n) => n.isCurrent).length === 0" class="dep-empty">无</div>
-        <div
-          v-for="(n, i) in flatNodes"
-          :key="n.processId + '-' + i"
-          class="dep-node"
-          :class="{ current: n.isCurrent, upstream: !n.isCurrent && flatNodes.findIndex((x) => x.isCurrent) > i }"
-          :style="{ marginLeft: n.level * 24 + 'px' }"
-        >
-          <el-checkbox
-            :model-value="checked.has(String(n.processId))"
-            :disabled="n.isCurrent || n.level === 0"
-            @change="toggle(n)"
+        <div class="mindmap">
+          <!-- 上游分支(向左) -->
+          <DepBranch
+            v-if="tree.upstream?.length"
+            :nodes="tree.upstream"
+            direction="left"
+            :current-key="currentKey"
+            :checked="checked"
+            @toggle="toggle"
           />
-          <span class="dep-name" :class="{ 'dep-current': n.isCurrent }">{{ n.isCurrent ? '★ ' : '' }}{{ n.processName }}</span>
-          <span class="dep-proj">{{ n.projectName }}</span>
-          <span v-if="n.isCurrent" class="dep-tag">当前</span>
-          <span v-else-if="!n.isCurrent && flatNodes.findIndex((x) => x.isCurrent) < i" class="dep-tag down">下游</span>
-          <span v-else class="dep-tag up">上游</span>
-          <!-- 下游节点实例状态 -->
-          <span v-if="!n.isCurrent && flatNodes.findIndex((x) => x.isCurrent) < i" class="dep-inst" :class="instStateCls(n.instance?.state)">
-            {{ instStateText(n.instance) }}
-          </span>
+          <!-- 当前节点 -->
+          <div class="node-card current">
+            <div class="card-head">
+              <span class="node-name cur">★ {{ processName }}</span>
+              <span class="tag cur">当前</span>
+            </div>
+            <div class="card-sub">
+              <span class="proj">{{ projectName }}</span>
+            </div>
+          </div>
+          <!-- 下游分支(向右) -->
+          <DepBranch
+            v-if="tree.downstream?.length"
+            :nodes="tree.downstream"
+            direction="right"
+            :current-key="currentKey"
+            :checked="checked"
+            @toggle="toggle"
+          />
         </div>
+        <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
       </template>
-      <div v-else-if="!loading" class="dep-empty">暂无依赖数据(可点击刷新)</div>
+      <div v-else-if="!loading" class="dep-empty">暂无依赖数据(联系运维在服务器执行全量刷新)</div>
     </div>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">关闭</el-button>
@@ -206,6 +162,84 @@ onMounted(() => {
 .deps-body {
   max-height: 60vh;
   overflow: auto;
+}
+
+/* 横向思维导图:flex row,居中对齐 */
+.mindmap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  padding: 12px 4px;
+}
+
+/* 当前节点样式(与 DepBranch 卡片一致) */
+.node-card {
+  min-width: 150px;
+  max-width: 180px;
+  padding: 8px 10px;
+  border: 1px solid $border;
+  border-radius: 8px;
+  background: $panel;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  flex-shrink: 0;
+
+  &.current {
+    border-color: $primary;
+    border-width: 2px;
+    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.25);
+  }
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.node-name {
+  font-size: 12px;
+  color: $text;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+
+  &.cur {
+    color: $primary;
+    font-weight: 700;
+  }
+}
+
+.tag {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+
+  &.cur {
+    background: rgba(94, 106, 210, 0.12);
+    color: $primary;
+  }
+}
+
+.card-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.proj {
+  font-size: 10px;
+  color: $muted;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deps-error {
