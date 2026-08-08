@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
 import {
   fetchWorkflowTree,
   rerunCascade,
-  refreshDeps,
   type WorkflowTree,
   type DepNode,
   type CascadeNode
@@ -30,7 +28,6 @@ const emit = defineEmits<{
 
 const tree = ref<WorkflowTree | null>(null)
 const loading = ref(false)
-const refreshing = ref(false)
 const error = ref('')
 // 勾选重跑的节点(递归收集)
 const checked = ref<Set<string>>(new Set())
@@ -121,19 +118,6 @@ function instStateCls(state?: string): string {
   return ''
 }
 
-async function doRefresh() {
-  refreshing.value = true
-  try {
-    await refreshDeps(props.processId)
-    ElMessage.success('依赖已刷新')
-    await load()
-  } catch (e) {
-    ElMessage.error(`刷新失败:${e instanceof Error ? e.message : e}`)
-  } finally {
-    refreshing.value = false
-  }
-}
-
 /** 级联重跑:勾选的节点,有实例重跑/无实例后端自动新建 */
 async function doRerun() {
   if (!props.instanceId && !checked.value.has(currentKey.value)) {
@@ -210,7 +194,6 @@ onMounted(() => {
       <div v-else-if="!loading" class="dep-empty">暂无依赖数据(可点击刷新)</div>
     </div>
     <template #footer>
-      <el-button :loading="refreshing" :icon="Refresh" @click="doRefresh">刷新依赖</el-button>
       <el-button @click="emit('update:modelValue', false)">关闭</el-button>
       <el-button v-if="instanceId" type="primary" :disabled="!checked.size" @click="doRerun">
         级联重跑({{ checked.size }})

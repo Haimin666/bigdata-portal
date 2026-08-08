@@ -153,11 +153,17 @@ async function fetchAllProcessIds(projectName) {
   return out
 }
 
+// 全量采集锁(防止并发重复采集打垮海豚)
+let collecting = false
+
 async function collect() {
+  if (collecting) return
+  collecting = true
   console.log('[ds-deps] 开始采集工作流依赖...')
   const start = Date.now()
-  // 1. 项目列表
-  const projRes = await dsApi('/projects/query-project-list')
+  try {
+    // 1. 项目列表
+    const projRes = await dsApi('/projects/query-project-list')
   const projects = projRes?.data || []
   console.log(`[ds-deps] 项目数: ${projects.length}`)
   // 2. 每项目的工作流列表(收集 processId + 名称)
@@ -202,6 +208,9 @@ async function collect() {
   cache = { updatedAt: new Date().toISOString(), nodes }
   persist()
   console.log(`[ds-deps] 采集完成: ${nodes.size} 个工作流, 耗时 ${((Date.now() - start) / 1000).toFixed(1)}s`)
+  } finally {
+    collecting = false
+  }
 }
 
 // ── 缓存持久化 ────────────────────────────────────────────────
@@ -370,15 +379,10 @@ function searchWorkflows(keyword) {
 
 // ── 初始化 ────────────────────────────────────────────────────
 export function initDsDeps() {
+  // 只加载缓存文件,不做自动采集/定时刷新(依赖数据仅手动刷新,
+  // 避免全量扫描 4000+ 工作流对海豚产生大量请求)。
+  // 手动刷新入口:/api/ds-deps/refresh(全量)或 ?processId=xxx(单工作流)
   load()
-  // 启动初始化(异步,不阻塞网关启动)
-  collect().catch((e) => console.error('[ds-deps] 初始化采集失败:', e.message))
-  // 定时刷新
-  if (REFRESH_INTERVAL > 0) {
-    setInterval(() => {
-      collect().catch((e) => console.error('[ds-deps] 定时刷新失败:', e.message))
-    }, REFRESH_INTERVAL)
-  }
 }
 
 // ── Express 路由 ──────────────────────────────────────────────
@@ -454,7 +458,10 @@ export function dsDepsRouter() {
         return res.status(500).json({ code: 500, msg: e.message })
       }
     }
-    // 全量刷新(异步触发,立即返回)
+    // 全量刷新(异步触发,立即返回;加锁防并发重复采集)
+    if (collecting) {
+      return res.json({ code: 0, msg: '全量刷新进行中,请稍后' })
+    }
     collect().catch((e) => console.error('[ds-deps] 手动全量刷新失败:', e.message))
     res.json({ code: 0, msg: '全量刷新已触发' })
   })
