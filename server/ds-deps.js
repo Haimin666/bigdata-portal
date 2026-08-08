@@ -506,6 +506,23 @@ export function dsDepsRouter() {
     if (!Array.isArray(nodes) || !nodes.length) {
       return res.status(400).json({ code: 400, msg: 'nodes 不能为空' })
     }
+    // 海豚并发保护:实例正在执行命令时返回 'is executing the command',
+    // 稍等后重试(最多 3 次,间隔 3s)
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    const isBusy = (msg) => typeof msg === 'string' && msg.includes('is executing the command')
+    const rerunWithRetry = async (fn, label) => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const d = await fn()
+        if (d?.code === 0 || !isBusy(d?.msg)) {
+          return d
+        }
+        if (attempt < 2) {
+          console.warn(`[ds-deps] ${label} 实例忙(${d.msg}),${(attempt + 1) * 3}s 后重试`)
+          await sleep((attempt + 1) * 3000)
+        }
+      }
+      return await fn() // 最后再试一次(返回最终结果)
+    }
     const results = []
     for (const n of nodes) {
       try {
@@ -516,9 +533,13 @@ export function dsDepsRouter() {
           instanceId = latest?.instanceId
         }
         if (instanceId) {
-          const d = await dsPost(
-            `/projects/${encodeURIComponent(n.projectName)}/executors/execute`,
-            { executeType: 'REPEAT_RUNNING', processInstanceId: instanceId }
+          const d = await rerunWithRetry(
+            () =>
+              dsPost(
+                `/projects/${encodeURIComponent(n.projectName)}/executors/execute`,
+                { executeType: 'REPEAT_RUNNING', processInstanceId: instanceId }
+              ),
+            `${n.processName}(instance ${instanceId})`
           )
           results.push({ name: n.processName, ok: d?.code === 0, msg: d?.msg || 'success', instanceId })
           if (d?.code !== 0) console.warn(`[ds-deps] 重跑实例失败 ${n.processName}(instance ${instanceId}):`, d?.msg || JSON.stringify(d))
@@ -527,21 +548,25 @@ export function dsDepsRouter() {
           const now = new Date()
           const pad = (x) => String(x).padStart(2, '0')
           const scheduleTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
-          const d = await dsPost(
-            `/projects/${encodeURIComponent(n.projectName)}/executors/start-process-instance`,
-            {
-              execType: 'START_PROCESS',
-              failureStrategy: 'CONTINUE',
-              processDefinitionId: n.processId,
-              scheduleTime,
-              warningType: 'NONE',
-              warningGroupId: '',
-              workerGroup: 'default',
-              runMode: 'RUN_MODE_SERIAL',
-              timeout: '',
-              receivers: '',
-              receiversCc: ''
-            }
+          const d = await rerunWithRetry(
+            () =>
+              dsPost(
+                `/projects/${encodeURIComponent(n.projectName)}/executors/start-process-instance`,
+                {
+                  execType: 'START_PROCESS',
+                  failureStrategy: 'CONTINUE',
+                  processDefinitionId: n.processId,
+                  scheduleTime,
+                  warningType: 'NONE',
+                  warningGroupId: '',
+                  workerGroup: 'default',
+                  runMode: 'RUN_MODE_SERIAL',
+                  timeout: '',
+                  receivers: '',
+                  receiversCc: ''
+                }
+              ),
+            `${n.processName}(新建实例)`
           )
           results.push({ name: n.processName, ok: d?.code === 0, msg: d?.msg || 'success', newInstance: true })
           if (d?.code !== 0) console.warn(`[ds-deps] 新建实例失败 ${n.processName}(def ${n.processId}):`, d?.msg || JSON.stringify(d))
