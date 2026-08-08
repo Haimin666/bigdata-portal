@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
@@ -77,6 +77,10 @@ async function initEditor() {
     lineWrapping: true,
     theme: 'default'
   })
+  // 首次挂载若容器尺寸未稳定(如 tab 常驻池中非激活创建),内容会挤到行号前。
+  // 等 DOM 稳定后强制 refresh 重算布局。
+  await nextTick()
+  cm.refresh()
   // 括号匹配(自实现):光标邻接括号时高亮配对
   cm.on('cursorActivity', (c: CodeMirror.Editor) => updateBracketMatch(c))
   // 自动闭合括号
@@ -331,10 +335,11 @@ function getSegments(text: string): string[] {
 /** 执行目标 SQL 段列表(逐条执行,支持多条) */
 async function execSegments(segs: string[]) {
   results.value = segs.map((sql) => ({ sql, columns: [], rows: [], costMs: 0, truncated: false }))
-  activeResult.value = 0
   for (let i = 0; i < segs.length; i++) {
     await execOne(segs[i], i)
   }
+  // 默认展示最后一个 tab(最新执行的结果)
+  activeResult.value = segs.length - 1
 }
 
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行) */
@@ -489,10 +494,9 @@ function isNumeric(val: unknown): boolean {
     <!-- 错误提示 -->
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
 
-    <!-- 结果区(支持多条,逐条展示) -->
-    <!-- 结果区(左侧竖 tab + 右侧内容) -->
+    <!-- 结果区(上方 tab + 下方内容,默认选中最后一个) -->
     <div v-if="results.length" class="results-wrap">
-      <!-- 左侧竖排 tab 列表 -->
+      <!-- 上方横向 tab 栏 -->
       <div class="result-tabs">
         <div
           v-for="(r, idx) in results"
@@ -508,7 +512,7 @@ function isNumeric(val: unknown): boolean {
           <span class="tab-sql" :title="r.sql">{{ r.sql }}</span>
         </div>
       </div>
-      <!-- 右侧当前结果内容 -->
+      <!-- 下方当前结果内容 -->
       <div class="result-content">
         <template v-if="results[activeResult]">
           <div class="result-header">
@@ -838,6 +842,7 @@ function isNumeric(val: unknown): boolean {
 /* ── 结果区(左侧竖 tab + 右侧内容) ────────────────────────── */
 .results-wrap {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   flex: 1;
   min-height: 200px;
@@ -846,13 +851,11 @@ function isNumeric(val: unknown): boolean {
 }
 
 .result-tabs {
-  width: 180px;
-  flex-shrink: 0;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 4px;
-  overflow-y: auto;
-  max-height: 100%;
+  overflow-x: auto;
+  flex-shrink: 0;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
@@ -863,10 +866,14 @@ function isNumeric(val: unknown): boolean {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 8px;
+  padding: 6px 10px;
   border-radius: 4px;
   cursor: pointer;
   border: 1px solid transparent;
+  min-width: 120px;
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
 
   &:hover {
     background: rgba(94, 106, 210, 0.06);
