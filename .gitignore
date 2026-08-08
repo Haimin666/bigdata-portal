@@ -19,3 +19,4 @@ dist/
 
 # playwright-cli 会话产物(快照/截图)
 .playwright-cli/
+data/

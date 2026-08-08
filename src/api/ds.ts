@@ -85,6 +85,7 @@ export interface DsProcessInstance {
   duration: number
   executorName: string
   host: string
+  processDefinitionId?: number
   processDefinition?: { name?: string }
 }
 

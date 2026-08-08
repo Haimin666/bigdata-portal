@@ -25,6 +25,11 @@ services:
       NODE_ENV: production
       # 网关监听端口与对外保持一致(server/config.js 读 PORT)
       PORT: 9910
+      # 工作流依赖缓存文件(docker 需挂载目录持久化,见 volumes)
+      DS_DEPS_CACHE_FILE: /app/data/ds-deps.json
+    volumes:
+      # 依赖缓存持久化(重启不丢;采集 4000+ 工作流需数分钟)
+      - ./data:/app/data
     healthcheck:
       # 网关 /api/config 返回 200 视为健康
       test:

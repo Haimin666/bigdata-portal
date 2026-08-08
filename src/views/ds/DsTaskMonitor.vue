@@ -17,6 +17,7 @@ import {
 import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
+import DsDepsDialog from './DsDepsDialog.vue'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -284,6 +285,26 @@ async function onExecute(inst: DsProcessInstance, executeType: string) {
   }
 }
 
+// ── 工作流依赖查看 / 级联重跑 ───────────────────────────────
+const depsDialogVisible = ref(false)
+const depsTarget = ref<{ processId: number; processName: string; projectName: string; instanceId?: number; instanceName?: string } | null>(null)
+
+/** 打开依赖弹窗(级联重跑/查看) */
+function openDeps(inst: DsProcessInstance) {
+  if (!inst.processDefinitionId) {
+    ElMessage.warning('该实例缺少工作流定义 ID,无法查看依赖')
+    return
+  }
+  depsTarget.value = {
+    processId: inst.processDefinitionId,
+    processName: inst.name,
+    projectName: projectName.value,
+    instanceId: inst.id,
+    instanceName: inst.name
+  }
+  depsDialogVisible.value = true
+}
+
 onMounted(async () => {
   try {
     const res = await fetch('/api/config')
@@ -446,13 +467,15 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column prop="executorName" label="执行人" width="100" sortable />
       <el-table-column prop="host" label="主机" min-width="130" show-overflow-tooltip sortable />
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <template v-if="isRunning(row.state)">
             <el-button link type="warning" size="small" @click="onExecute(row, 'PAUSE')">暂停</el-button>
             <el-button link type="danger" size="small" @click="onExecute(row, 'STOP')">停止</el-button>
           </template>
           <el-button v-else link type="primary" size="small" @click="onExecute(row, 'REPEAT_RUNNING')">重跑</el-button>
+          <el-button link type="success" size="small" @click="openDeps(row)">级联重跑</el-button>
+          <el-button link size="small" @click="openDeps(row)">依赖</el-button>
         </template>
       </el-table-column>
       <template #empty>
@@ -513,6 +536,17 @@ onMounted(async () => {
         <el-empty description="暂无任务实例" />
       </template>
     </el-table>
+
+    <!-- 工作流依赖 / 级联重跑弹窗 -->
+    <DsDepsDialog
+      v-model="depsDialogVisible"
+      v-if="depsTarget"
+      :process-id="depsTarget.processId"
+      :process-name="depsTarget.processName"
+      :project-name="depsTarget.projectName"
+      :instance-id="depsTarget.instanceId"
+      :instance-name="depsTarget.instanceName"
+    />
 
     <div class="pagination-bar">
       <el-pagination

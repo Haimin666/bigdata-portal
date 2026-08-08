@@ -1,0 +1,427 @@
+// ds-deps:海豚工作流依赖采集 + 缓存 + 级联重跑支持
+//
+// 背景:离线任务工作流分散,ODS 失败后下游整串受影响,需要"一键级联重跑"。
+// 依赖关系来自海豚工作流定义:
+//   1. 工作流间依赖:DEPENDENT 任务的 dependence(dependTaskList → 上游项目/工作流/任务)
+//   2. 任务间依赖(工作流内 DAG):connects 边(任务节点前后关系)
+// 采集是重操作(全量扫所有项目/工作流/定义),所以:
+//   - 启动时初始化一次 + 定时(默认 1h)刷新 + 手动刷新接口
+//   - 缓存到内存 + 文件(重启不丢);docker 部署需挂载缓存目录
+
+import fs from 'node:fs'
+import path from 'node:path'
+import http from 'node:http'
+import https from 'node:https'
+import { Router } from 'express'
+
+// ── 配置 ──────────────────────────────────────────────────────
+const DS_BASE = process.env.DS_WEB_URL || 'http://olds.bigdata.shiqiao.com/dolphinscheduler'
+const DS_TOKEN = process.env.DS_TOKEN || ''
+// 缓存文件路径(默认项目根 data/;docker 挂载 /app/data)
+const CACHE_FILE =
+  process.env.DS_DEPS_CACHE_FILE || path.join(import.meta.dirname, '../data/ds-deps.json')
+// 定时刷新周期(毫秒,默认 1h)
+const REFRESH_INTERVAL = parseInt(process.env.DS_DEPS_REFRESH_INTERVAL || String(60 * 60 * 1000), 10)
+// 采集并发数
+const CONCURRENCY = 10
+
+// ── 数据模型 ──────────────────────────────────────────────────
+// node: 一个工作流定义
+// {
+//   projectId, projectName, processId, processName,
+//   tasks: [{id, name, type}],          // 工作流内任务节点
+//   connects: [{from, to}],             // 任务 DAG 边
+//   upstream: [{projectId, processId, taskName}]  // 工作流间依赖(DEPENDENT → 上游)
+// }
+
+let cache = {
+  updatedAt: null,
+  nodes: new Map() // processId → node
+}
+
+// ── HTTP 工具(直连海豚,带 token)────────────────────────────
+function request(method, url, body) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https://') ? https : http
+    const payload = body ? JSON.stringify(body) : null
+    const req = mod.request(
+      url,
+      {
+        method,
+        headers: {
+          'token': DS_TOKEN || '',
+          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
+        }
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data))
+          } catch {
+            resolve({ code: -1, msg: `parse error, raw=${data.slice(0, 100)}` })
+          }
+        })
+      }
+    )
+    req.on('error', (e) => reject(e))
+    req.setTimeout(15000, () => req.destroy(new Error('timeout')))
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
+async function dsApi(pathname, params = {}) {
+  const qs = new URLSearchParams(params).toString()
+  const url = `${DS_BASE}${pathname}${qs ? '?' + qs : ''}`
+  return request('GET', url)
+}
+
+async function dsPost(pathname, params = {}) {
+  const qs = new URLSearchParams(params).toString()
+  const url = `${DS_BASE}${pathname}${qs ? '?' + qs : ''}`
+  return request('POST', url)
+}
+
+// ── 依赖解析 ──────────────────────────────────────────────────
+function parseProcessDefinition(data) {
+  // data = process/select-by-id 返回的 data(含 processDefinitionJson / connects)
+  const pdj = data.processDefinitionJson
+  let tasks = []
+  try {
+    const pd = typeof pdj === 'string' ? JSON.parse(pdj) : pdj
+    tasks = pd?.tasks || []
+  } catch {
+    /* 解析失败按空处理 */
+  }
+  // 任务 DAG 边(connects 可能是 JSON 字符串)
+  let connects = []
+  try {
+    const c = typeof data.connects === 'string' ? JSON.parse(data.connects) : data.connects
+    connects = (c || []).map((e) => ({
+      from: e.endPointSourceId,
+      to: e.endPointTargetId
+    }))
+  } catch {
+    /* 忽略 */
+  }
+  // 工作流间依赖:找 DEPENDENT 任务的 dependence
+  const upstream = []
+  for (const t of tasks) {
+    const type = String(t.type || t.taskType || '').toUpperCase()
+    if (type === 'DEPENDENT' && t.dependence?.dependTaskList) {
+      for (const dt of t.dependence.dependTaskList) {
+        for (const item of dt.dependItemList || []) {
+          if (item.definitionId) {
+            upstream.push({
+              projectId: item.projectId,
+              processId: item.definitionId,
+              taskName: item.depTasks || ''
+            })
+          }
+        }
+      }
+    }
+  }
+  return {
+    tasks: tasks.map((t) => ({ id: t.id, name: t.name, type: t.type || t.taskType })),
+    connects,
+    upstream
+  }
+}
+
+// ── 采集 ──────────────────────────────────────────────────────
+async function fetchAllProcessIds(projectName) {
+  // 分页拉全量工作流列表,返回 [{id, name}]
+  const out = []
+  let page = 1
+  const PAGE_SIZE = 100
+  for (;;) {
+    const d = await dsApi(`/projects/${encodeURIComponent(projectName)}/process/list-paging`, {
+      pageNo: page,
+      pageSize: PAGE_SIZE
+    })
+    const list = d?.data?.totalList || []
+    for (const p of list) {
+      out.push({ id: p.id, name: p.name })
+    }
+    if (!list.length || list.length < PAGE_SIZE) break
+    page++
+    if (page > 50) break // 安全上限
+  }
+  return out
+}
+
+async function collect() {
+  console.log('[ds-deps] 开始采集工作流依赖...')
+  const start = Date.now()
+  // 1. 项目列表
+  const projRes = await dsApi('/projects/query-project-list')
+  const projects = projRes?.data || []
+  console.log(`[ds-deps] 项目数: ${projects.length}`)
+  // 2. 每项目的工作流列表(收集 processId + 名称)
+  const allWorkflows = [] // {projectId, projectName, id, name}
+  for (const p of projects) {
+    try {
+      const flows = await fetchAllProcessIds(p.name)
+      for (const f of flows) {
+        allWorkflows.push({ projectId: p.id, projectName: p.name, processId: f.id, processName: f.name })
+      }
+    } catch (e) {
+      console.warn(`[ds-deps] 项目 ${p.name} 工作流列表失败: ${e.message}`)
+    }
+  }
+  console.log(`[ds-deps] 工作流总数: ${allWorkflows.length}`)
+  // 3. 并发逐个拉定义解析
+  const nodes = new Map()
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < allWorkflows.length) {
+      const wf = allWorkflows[cursor++]
+      try {
+        const d = await dsApi(`/projects/${encodeURIComponent(wf.projectName)}/process/select-by-id`, {
+          processId: wf.processId
+        })
+        if (d?.code === 0 && d.data) {
+          const parsed = parseProcessDefinition(d.data)
+          nodes.set(String(wf.processId), {
+            projectId: wf.projectId,
+            projectName: wf.projectName,
+            processId: wf.processId,
+            processName: wf.processName,
+            ...parsed
+          })
+        }
+      } catch (e) {
+        // 单个失败跳过
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+  cache = { updatedAt: new Date().toISOString(), nodes }
+  persist()
+  console.log(`[ds-deps] 采集完成: ${nodes.size} 个工作流, 耗时 ${((Date.now() - start) / 1000).toFixed(1)}s`)
+}
+
+// ── 缓存持久化 ────────────────────────────────────────────────
+function persist() {
+  try {
+    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true })
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({
+      updatedAt: cache.updatedAt,
+      nodes: Array.from(cache.nodes.values())
+    }))
+  } catch (e) {
+    console.warn(`[ds-deps] 缓存写入失败: ${e.message}`)
+  }
+}
+
+function load() {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'))
+      cache.nodes = new Map((raw.nodes || []).map((n) => [String(n.processId), n]))
+      cache.updatedAt = raw.updatedAt || null
+      console.log(`[ds-deps] 从文件加载缓存: ${cache.nodes.size} 个工作流`)
+    }
+  } catch (e) {
+    console.warn(`[ds-deps] 缓存加载失败: ${e.message}`)
+  }
+}
+
+// ── 依赖图查询 ────────────────────────────────────────────────
+function findNode(processId) {
+  return cache.nodes.get(String(processId))
+}
+
+/** 上游链(递归):当前工作流 → 它依赖的上游 → ... 直到最上游 */
+function buildUpstreamChain(processId, visited = new Set()) {
+  const node = findNode(processId)
+  if (!node || visited.has(String(processId))) return []
+  visited.add(String(processId))
+  const ups = []
+  for (const up of node.upstream || []) {
+    const upNode = findNode(up.processId)
+    ups.push({
+      processId: up.processId,
+      processName: upNode?.processName || `工作流#${up.processId}`,
+      projectName: upNode?.projectName || `项目#${up.projectId}`,
+      depTask: up.taskName
+    })
+  }
+  // 递归上游的上游
+  for (const up of ups) {
+    const chain = buildUpstreamChain(up.processId, visited)
+    up.upstream = chain.length ? chain : undefined
+  }
+  return ups
+}
+
+/** 下游链(递归):谁依赖当前工作流 → 再往下 */
+function buildDownstreamChain(processId, visited = new Set()) {
+  const key = String(processId)
+  if (visited.has(key)) return []
+  visited.add(key)
+  const downs = []
+  for (const [id, node] of cache.nodes) {
+    const depsOnMe = (node.upstream || []).filter((u) => String(u.processId) === key)
+    if (depsOnMe.length) {
+      downs.push({
+        processId: node.processId,
+        processName: node.processName,
+        projectName: node.projectName,
+        depTasks: depsOnMe.map((d) => d.taskName).join(',')
+      })
+    }
+  }
+  for (const d of downs) {
+    const chain = buildDownstreamChain(d.processId, visited)
+    d.downstream = chain.length ? chain : undefined
+  }
+  return downs
+}
+
+/** 完整树:最上游 → 当前 → 最下游(跨项目) */
+function buildFullTree(processId) {
+  const node = findNode(processId)
+  if (!node) return null
+  return {
+    processId: node.processId,
+    processName: node.processName,
+    projectName: node.projectName,
+    upstream: buildUpstreamChain(processId),
+    downstream: buildDownstreamChain(processId)
+  }
+}
+
+/** 工作流内任务 DAG(含依赖关系,可算上下游) */
+function buildTaskGraph(processId) {
+  const node = findNode(processId)
+  if (!node) return null
+  const taskMap = new Map((node.tasks || []).map((t) => [t.id, t]))
+  // 邻接表
+  const adj = new Map()
+  for (const c of node.connects || []) {
+    if (!adj.has(c.from)) adj.set(c.from, [])
+    adj.get(c.from).push(c.to)
+  }
+  return {
+    processId: node.processId,
+    processName: node.processName,
+    projectName: node.projectName,
+    tasks: node.tasks || [],
+    connects: node.connects || []
+  }
+}
+
+// ── 初始化 ────────────────────────────────────────────────────
+export function initDsDeps() {
+  load()
+  // 启动初始化(异步,不阻塞网关启动)
+  collect().catch((e) => console.error('[ds-deps] 初始化采集失败:', e.message))
+  // 定时刷新
+  if (REFRESH_INTERVAL > 0) {
+    setInterval(() => {
+      collect().catch((e) => console.error('[ds-deps] 定时刷新失败:', e.message))
+    }, REFRESH_INTERVAL)
+  }
+}
+
+// ── Express 路由 ──────────────────────────────────────────────
+export function dsDepsRouter() {
+  const router = Router()
+
+  // 依赖树(工作流级):最上游→当前→最下游
+  router.get('/workflow-tree/:processId', (req, res) => {
+    const tree = buildFullTree(req.params.processId)
+    if (!tree) return res.status(404).json({ code: 404, msg: '工作流不在依赖缓存中' })
+    res.json({ code: 0, data: tree, updatedAt: cache.updatedAt })
+  })
+
+  // 任务级依赖图(工作流内 DAG)
+  router.get('/task-graph/:processId', (req, res) => {
+    const graph = buildTaskGraph(req.params.processId)
+    if (!graph) return res.status(404).json({ code: 404, msg: '工作流不在依赖缓存中' })
+    res.json({ code: 0, data: graph, updatedAt: cache.updatedAt })
+  })
+
+  // 手动刷新(全量;可选 ?processId= 单任务刷新该工作流)
+  router.post('/refresh', async (req, res) => {
+    const pid = req.query.processId
+    if (pid) {
+      // 单工作流刷新:查该工作流并更新缓存
+      const node = findNode(pid)
+      if (!node) return res.status(404).json({ code: 404, msg: '工作流不在缓存中' })
+      try {
+        const d = await dsApi(
+          `/projects/${encodeURIComponent(node.projectName)}/process/select-by-id`,
+          { processId: pid }
+        )
+        if (d?.code === 0 && d.data) {
+          const parsed = parseProcessDefinition(d.data)
+          cache.nodes.set(String(pid), { ...node, ...parsed })
+          persist()
+          return res.json({ code: 0, msg: '刷新成功' })
+        }
+        return res.status(500).json({ code: 500, msg: '刷新失败' })
+      } catch (e) {
+        return res.status(500).json({ code: 500, msg: e.message })
+      }
+    }
+    // 全量刷新(异步触发,立即返回)
+    collect().catch((e) => console.error('[ds-deps] 手动全量刷新失败:', e.message))
+    res.json({ code: 0, msg: '全量刷新已触发' })
+  })
+
+  // 缓存状态
+  router.get('/status', (req, res) => {
+    res.json({ code: 0, data: { updatedAt: cache.updatedAt, count: cache.nodes.size, cacheFile: CACHE_FILE } })
+  })
+
+  // 批量重跑工作流实例(级联重跑:逐个 REPEAT_RUNNING)
+  // body: { instances: [{projectName, instanceId, name}] }
+  router.post('/rerun-instances', async (req, res) => {
+    const { instances } = req.body || {}
+    if (!Array.isArray(instances) || !instances.length) {
+      return res.status(400).json({ code: 400, msg: 'instances 不能为空' })
+    }
+    const results = []
+    for (const inst of instances) {
+      try {
+        const d = await dsPost(
+          `/projects/${encodeURIComponent(inst.projectName)}/executors/execute`,
+          { executeType: 'REPEAT_RUNNING', processInstanceId: inst.instanceId }
+        )
+        results.push({ name: inst.name, ok: d?.code === 0, msg: d?.msg || 'success' })
+      } catch (e) {
+        results.push({ name: inst.name, ok: false, msg: e.message })
+      }
+    }
+    res.json({ code: 0, data: results })
+  })
+
+  // 从指定任务节点开始重跑工作流(节点级联)
+  // body: { projectName, processInstanceId, startNodeId }
+  router.post('/rerun-from-node', async (req, res) => {
+    const { projectName, processInstanceId, startNodeId } = req.body || {}
+    if (!projectName || !processInstanceId || !startNodeId) {
+      return res.status(400).json({ code: 400, msg: '缺少参数' })
+    }
+    try {
+      const d = await dsPost(
+        `/projects/${encodeURIComponent(projectName)}/executors/start-process-instance`,
+        {
+          execType: 'START_FAILURE_TASK_PROCESS', // 从失败任务开始
+          processInstanceId,
+          startNodeList: startNodeId
+        }
+      )
+      res.json({ code: d?.code === 0 ? 0 : 500, msg: d?.msg || 'success', data: d?.data })
+    } catch (e) {
+      res.status(500).json({ code: 500, msg: e.message })
+    }
+  })
+
+  return router
+}
