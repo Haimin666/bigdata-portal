@@ -295,6 +295,25 @@ function buildFullTree(processId) {
   }
 }
 
+/** 查某工作流最近实例(按 defId + 时间倒序),返回最新一条或 null */
+async function fetchLatestInstance(projectName, processId, days = 1) {
+  try {
+    const now = Date.now()
+    const start = new Date(now - days * 86400000).toISOString().slice(0, 19).replace('T', ' ')
+    const end = new Date(now).toISOString().slice(0, 19).replace('T', ' ')
+    const d = await dsApi(
+      `/projects/${encodeURIComponent(projectName)}/instance/list-paging`,
+      { pageNo: 1, pageSize: 1, processDefinitionId: processId, startDate: start, endDate: end }
+    )
+    const list = d?.data?.totalList || []
+    if (!list.length) return null
+    const i = list[0]
+    return { instanceId: i.id, name: i.name, state: i.state }
+  } catch {
+    return null
+  }
+}
+
 /** 工作流内任务 DAG(含依赖关系,可算上下游) */
 function buildTaskGraph(processId) {
   const node = findNode(processId)
@@ -315,6 +334,40 @@ function buildTaskGraph(processId) {
   }
 }
 
+/** 跨项目搜索:按工作流名/任务名/项目名匹配(基于缓存,快) */
+function searchWorkflows(keyword) {
+  const kw = String(keyword || '').trim().toLowerCase()
+  if (!kw) return []
+  const out = []
+  for (const node of cache.nodes.values()) {
+    // 工作流名匹配
+    let matched = node.processName && node.processName.toLowerCase().includes(kw)
+    let matchedTask = ''
+    if (!matched) {
+      // 任务名匹配
+      for (const t of node.tasks || []) {
+        if (t.name && t.name.toLowerCase().includes(kw)) {
+          matched = true
+          matchedTask = t.name
+          break
+        }
+      }
+    }
+    const projectHit = node.projectName && node.projectName.toLowerCase().includes(kw)
+    if (matched || projectHit) {
+      out.push({
+        projectId: node.projectId,
+        projectName: node.projectName,
+        processId: node.processId,
+        processName: node.processName,
+        matchedTask
+      })
+    }
+  }
+  // 按名称排序,截断防止过大
+  return out.slice(0, 100)
+}
+
 // ── 初始化 ────────────────────────────────────────────────────
 export function initDsDeps() {
   load()
@@ -332,10 +385,42 @@ export function initDsDeps() {
 export function dsDepsRouter() {
   const router = Router()
 
-  // 依赖树(工作流级):最上游→当前→最下游
-  router.get('/workflow-tree/:processId', (req, res) => {
+  // 依赖树(工作流级):最上游→当前→最下游,下游节点附最近实例状态
+  // 频率控制:下游实例查询限并发 3,总超时 8s,避免打垮海豚
+  router.get('/workflow-tree/:processId', async (req, res) => {
     const tree = buildFullTree(req.params.processId)
     if (!tree) return res.status(404).json({ code: 404, msg: '工作流不在依赖缓存中' })
+    const CONCURRENCY = 3
+    let active = 0
+    const queue = [] // 待执行的下游实例查询任务
+    const runQueued = () => {
+      while (active < CONCURRENCY && queue.length) {
+        const task = queue.shift()
+        if (!task) break
+        active++
+        task().finally(() => {
+          active--
+          runQueued()
+        })
+      }
+    }
+    const annotate = async (nodes) => {
+      for (const n of nodes || []) {
+        queue.push(async () => {
+          n.instance = await fetchLatestInstance(n.projectName, n.processId, 1)
+        })
+        await annotate(n.downstream)
+      }
+    }
+    const task = (async () => {
+      await annotate(tree.downstream)
+      runQueued()
+    })()
+    try {
+      await Promise.race([task, new Promise((r) => setTimeout(r, 8000))])
+    } catch {
+      /* 实例查询失败/超时不影响树 */
+    }
     res.json({ code: 0, data: tree, updatedAt: cache.updatedAt })
   })
 
@@ -379,6 +464,12 @@ export function dsDepsRouter() {
     res.json({ code: 0, data: { updatedAt: cache.updatedAt, count: cache.nodes.size, cacheFile: CACHE_FILE } })
   })
 
+  // 跨项目搜索工作流(按工作流名/任务名/项目名,基于缓存)
+  router.get('/search-workflows', (req, res) => {
+    const hits = searchWorkflows(req.query.keyword)
+    res.json({ code: 0, data: hits })
+  })
+
   // 批量重跑工作流实例(级联重跑:逐个 REPEAT_RUNNING)
   // body: { instances: [{projectName, instanceId, name}] }
   router.post('/rerun-instances', async (req, res) => {
@@ -396,6 +487,53 @@ export function dsDepsRouter() {
         results.push({ name: inst.name, ok: d?.code === 0, msg: d?.msg || 'success' })
       } catch (e) {
         results.push({ name: inst.name, ok: false, msg: e.message })
+      }
+    }
+    res.json({ code: 0, data: results })
+  })
+
+  // 级联重跑:对每个勾选的工作流节点,有实例则重跑,无实例则按今天新建
+  // body: { nodes: [{projectName, processId, processName, instanceId?}] }
+  router.post('/rerun-cascade', async (req, res) => {
+    const { nodes } = req.body || {}
+    if (!Array.isArray(nodes) || !nodes.length) {
+      return res.status(400).json({ code: 400, msg: 'nodes 不能为空' })
+    }
+    const results = []
+    for (const n of nodes) {
+      try {
+        let instanceId = n.instanceId
+        if (!instanceId) {
+          // 无实例 → 查最近实例(近 3 天),有则复用,无则新建
+          const latest = await fetchLatestInstance(n.projectName, n.processId, 3)
+          instanceId = latest?.instanceId
+        }
+        if (instanceId) {
+          const d = await dsPost(
+            `/projects/${encodeURIComponent(n.projectName)}/executors/execute`,
+            { executeType: 'REPEAT_RUNNING', processInstanceId: instanceId }
+          )
+          results.push({ name: n.processName, ok: d?.code === 0, msg: d?.msg || 'success', instanceId })
+        } else {
+          // 新建:START_PROCESS,按今天调度
+          const today = new Date().toISOString().slice(0, 10)
+          const d = await dsPost(
+            `/projects/${encodeURIComponent(n.projectName)}/executors/start-process-instance`,
+            {
+              execType: 'START_PROCESS',
+              failureStrategy: 'CONTINUE',
+              processDefinitionId: n.processId,
+              scheduleTime: today,
+              warningType: 'NONE',
+              warningGroupId: '',
+              workerGroup: 'default',
+              runMode: 'RUN_MODE_SERIAL'
+            }
+          )
+          results.push({ name: n.processName, ok: d?.code === 0, msg: d?.msg || 'success', newInstance: true })
+        }
+      } catch (e) {
+        results.push({ name: n.processName, ok: false, msg: e.message })
       }
     }
     res.json({ code: 0, data: results })

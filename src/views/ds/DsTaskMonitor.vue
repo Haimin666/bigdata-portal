@@ -18,6 +18,7 @@ import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import DsDepsDialog from './DsDepsDialog.vue'
+import { searchWorkflows } from '@/api/dsDeps'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -43,7 +44,7 @@ const pageSize = ref(20)
 const stateType = ref('')
 const searchProcess = ref('')
 const searchTask = ref('')
-const rangeKey = ref('3d')
+const rangeKey = ref('1d')
 
 // YARN RM 地址(从 /api/config 获取,用于 application id 跳转)
 const rmHost = ref('')
@@ -107,7 +108,6 @@ function rangeDates(): { start?: string; end?: string } {
 let loadSeq = 0
 
 async function load() {
-  if (!projectName.value) return
   const seq = ++loadSeq
   loading.value = true
   error.value = ''
@@ -115,26 +115,12 @@ async function load() {
     const { start, end } = rangeDates()
     // 填写任务名 → 任务实例视图;否则工作流实例视图
     if (viewMode.value === 'task') {
-      const data = await listTaskInstances(projectName.value, {
-        pageNo: pageNo.value,
-        pageSize: pageSize.value,
-        taskName: searchTask.value || undefined,
-        stateType: stateType.value || undefined,
-        startDate: start,
-        endDate: end
-      })
+      const data = await loadAllOrOne<DsTaskInstance>('task', { start, end })
       if (seq !== loadSeq) return
       tasks.value = data.totalList || []
       total.value = data.total || 0
     } else {
-      const data = await listProcessInstances(projectName.value, {
-        pageNo: pageNo.value,
-        pageSize: pageSize.value,
-        searchVal: searchProcess.value || undefined,
-        stateType: stateType.value || undefined,
-        startDate: start,
-        endDate: end
-      })
+      const data = await loadAllOrOne<DsProcessInstance>('process', { start, end })
       if (seq !== loadSeq) return
       instances.value = data.totalList || []
       total.value = data.total || 0
@@ -148,6 +134,69 @@ async function load() {
   } finally {
     if (seq === loadSeq) loading.value = false
   }
+}
+
+/** 查询工作流/任务实例:单个项目直查;全部项目(空 projectName)跨项目合并 */
+async function loadAllOrOne<T>(
+  mode: 'task' | 'process',
+  { start, end }: { start?: string; end?: string }
+): Promise<{ totalList: T[]; total: number }> {
+  const common = { pageNo: 1, pageSize: pageSize.value, stateType: stateType.value || undefined, startDate: start, endDate: end }
+  // 单个项目
+  if (projectName.value) {
+    if (mode === 'task') {
+      return listTaskInstances(projectName.value, { ...common, taskName: searchTask.value || undefined }) as unknown as { totalList: T[]; total: number }
+    }
+    return listProcessInstances(projectName.value, { ...common, searchVal: searchProcess.value || undefined }) as unknown as { totalList: T[]; total: number }
+  }
+  // 全部项目
+  const kw = (mode === 'task' ? searchTask.value : searchProcess.value)?.trim()
+  const targets: { projectName: string; processName?: string; processId?: number }[] = []
+  if (kw) {
+    // 有搜索词:用依赖缓存定位(快,不发海豚搜索请求)
+    const hits = await searchWorkflows(kw)
+    const byProject = new Map<string, { projectName: string }>()
+    for (const h of hits) {
+      if (h.matchedTask || h.processName.toLowerCase().includes(kw.toLowerCase())) {
+        targets.push({ projectName: h.projectName, processName: h.processName, processId: h.processId })
+      } else {
+        byProject.set(h.projectName, { projectName: h.projectName })
+      }
+    }
+    for (const p of byProject.values()) targets.push(p)
+    if (!targets.length) return { totalList: [], total: 0 }
+  } else {
+    // 无搜索词:全部项目并发查(限并发,避免打垮海豚)
+    targets.push(...projects.value.map((p) => ({ projectName: p.name })))
+  }
+  // 并发查询(限 3)
+  const results: T[] = []
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const t = targets[cursor++]
+      try {
+        if (t.processId) {
+          // 精确工作流:按工作流名搜索实例
+          const d =
+            mode === 'task'
+              ? await listTaskInstances(t.projectName, { ...common, taskName: t.processName })
+              : await listProcessInstances(t.projectName, { ...common, searchVal: t.processName })
+          results.push(...((d.totalList || []) as T[]))
+        } else {
+          const d =
+            mode === 'task'
+              ? await listTaskInstances(t.projectName, { ...common, taskName: kw || undefined })
+              : await listProcessInstances(t.projectName, { ...common, searchVal: kw || undefined })
+          results.push(...((d.totalList || []) as T[]))
+        }
+      } catch {
+        /* 单个项目失败跳过 */
+      }
+    }
+  }
+  await Promise.all([worker(), worker(), worker()])
+  return { totalList: results, total: results.length }
 }
 
 function onProjectChange() {
@@ -305,6 +354,51 @@ function openDeps(inst: DsProcessInstance) {
   depsDialogVisible.value = true
 }
 
+// ── 任务节点级操作(单任务重跑 / 从节点级联)─────────────────
+/** 从任务实例提取节点定义 id(taskJson.id,如 tasks-41739) */
+function taskNodeId(t: DsTaskInstance): string | null {
+  const tj = t.taskJson
+  if (!tj) return null
+  const id = typeof tj === 'string' ? (JSON.parse(tj)?.id ?? null) : (tj.id ?? null)
+  return id ? String(id) : null
+}
+
+/** 单任务重跑 / 从节点级联:start-process-instance + startNodeList=该节点 */
+async function onRerunFromTask(t: DsTaskInstance, cascade: boolean) {
+  const nodeId = taskNodeId(t)
+  if (!nodeId) {
+    ElMessage.warning('该任务缺少节点定义 ID,无法从节点重跑')
+    return
+  }
+  const label = cascade ? '从该节点级联重跑' : '单任务重跑'
+  try {
+    await ElMessageBox.confirm(
+      `确定要${label}「${t.name}」吗?(将从该节点开始执行${cascade ? '及其后续节点' : ''})`,
+      label,
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await fetch('/api/ds-deps/rerun-from-node', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectName: projectName.value,
+        processInstanceId: t.processInstanceId,
+        startNodeId: nodeId
+      })
+    })
+    const body = (await res.json()) as { code?: number; msg?: string }
+    if (body.code !== 0) throw new Error(body.msg || '重跑失败')
+    ElMessage.success(`${label}成功`)
+    load()
+  } catch (e) {
+    ElMessage.error(`${label}失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
 onMounted(async () => {
   try {
     const res = await fetch('/api/config')
@@ -315,12 +409,9 @@ onMounted(async () => {
   }
   try {
     projects.value = await listProjects()
-    if (projects.value.length) {
-      projectName.value = projects.value[0].name
-      await load()
-    } else {
-      error.value = '无可见项目(检查 Token 是否有项目权限)'
-    }
+    // 默认"全部项目"(空 projectName),跨项目检索
+    projectName.value = ''
+    await load()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
     if (!projects.value.length) error.value += '(海豚 token 由网关 DS_TOKEN 配置注入,项目列表即该用户可见项目)'
@@ -338,6 +429,7 @@ onMounted(async () => {
         filterable
         @change="onProjectChange"
       >
+        <el-option label="全部项目(跨项目检索)" value="" />
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.name" />
       </el-select>
 
@@ -428,6 +520,12 @@ onMounted(async () => {
               <el-table-column label="日志" width="80" fixed="right">
                 <template #default="{ row: t }">
                   <el-button link type="primary" size="small" @click="openLog(t)">查看</el-button>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="150" fixed="right">
+                <template #default="{ row: t }">
+                  <el-button link size="small" @click="onRerunFromTask(t, false)">单任务重跑</el-button>
+                  <el-button link type="success" size="small" @click="onRerunFromTask(t, true)">节点级联</el-button>
                 </template>
               </el-table-column>
             </el-table>

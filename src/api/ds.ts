@@ -28,6 +28,8 @@ export interface DsTaskInstance {
   retryTimes?: number
   maxRetryTimes?: number
   taskInstancePriority?: string
+  /** 任务定义 JSON(含节点 id taskJson.id,用于单任务/节点级重跑) */
+  taskJson?: string | { id?: string }
 }
 
 async function request<T>(path: string): Promise<T> {

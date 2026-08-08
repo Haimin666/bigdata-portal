@@ -8,6 +8,8 @@ export interface DepNode {
   depTasks?: string
   upstream?: DepNode[]
   downstream?: DepNode[]
+  /** 下游节点最近实例(有则显示状态/可重跑) */
+  instance?: { instanceId: number; name: string; state: string } | null
 }
 
 export interface WorkflowTree {
@@ -87,9 +89,34 @@ export interface RerunResult {
   name: string
   ok: boolean
   msg: string
+  instanceId?: number
+  newInstance?: boolean
 }
 export function rerunInstances(instances: RerunItem[]): Promise<RerunResult[]> {
   return post('/rerun-instances', { instances })
+}
+
+/** 级联重跑:节点有实例重跑,无实例按今天新建 */
+export interface CascadeNode {
+  projectName: string
+  processId: number
+  processName: string
+  instanceId?: number
+}
+export function rerunCascade(nodes: CascadeNode[]): Promise<RerunResult[]> {
+  return post('/rerun-cascade', { nodes })
+}
+
+/** 跨项目搜索工作流(按工作流名/任务名/项目名) */
+export interface WorkflowHit {
+  projectId: number
+  projectName: string
+  processId: number
+  processName: string
+  matchedTask: string
+}
+export function searchWorkflows(keyword: string): Promise<WorkflowHit[]> {
+  return get(`/search-workflows?keyword=${encodeURIComponent(keyword)}`)
 }
 
 /** 从指定节点重跑 */

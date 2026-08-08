@@ -4,11 +4,11 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import {
   fetchWorkflowTree,
-  rerunInstances,
+  rerunCascade,
   refreshDeps,
   type WorkflowTree,
   type DepNode,
-  type RerunItem
+  type CascadeNode
 } from '@/api/dsDeps'
 
 defineOptions({ name: 'DsDepsDialog' })
@@ -42,6 +42,8 @@ interface FlatNode {
   projectName: string
   level: number
   isCurrent: boolean
+  /** 下游节点的最近实例(有实例才可重跑) */
+  instance?: { instanceId: number; name: string; state: string } | null
 }
 const flatNodes = ref<FlatNode[]>([])
 const currentKey = ref('')
@@ -70,7 +72,7 @@ async function load() {
     })
     const walkDown = (nodes: DepNode[] | undefined, level: number) => {
       for (const n of nodes || []) {
-        flat.push({ processId: n.processId, processName: n.processName, projectName: n.projectName, level, isCurrent: false })
+        flat.push({ processId: n.processId, processName: n.processName, projectName: n.projectName, level, isCurrent: false, instance: n.instance })
         walkDown(n.downstream, level + 1)
       }
     }
@@ -98,6 +100,27 @@ function toggle(node: FlatNode) {
   checked.value = s
 }
 
+/** 下游实例状态文本 */
+function instStateText(inst: FlatNode['instance']): string {
+  if (!inst) return '近1天无实例'
+  const map: Record<string, string> = {
+    SUCCESS: '成功',
+    FAILURE: '失败',
+    RUNNING_EXEUTION: '运行中',
+    RUNNING_EXECUTION: '运行中',
+    PAUSE: '暂停',
+    STOP: '停止'
+  }
+  return map[inst.state] || inst.state
+}
+
+function instStateCls(state?: string): string {
+  if (state === 'FAILURE') return 'inst-fail'
+  if (state === 'SUCCESS') return 'inst-ok'
+  if (state === 'RUNNING_EXEUTION' || state === 'RUNNING_EXECUTION') return 'inst-run'
+  return ''
+}
+
 async function doRefresh() {
   refreshing.value = true
   try {
@@ -111,33 +134,31 @@ async function doRefresh() {
   }
 }
 
-/** 级联重跑:勾选的节点(需实例)逐个重跑 */
+/** 级联重跑:勾选的节点,有实例重跑/无实例后端自动新建 */
 async function doRerun() {
-  if (!props.instanceId) {
+  if (!props.instanceId && !checked.value.has(currentKey.value)) {
     ElMessage.warning('缺少当前实例')
     return
   }
-  // 当前节点 + 勾选的下游节点
-  const targets: RerunItem[] = []
+  // 勾选节点:当前 + 下游(上游不重跑)
+  const nodes: CascadeNode[] = []
   if (checked.value.has(currentKey.value)) {
-    targets.push({ projectName: props.projectName, instanceId: props.instanceId, name: props.processName })
+    nodes.push({ projectName: props.projectName, processId: props.processId, processName: props.processName, instanceId: props.instanceId })
   }
   for (const n of flatNodes.value) {
-    if (!n.isCurrent && checked.value.has(String(n.processId))) {
-      // 下游节点:无实例信息,标记需要用户在海豚侧确认(此版本先提示)
-      // 这里简化:下游节点重跑需要实例 id,当前无法从依赖树拿,提示用户
-      ElMessage.info(`下游「${n.processName}」需在海豚侧确认实例后重跑(此版本支持当前实例+直接下游实例)`)
+    if (!n.isCurrent && checked.value.has(String(n.processId)) && n.level >= 1) {
+      nodes.push({ projectName: n.projectName, processId: n.processId, processName: n.processName, instanceId: n.instance?.instanceId })
     }
   }
-  if (!targets.length) {
+  if (!nodes.length) {
     ElMessage.warning('未勾选可重跑节点')
     return
   }
   try {
-    const results = await rerunInstances(targets)
+    const results = await rerunCascade(nodes)
     const ok = results.filter((r) => r.ok)
     const fail = results.filter((r) => !r.ok)
-    ElMessage.success(`重跑完成:成功 ${ok.length},失败 ${fail.length}`)
+    ElMessage.success(`级联重跑完成:成功 ${ok.length},失败 ${fail.length}`)
     if (fail.length) ElMessage.error(fail.map((f) => `${f.name}:${f.msg}`).join(';'))
   } catch (e) {
     ElMessage.error(`重跑失败:${e instanceof Error ? e.message : e}`)
@@ -171,8 +192,7 @@ onMounted(() => {
           :style="{ marginLeft: n.level * 24 + 'px' }"
         >
           <el-checkbox
-            v-model="checked"
-            :value="String(n.processId)"
+            :model-value="checked.has(String(n.processId))"
             :disabled="n.isCurrent || n.level === 0"
             @change="toggle(n)"
           />
@@ -181,6 +201,10 @@ onMounted(() => {
           <span v-if="n.isCurrent" class="dep-tag">当前</span>
           <span v-else-if="!n.isCurrent && flatNodes.findIndex((x) => x.isCurrent) < i" class="dep-tag down">下游</span>
           <span v-else class="dep-tag up">上游</span>
+          <!-- 下游节点实例状态 -->
+          <span v-if="!n.isCurrent && flatNodes.findIndex((x) => x.isCurrent) < i" class="dep-inst" :class="instStateCls(n.instance?.state)">
+            {{ instStateText(n.instance) }}
+          </span>
         </div>
       </template>
       <div v-else-if="!loading" class="dep-empty">暂无依赖数据(可点击刷新)</div>
@@ -251,6 +275,30 @@ onMounted(() => {
   font-size: 11px;
   color: $muted;
   flex-shrink: 0;
+}
+
+.dep-inst {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  background: $bg;
+  color: $muted;
+
+  &.inst-fail {
+    color: #f56c6c;
+    background: rgba(245, 108, 108, 0.1);
+  }
+
+  &.inst-ok {
+    color: #67c23a;
+    background: rgba(103, 194, 58, 0.1);
+  }
+
+  &.inst-run {
+    color: $primary;
+    background: rgba(94, 106, 210, 0.1);
+  }
 }
 
 .dep-tag {
