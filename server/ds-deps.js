@@ -525,7 +525,7 @@ export function dsDepsRouter() {
         } else {
           // 新建:START_PROCESS,按今天调度(完整时间格式,海豚要求)
           const now = new Date()
-          const pad = (x: number) => String(x).padStart(2, '0')
+          const pad = (x) => String(x).padStart(2, '0')
           const scheduleTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
           const d = await dsPost(
             `/projects/${encodeURIComponent(n.projectName)}/executors/start-process-instance`,
