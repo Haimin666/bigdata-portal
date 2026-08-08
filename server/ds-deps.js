@@ -133,7 +133,7 @@ function parseProcessDefinition(data) {
 
 // ── 采集 ──────────────────────────────────────────────────────
 async function fetchAllProcessIds(projectName) {
-  // 分页拉全量工作流列表,返回 [{id, name, releaseState}]
+  // 分页拉全量工作流列表,返回 [{id, name, releaseState, scheduleReleaseState}]
   const out = []
   let page = 1
   const PAGE_SIZE = 100
@@ -144,7 +144,7 @@ async function fetchAllProcessIds(projectName) {
     })
     const list = d?.data?.totalList || []
     for (const p of list) {
-      out.push({ id: p.id, name: p.name, releaseState: p.releaseState })
+      out.push({ id: p.id, name: p.name, releaseState: p.releaseState, scheduleReleaseState: p.scheduleReleaseState })
     }
     if (!list.length || list.length < PAGE_SIZE) break
     page++
@@ -172,8 +172,10 @@ async function collect() {
     try {
       const flows = await fetchAllProcessIds(p.name)
       for (const f of flows) {
-        // 只缓存已上线(ONLINE)的工作流:下线=旧版停用,不纳入依赖树/级联重跑
-        if (String(f.releaseState).toUpperCase() !== 'ONLINE') continue
+        // 只缓存"定时任务已上线"的工作流(scheduleReleaseState=ONLINE):
+        // 手动执行/定时未上线的工作流不会自动被拉起,不纳入依赖树/级联重跑
+        // (releaseState=ONLINE 只表示工作流定义发布,不代表定时启用)
+        if (String(f.scheduleReleaseState).toUpperCase() !== 'ONLINE') continue
         allWorkflows.push({ projectId: p.id, projectName: p.name, processId: f.id, processName: f.name })
       }
     } catch (e) {
