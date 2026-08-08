@@ -1,10 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import * as echarts from 'echarts/core'
-import { TreeChart, GraphChart } from 'echarts/charts'
-import { TooltipComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
 import {
   fetchWorkflowTree,
   rerunCascade,
@@ -14,7 +10,6 @@ import {
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
 
-echarts.use([TreeChart, GraphChart, TooltipComponent, CanvasRenderer])
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -51,176 +46,6 @@ function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
   return out
 }
 
-// ── ECharts 依赖图(graph 关系图:统一卡片 + 可拖拽) ─────────
-const chartRef = ref<HTMLDivElement>()
-let chart: echarts.ECharts | null = null
-
-/** 状态 → 文本(近 1 天) */
-function stateText(state?: string): string {
-  if (!state) return '近1天无实例'
-  const map: Record<string, string> = {
-    SUCCESS: '成功',
-    FAILURE: '失败',
-    RUNNING_EXEUTION: '运行中',
-    RUNNING_EXECUTION: '运行中',
-    PAUSE: '暂停',
-    STOP: '停止'
-  }
-  return map[state] || state
-}
-
-/** crontab → 展示(直接显示原始值,如 '0 3 * * *') */
-function crontabDesc(crontab?: string | null): string {
-  if (!crontab) return ''
-  return `cron ${crontab.trim()}`
-}
-
-/** 状态 → 边框色 */
-function stateBorder(state?: string): string {
-  if (state === 'FAILURE') return '#f56c6c'
-  if (state === 'SUCCESS') return '#67c23a'
-  if (state && state.includes('RUNNING')) return '#5e6ad2'
-  return '#c9cdd6'
-}
-
-/** 拍平上下游为 graph 节点+边(层用于初始布局) */
-function buildGraph() {
-  const nodes: Record<string, unknown>[] = []
-  const edges: { source: string; target: string }[] = []
-  const seen = new Set<string>()
-  const layerMap = new Map<string, number>()
-
-  const addNode = (n: DepNode, layer: number) => {
-    const k = String(n.processId)
-    layerMap.set(k, layer)
-    if (seen.has(k)) return
-    seen.add(k)
-    const inst = n.instance?.state
-    nodes.push({
-      name: n.processName,
-      projectName: n.projectName,
-      processId: n.processId,
-      stateText: stateText(inst),
-      crontabText: crontabDesc(n.crontab),
-      border: stateBorder(inst),
-      isCurrent: false
-    })
-  }
-
-  const walkUp = (ns: DepNode[] | undefined, layer: number) => {
-    for (const n of ns || []) {
-      addNode(n, layer)
-      walkUp(n.upstream, layer - 1)
-      for (const ch of n.upstream || []) {
-        edges.push({ source: String(ch.processId), target: String(n.processId) })
-      }
-    }
-  }
-  const walkDown = (ns: DepNode[] | undefined, layer: number) => {
-    for (const n of ns || []) {
-      addNode(n, layer)
-      walkDown(n.downstream, layer + 1)
-      for (const ch of n.downstream || []) {
-        edges.push({ source: String(n.processId), target: String(ch.processId) })
-      }
-    }
-  }
-  if (!tree.value) return { nodes: [], edges: [] }
-  walkUp(tree.value.upstream, -1)
-  addNode(tree.value, 0)
-  const curNode = nodes.find((x) => x.processId === tree.value?.processId)
-  if (curNode) curNode.isCurrent = true
-  walkDown(tree.value.downstream, 1)
-
-  // 初始布局:按层横向排,同层纵向均分
-  const byLayer = new Map<number, number[]>()
-  for (const k of seen) {
-    const l = layerMap.get(k) || 0
-    if (!byLayer.has(l)) byLayer.set(l, [])
-    byLayer.get(l)!.push(Number(k))
-  }
-  for (const n of nodes) {
-    const l = layerMap.get(String(n.processId)) || 0
-    const arr = byLayer.get(l) || []
-    const idx = arr.indexOf(Number(n.processId))
-    ;(n as Record<string, unknown>).x = l * 280
-    ;(n as Record<string, unknown>).y = (idx - (arr.length - 1) / 2) * 100
-  }
-  return { nodes, edges }
-}
-
-function renderChart() {
-  if (!chartRef.value || !tree.value) return
-  if (!chart) {
-    chart = echarts.init(chartRef.value)
-    chart.on('click', (params: unknown) => {
-      const p = params as { data?: { processId?: number; projectName?: string; name?: string } }
-      if (p.data?.processId) {
-        onJump({
-          processId: p.data.processId,
-          projectName: p.data.projectName || '',
-          processName: p.data.name || ''
-        })
-      }
-    })
-  }
-  const { nodes, edges } = buildGraph()
-  chart.setOption({
-    tooltip: {
-      formatter: (p: unknown) => {
-        const d = (p as { data?: Record<string, unknown> }).data || {}
-        return `<b>${d.name || ''}</b><br/>项目:${d.projectName || ''}<br/>状态:${d.stateText || ''}${d.crontabText ? '<br/>' + d.crontabText : ''}`
-      }
-    },
-    series: [
-      {
-        type: 'graph',
-        layout: 'none',
-        draggable: true,
-        roam: true,
-        data: nodes,
-        links: edges,
-        symbol: 'rect',
-        symbolSize: [220, 72],
-        itemStyle: {
-          color: '#ffffff',
-          borderColor: '#d0d4db',
-          borderWidth: 1,
-          borderRadius: 8
-        },
-        label: {
-          show: true,
-          position: 'inside',
-          fontSize: 11,
-          lineHeight: 15,
-          color: '#333',
-          formatter: (p: unknown) => {
-            const d = (p as { data: Record<string, unknown> }).data || {}
-            const st = d.stateText || ''
-            let mark = ''
-            if (st === '成功') mark = '✓ '
-            else if (st === '失败') mark = '✗ '
-            else if (st === '运行中') mark = '● '
-            const name = d.name || ''
-            const sub = `${d.projectName || ''} | ${mark}${st}`
-            return d.crontabText ? `${name}\n${sub}\n${d.crontabText}` : `${name}\n${sub}`
-          }
-        },
-        lineStyle: { color: '#c9cdd6', width: 1.2, curveness: 0.1 },
-        emphasis: {
-          focus: 'adjacency',
-          itemStyle: { borderWidth: 2, borderColor: '#5e6ad2' }
-        }
-      }
-    ]
-  })
-  chart.resize()
-}
-
-function onChartResize() {
-  chart?.resize()
-}
-
 async function load() {
   loading.value = true
   error.value = ''
@@ -230,9 +55,6 @@ async function load() {
     // 默认勾选:当前 + 所有下游(上游不重跑)
     const downs = collectDownstream(tree.value?.downstream)
     checked.value = new Set([currentKey.value, ...downs.map((n) => String(n.processId))])
-    // 等 DOM 就绪后渲染 ECharts 下游树
-    await nextTick()
-    renderChart()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -305,14 +127,7 @@ async function doRerun() {
 }
 
 onMounted(() => {
-  window.addEventListener('resize', onChartResize)
   if (props.modelValue) load()
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', onChartResize)
-  chart?.dispose()
-  chart = null
 })
 </script>
 
@@ -350,11 +165,16 @@ onUnmounted(() => {
               <span class="proj">{{ projectName }}</span>
             </div>
           </div>
-          <!-- 下游依赖:ECharts 树(自动分叉,可折叠) -->
-          <div class="dep-chart" :class="{ empty: !tree.downstream?.length }">
-            <div v-if="tree.downstream?.length" ref="chartRef" class="chart-canvas" />
-            <div v-else class="dep-empty">无下游依赖</div>
-          </div>
+          <!-- 下游分支(向右,并行分叉) -->
+          <DepBranch
+            v-if="tree.downstream?.length"
+            :nodes="tree.downstream"
+            direction="right"
+            :current-key="currentKey"
+            :checked="checked"
+            @toggle="toggle"
+            @jump="onJump"
+          />
         </div>
         <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
       </template>
@@ -405,26 +225,6 @@ onUnmounted(() => {
   gap: 8px;
   min-width: max-content;
   padding: 12px 4px;
-}
-
-/* ECharts 下游树容器 */
-.dep-chart {
-  flex: 1;
-  min-width: 400px;
-  height: 100%;
-  min-height: 320px;
-
-  &.empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-}
-
-.chart-canvas {
-  width: 100%;
-  height: 100%;
-  min-height: 320px;
 }
 
 /* 当前节点样式(与 DepBranch 卡片一致) */

@@ -3,7 +3,8 @@ import type { DepNode } from '@/api/dsDeps'
 
 defineOptions({ name: 'DepBranch' })
 
-// 递归横向分支:direction=left 表示往左展开上游,direction=right 往右展开下游
+// 递归横向分支:direction=left 往左展开上游,right 往右展开下游
+// 支持并行:一个节点多个子节点垂直堆叠,经汇聚线分叉
 const props = defineProps<{
   nodes?: DepNode[]
   direction: 'left' | 'right'
@@ -40,29 +41,38 @@ function instStateCls(state?: string): string {
   if (state === 'RUNNING_EXEUTION' || state === 'RUNNING_EXECUTION') return 'inst-run'
   return ''
 }
+
+function crontabText(n: DepNode): string {
+  return n.crontab ? `cron ${n.crontab.trim()}` : ''
+}
 </script>
 
 <template>
+  <!-- 一层节点:垂直堆叠 -->
   <div class="dep-branch" :class="direction">
-    <template v-for="n in nodes" :key="n.processId">
-      <!-- 上游分支:继续向左展开 -->
-      <div v-if="direction === 'left'" class="branch-col">
-        <DepBranch
-          v-if="n.upstream?.length"
-          :nodes="n.upstream"
-          direction="left"
-          :current-key="currentKey"
-          :checked="checked"
-          @toggle="emit('toggle', $event)"
-          @jump="emit('jump', $event)"
-        />
-        <div class="conn-line left" />
+    <div v-for="n in nodes" :key="n.processId" class="branch-node">
+      <!-- 上游:子节点在左,递归展开 -->
+      <div v-if="direction === 'left' && n.upstream?.length" class="children-col left">
+        <div class="vert-line" />
+        <div class="children">
+          <div class="child-item" v-for="ch in n.upstream" :key="ch.processId">
+            <div class="hor-line left" />
+            <DepBranch
+              :nodes="[ch]"
+              direction="left"
+              :current-key="currentKey"
+              :checked="checked"
+              @toggle="emit('toggle', $event)"
+              @jump="emit('jump', $event)"
+            />
+          </div>
+        </div>
       </div>
 
-      <!-- 节点卡片:点击跳转到任务监控实例 -->
+      <!-- 节点卡片 -->
       <div
         class="node-card"
-        :class="{ current: isCurrent(n) }"
+        :class="{ current: isCurrent(n), inst: instStateCls(n.instance?.state) }"
         @click="emit('jump', n)"
       >
         <div class="card-head">
@@ -75,7 +85,8 @@ function instStateCls(state?: string): string {
           <span class="proj">{{ n.projectName }}</span>
           <span class="inst" :class="instStateCls(n.instance?.state)">{{ instStateText(n) }}</span>
         </div>
-        <!-- 勾选(仅下游可勾选重跑),stop 阻止冒泡到卡片跳转 -->
+        <div v-if="crontabText(n)" class="card-cron">{{ crontabText(n) }}</div>
+        <!-- 勾选(仅下游可勾选重跑) -->
         <el-checkbox
           v-if="direction === 'right' && !isCurrent(n)"
           :model-value="checked.has(String(n.processId))"
@@ -84,57 +95,89 @@ function instStateCls(state?: string): string {
           @change="emit('toggle', n.processId)"
         >重跑</el-checkbox>
       </div>
-      <!-- 下游分支:继续向右展开 -->
-      <div v-if="direction === 'right'" class="branch-col">
-        <div class="conn-line right" />
-        <DepBranch
-          v-if="n.downstream?.length"
-          :nodes="n.downstream"
-          direction="right"
-          :current-key="currentKey"
-          :checked="checked"
-          @toggle="emit('toggle', $event)"
-          @jump="emit('jump', $event)"
-        />
+
+      <!-- 下游:子节点在右,垂直堆叠分叉 -->
+      <div v-if="direction === 'right' && n.downstream?.length" class="children-col right">
+        <div class="vert-line" />
+        <div class="children">
+          <div class="child-item" v-for="ch in n.downstream" :key="ch.processId">
+            <div class="hor-line right" />
+            <DepBranch
+              :nodes="[ch]"
+              direction="right"
+              :current-key="currentKey"
+              :checked="checked"
+              @toggle="emit('toggle', $event)"
+              @jump="emit('jump', $event)"
+            />
+          </div>
+        </div>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
 <style scoped lang="scss">
+/* 一层多个节点:垂直堆叠 */
 .dep-branch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.branch-node {
   display: flex;
   align-items: center;
   gap: 0;
+}
 
-  &.left {
-    flex-direction: row-reverse; /* 上游往左 */
-  }
+/* 子节点列(右侧下游/左侧上游) */
+.children-col {
+  display: flex;
+  align-items: center;
 
   &.right {
     flex-direction: row;
   }
+
+  &.left {
+    flex-direction: row-reverse;
+  }
 }
 
-.branch-col {
+/* 父到子:竖直干线 */
+.vert-line {
+  width: 2px;
+  height: 100%;
+  min-height: 12px;
+  background: #c9cdd6;
+  align-self: stretch;
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.child-item {
   display: flex;
   align-items: center;
-  flex-direction: column;
-  gap: 4px;
 }
 
-/* 连接线 */
-.conn-line {
-  width: 24px;
+/* 父到子的水平线 */
+.hor-line {
+  width: 20px;
   height: 2px;
   background: #c9cdd6;
 
   &.left {
-    margin-left: 0;
+    margin-right: 0;
   }
 
   &.right {
-    margin-right: 0;
+    margin-left: 0;
   }
 }
 
@@ -147,7 +190,7 @@ function instStateCls(state?: string): string {
   background: $panel;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   flex-shrink: 0;
   cursor: pointer;
@@ -163,6 +206,17 @@ function instStateCls(state?: string): string {
     border-width: 2px;
     box-shadow: 0 2px 10px rgba(94, 106, 210, 0.2);
     cursor: default;
+  }
+
+  /* 状态色左边框:失败红/成功绿/运行蓝 */
+  &.inst.inst-fail {
+    border-left: 3px solid #f56c6c;
+  }
+  &.inst.inst-ok {
+    border-left: 3px solid #67c23a;
+  }
+  &.inst.inst-run {
+    border-left: 3px solid $primary;
   }
 }
 
@@ -244,5 +298,11 @@ function instStateCls(state?: string): string {
     color: $primary;
     background: rgba(94, 106, 210, 0.1);
   }
+}
+
+.card-cron {
+  font-size: 10px;
+  color: #c0c4cc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 </style>
