@@ -71,8 +71,19 @@ python3.7 main.py
 | GET  | `/dbs`    | 列出可用数据源(白名单过滤) |
 | POST | `/query`  | 执行只读查询,body `{db, sql}`(db=数据源 name) |
 | GET  | `/acl`    | 回显配置(脱敏,排查) |
+| GET  | `/scripts/tree` | 我的目录:SQL 脚本目录树 |
+| POST | `/scripts/new`  | 新建目录/文件,body `{parentId, name, kind}`(kind=dir\|file) |
+| POST | `/scripts/rename`| 重命名,body `{id, name}` |
+| POST | `/scripts/delete`| 删除(目录递归),body `{id}` |
+| POST | `/scripts/save`  | 保存 SQL 内容,body `{id, content}`(存 `scripts/files/<id>.sql`) |
+| GET  | `/scripts/get`  | 读取 SQL 内容,`?id=` |
+| GET  | `/tables` | 表目录:某库的表列表,`?db=`(MySQL `SHOW TABLES`/Oracle `user_tables`) |
+| GET  | `/fields` | 表目录:某表的字段列表,`?db=&table=`(MySQL `DESC`/Oracle `user_tab_columns`) |
 
 鉴权:配置了 `authToken` 后,请求需带请求头 `X-DB-Token: <token>`。
+
+脚本存储:目录树元数据在 `scripts/tree.json`,SQL 内容在 `scripts/files/<id>.sql`;
+可用环境变量 `DB_SCRIPTS_DIR` 覆盖存储目录(docker 部署建议挂载此目录持久化)。
 
 ## 安全约束
 

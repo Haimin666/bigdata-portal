@@ -58,3 +58,69 @@ export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
     body: JSON.stringify({ db, sql })
   })
 }
+
+// ── 脚本存储(我的目录)────────────────────────────────────────
+export interface ScriptNode {
+  id: string
+  name: string
+  type: 'dir' | 'file'
+  children?: ScriptNode[]
+}
+
+export interface ScriptTree {
+  my: ScriptNode[]
+}
+
+export async function listScriptTree(): Promise<ScriptTree> {
+  return request<ScriptTree>('/scripts/tree')
+}
+
+export async function createScriptNode(parentId: string | null, name: string, kind: 'dir' | 'file'): Promise<ScriptNode> {
+  return request<ScriptNode>('/scripts/new', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parentId, name, kind })
+  })
+}
+
+export async function renameScriptNode(id: string, name: string): Promise<ScriptNode> {
+  return request<ScriptNode>('/scripts/rename', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, name })
+  })
+}
+
+export async function deleteScriptNode(id: string): Promise<void> {
+  await request<never>('/scripts/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  })
+}
+
+export async function saveScriptContent(id: string, content: string): Promise<void> {
+  await request<never>('/scripts/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, content })
+  })
+}
+
+export async function getScriptContent(id: string): Promise<{ id: string; content: string }> {
+  return request<{ id: string; content: string }>(`/scripts/get?id=${encodeURIComponent(id)}`)
+}
+
+// ── 表目录(库→表→字段)────────────────────────────────────────
+export interface TableField {
+  name: string
+  type: string
+}
+
+export async function listTables(db: string): Promise<string[]> {
+  return request<string[]>(`/tables?db=${encodeURIComponent(db)}`)
+}
+
+export async function listFields(db: string, table: string): Promise<TableField[]> {
+  return request<TableField[]>(`/fields?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`)
+}

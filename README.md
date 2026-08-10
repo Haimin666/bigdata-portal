@@ -19,6 +19,7 @@
 |---|---|---|
 | YARN 应用 | 原生视图 | 表格/卡片、筛选、自动刷新、kill |
 | HDFS | 原生视图 | WebHDFS 文件浏览器:面包屑导航、路径定位、翻页、大小/权限 |
+| 数据库查询 `/db-query` | 原生视图 | 多引擎/库选择 + CodeMirror SQL 画布 + 结果表格(排序/CSV 导出)+ **我的目录**(SQL 脚本存储)+ **表目录**(库→表→字段) |
 | 海豚调度 `/ds` | 同源 iframe | 网关代理 + 自动登录,免登录进入 |
 | 即时查询 `/query` | 同源 iframe | Stingray 代理 + 路由注入,自动登录,SQL 查询(WebSocket 结果推送) |
 | 我的数据 `/omd` | 跨源 iframe | OpenMetadata 直连,域内登录 |

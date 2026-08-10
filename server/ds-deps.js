@@ -13,10 +13,12 @@ import path from 'node:path'
 import http from 'node:http'
 import https from 'node:https'
 import { Router } from 'express'
+import config from './config.js'
 
 // ── 配置 ──────────────────────────────────────────────────────
-const DS_BASE = process.env.DS_WEB_URL || 'http://olds.bigdata.shiqiao.com/dolphinscheduler'
-const DS_TOKEN = process.env.DS_TOKEN || ''
+// 复用网关配置(ds-deps 直连海豚需带 token;仅服务器手动刷新时使用)
+const DS_BASE = config.dsWebUrl
+const DS_TOKEN = config.dsToken || ''
 // 缓存文件路径(默认项目根 data/;docker 挂载 /app/data)
 const CACHE_FILE =
   process.env.DS_DEPS_CACHE_FILE || path.join(import.meta.dirname, '../data/ds-deps.json')
@@ -168,6 +170,7 @@ async function collect() {
   console.log(`[ds-deps] 项目数: ${projects.length}`)
   // 2. 每项目的工作流列表(收集 processId + 名称)
   const allWorkflows = [] // {projectId, projectName, id, name}
+  const crontabMap = new Map() // processDefinitionId → crontab(调度列表收集,全局合并)
   for (const p of projects) {
     try {
       const flows = await fetchAllProcessIds(p.name)
@@ -200,7 +203,8 @@ async function collect() {
       } catch {
         /* 调度列表失败不影响 */
       }
-      crontabMap = schedMap
+      // 合并到全局 crontab 映射(不是覆盖)
+      for (const [k, v] of schedMap) crontabMap.set(k, v)
     } catch (e) {
       console.warn(`[ds-deps] 项目 ${p.name} 工作流列表失败: ${e.message}`)
     }
@@ -208,7 +212,6 @@ async function collect() {
   console.log(`[ds-deps] 工作流总数: ${allWorkflows.length}`)
   // 3. 并发逐个拉定义解析
   const nodes = new Map()
-  let crontabMap = new Map() // processDefinitionId → crontab(调度列表收集)
   let cursor = 0
   const worker = async () => {
     while (cursor < allWorkflows.length) {
@@ -458,9 +461,13 @@ export function dsDepsRouter() {
     const task = (async () => {
       await annotate(tree.downstream)
       runQueued()
+      // 等待队列中的实例查询全部完成(否则响应返回时 instance 还没填充)
+      while (queue.length || active > 0) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
     })()
     try {
-      await Promise.race([task, new Promise((r) => setTimeout(r, 8000))])
+      await Promise.race([task, new Promise((r) => setTimeout(r, 15000))])
     } catch {
       /* 实例查询失败/超时不影响树 */
     }

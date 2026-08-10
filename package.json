@@ -12,6 +12,7 @@
     "serve": "node --no-deprecation server/index.js"
   },
   "dependencies": {
+    "@antv/g6": "^4.8.24",
     "@element-plus/icons-vue": "^2.3.2",
     "codemirror": "^5.65.21",
     "cookie-parser": "^1.4.7",

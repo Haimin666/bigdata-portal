@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -13,7 +13,8 @@ import 'codemirror/mode/sql/sql.js'
 async function loadAddons() {
   // 空:不加载 addon
 }
-import { listDataSources, queryDb, type DbDataSource } from '@/api/db'
+import { listDataSources, queryDb, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import SqlTreePanel from './SqlTreePanel.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
@@ -23,6 +24,46 @@ const engine = ref<'mysql' | 'oracle' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
+
+// 当前打开的文件(我的目录):保存时写回
+const currentFile = ref<ScriptNode | null>(null)
+
+/** 打开文件:加载 SQL 内容到编辑器 */
+async function onOpenFile(node: ScriptNode) {
+  try {
+    const { content } = await getScriptContent(node.id)
+    cm?.setValue(content || '')
+    currentFile.value = node
+    ElMessage.success(`已打开 ${node.name}`)
+  } catch (e) {
+    ElMessage.error(`打开失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
+/** 表目录点击 → 在光标处插入表名/字段名 */
+function onInsert(text: string) {
+  const c = cm
+  if (!c) return
+  const cur = c.getCursor()
+  c.replaceRange(text, cur)
+  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
+  c.focus()
+}
+
+/** 保存当前文件(Ctrl/Cmd + S) */
+async function saveCurrent() {
+  const f = currentFile.value
+  if (!f) {
+    ElMessage.info('先在「我的目录」打开一个 SQL 文件')
+    return
+  }
+  try {
+    await saveScriptContent(f.id, cm?.getValue() ?? '')
+    ElMessage.success(`已保存 ${f.name}`)
+  } catch (e) {
+    ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
+  }
+}
 
 // 引擎过滤后的数据源
 const filteredDbs = computed(() =>
@@ -94,13 +135,19 @@ async function initEditor() {
       c.replaceRange(close, cur)
     }
   })
-  // Ctrl/Cmd + Enter 执行;Tab 缩进
+  // Ctrl/Cmd + Enter 执行;Tab 缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
     'Ctrl-Enter': () => {
       void runQuery()
     },
     'Cmd-Enter': () => {
       void runQuery()
+    },
+    'Ctrl-S': () => {
+      void saveCurrent()
+    },
+    'Cmd-S': () => {
+      void saveCurrent()
     },
     Tab: (c: CodeMirror.Editor) => {
       const cur = c.getCursor()
@@ -451,6 +498,12 @@ function isNumeric(val: unknown): boolean {
 
 <template>
   <div class="db-query">
+    <!-- 左目录面板 + 右查询区 -->
+    <div class="db-main">
+      <div class="db-side">
+        <SqlTreePanel :dbs="datasources" @open="onOpenFile" @insert="onInsert" />
+      </div>
+      <div class="db-right">
     <!-- 顶部工具条 -->
     <div class="toolbar">
       <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable @change="db = filteredDbs[0]?.name || ''">
@@ -461,6 +514,13 @@ function isNumeric(val: unknown): boolean {
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       <div class="toolbar-spacer" />
+      <el-button
+        v-if="currentFile"
+        :icon="DocumentChecked"
+        class="save-btn"
+        :disabled="loading"
+        @click="saveCurrent"
+      >保存 {{ currentFile.name }}</el-button>
       <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
       <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
@@ -561,6 +621,8 @@ function isNumeric(val: unknown): boolean {
     <div v-else-if="!loading && !error" class="empty-state">
       <el-empty description="选择数据库,编写 SQL 后执行(Ctrl/Cmd + Enter)" />
     </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -573,6 +635,36 @@ function isNumeric(val: unknown): boolean {
   height: 100%;
   box-sizing: border-box;
   overflow: auto;
+}
+
+/* 左目录面板 + 右查询区 */
+.db-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+
+.db-side {
+  width: 240px;
+  flex-shrink: 0;
+  border: 1px solid $border;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.db-right {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+}
+
+.save-btn {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toolbar {

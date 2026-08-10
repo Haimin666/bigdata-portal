@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import G6 from '@antv/g6'
 import {
   fetchWorkflowTree,
   rerunCascade,
@@ -9,7 +10,6 @@ import {
   type CascadeNode
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
-
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -32,9 +32,13 @@ const emit = defineEmits<{
 const tree = ref<WorkflowTree | null>(null)
 const loading = ref(false)
 const error = ref('')
-// 勾选重跑的节点(递归收集下游)
+// 勾选重跑的节点(递归收集下游),默认全选:当前 + 所有下游
 const checked = ref<Set<string>>(new Set())
 const currentKey = ref('')
+
+// ── G6 依赖图(当前 + 下游,向右树) ──────────────────────────
+const g6El = ref<HTMLDivElement>()
+let graph: any | null = null
 
 /** 递归收集下游节点 */
 function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
@@ -46,6 +50,242 @@ function collectDownstream(nodes: DepNode[] | undefined): DepNode[] {
   return out
 }
 
+function toG6Node(n: DepNode): any {
+  return {
+    id: String(n.processId),
+    name: n.processName,
+    project: n.projectName,
+    state: n.instance?.state || null,
+    crontab: n.crontab || '',
+    instanceId: n.instance?.instanceId,
+    children: (n.downstream || []).map(toG6Node)
+  }
+}
+
+function buildTreeData(): any {
+  return {
+    id: String(props.processId),
+    name: props.processName,
+    project: props.projectName,
+    state: 'CURRENT',
+    crontab: '',
+    children: (tree.value?.downstream || []).map(toG6Node)
+  }
+}
+
+const stColor = (s: string | null) =>
+  s === 'SUCCESS' ? '#67c23a' : s === 'FAILURE' ? '#f56c6c' : s === 'RUNNING' ? '#5e6ad2' : '#c9cdd6'
+const stMark = (s: string | null) => (s === 'SUCCESS' ? '✓ 成功' : s === 'FAILURE' ? '✗ 失败' : s === 'RUNNING' ? '● 运行中' : '近1天无实例')
+const stText = (s: string | null) => (s === 'SUCCESS' || s === 'FAILURE' || s === 'RUNNING' ? s : '')
+const cronText = (c: string | null | undefined) =>
+  !c ? '' : c.trim().split(/\s+/).length === 5 ? `⏱ ${c.split(/\s+/)[0]} ${c.split(/\s+/)[1]} 每天` : `⏱ ${c}`
+
+/** 注册自定义卡片节点(与手写卡片一致的视觉) */
+function registerDepCard() {
+  if ((G6 as any).getRegisteredNode && (G6 as any).getRegisteredNode()['dep-card']) return
+  G6.registerNode(
+    'dep-card',
+    {
+      draw(cfg: any, group: any) {
+        const W = 190
+        const H = 66
+        const st = cfg.state
+        const proj = cfg.project
+        const crt = cfg.crontab
+        const cur = cfg.isCurrent
+        const name = cfg.label || cfg.name || cfg.id
+        const sel = cfg.__selected
+        const border = cur ? '#5e6ad2' : stColor(st)
+
+        const key = group.addShape('rect', {
+          attrs: {
+            x: -W / 2,
+            y: -H / 2,
+            width: W,
+            height: H,
+            radius: 8,
+            fill: cur ? 'rgba(94,106,210,0.06)' : '#fff',
+            stroke: border,
+            lineWidth: cur ? 2.5 : 1.5,
+            shadowColor: 'rgba(0,0,0,0.08)',
+            shadowBlur: cur ? 12 : 4,
+            cursor: 'pointer'
+          }
+        })
+
+        // 名称(当前加 ★)
+        group.addShape('text', {
+          attrs: {
+            x: -W / 2 + 10,
+            y: -H / 2 + 14,
+            text: (cur ? '★ ' : '') + name,
+            fontSize: 12,
+            fontWeight: cur ? 700 : 500,
+            fill: cur ? '#5e6ad2' : '#333',
+            textAlign: 'left',
+            textBaseline: 'middle'
+          }
+        })
+
+        // 项目 + 状态
+        group.addShape('text', {
+          attrs: {
+            x: -W / 2 + 10,
+            y: -H / 2 + 32,
+            text: `${proj}  ${stMark(st)}${stText(st) ? ' ' + stText(st) : ''}`,
+            fontSize: 10,
+            fill: '#888',
+            textAlign: 'left',
+            textBaseline: 'middle'
+          }
+        })
+
+        // cron(有调度才显示)
+        if (cronText(crt)) {
+          group.addShape('text', {
+            attrs: {
+              x: -W / 2 + 10,
+              y: -H / 2 + 50,
+              text: cronText(crt),
+              fontSize: 10,
+              fill: '#a8abb2',
+              textAlign: 'left',
+              textBaseline: 'middle'
+            }
+          })
+        }
+
+        // 重跑勾选按钮(右下角,非当前节点)
+        if (!cur) {
+          group.addShape('rect', {
+            name: 'rerun-bg',
+            attrs: {
+              x: W / 2 - 42,
+              y: -H / 2 + 20,
+              width: 32,
+              height: 18,
+              radius: 4,
+              fill: sel ? '#5e6ad2' : '#fff',
+              stroke: '#5e6ad2',
+              lineWidth: 1,
+              cursor: 'pointer'
+            }
+          })
+          group.addShape('text', {
+            name: 'rerun-text',
+            attrs: {
+              x: W / 2 - 26,
+              y: -H / 2 + 29,
+              text: sel ? '已选' : '重跑',
+              fontSize: 10,
+              fill: sel ? '#fff' : '#5e6ad2',
+              textAlign: 'center',
+              textBaseline: 'middle',
+              cursor: 'pointer'
+            }
+          })
+        }
+
+        return key
+      }
+    },
+    'single-node'
+  )
+}
+
+function renderChart() {
+  if (!g6El.value || !tree.value) return
+  graph?.destroy()
+  registerDepCard()
+  const data = buildTreeData()
+  graph = new G6.TreeGraph({
+    container: g6El.value,
+    width: g6El.value.clientWidth || 800,
+    height: g6El.value.clientHeight || 500,
+    fitView: true,
+    modes: {
+      default: ['drag-canvas', 'zoom-canvas', 'drag-node']
+    },
+    defaultEdge: {
+      type: 'cubic-horizontal',
+      style: { stroke: '#b9c2d0', lineWidth: 1.5, endArrow: { path: G6.Arrow.triangle(4, 6, 0), d: 0 } }
+    },
+    layout: {
+      type: 'compactBox',
+      direction: 'LR',
+      getId(d: any) {
+        return d.id
+      },
+      getWidth: () => 190,
+      getHeight: () => 66,
+      getVGap: () => 16,
+      getHGap: () => 70
+    }
+  })
+
+  graph.node((node: any) => ({
+    type: 'dep-card',
+    size: [190, 66],
+    label: node.name,
+    state: node.state,
+    project: node.project,
+    crontab: node.crontab,
+    isCurrent: node.id === currentKey.value,
+    __selected: checked.value.has(node.id)
+  }))
+
+  graph.data(data)
+  graph.render()
+  graph.fitView(30, true, false)
+
+  // 单击:重跑按钮 → 勾选/取消;卡片主体 → 折叠/展开子树
+  graph.on('node:click', (evt: any) => {
+    const target = evt.target
+    const name = target.get ? target.get('name') : ''
+    const item = evt.item
+    const model = item.getModel()
+    if (name === 'rerun-bg' || name === 'rerun-text') {
+      const k = String(model.id)
+      const s = new Set(checked.value)
+      if (s.has(k)) s.delete(k)
+      else s.add(k)
+      checked.value = s
+      model.__selected = s.has(k)
+      graph?.refreshItem(item)
+      return
+    }
+    // 折叠/展开
+    if (model.children && model.children.length) {
+      model.collapsed = !model.collapsed
+      graph?.updateChildren(model)
+    }
+  })
+
+  // 双击节点 → 跳转到任务监控对应实例
+  graph.on('node:dblclick', (evt: any) => {
+    const id = evt.item.getModel().id
+    const findNode = (nodes: DepNode[] | undefined): DepNode | null => {
+      for (const n of nodes || []) {
+        if (String(n.processId) === id) return n
+        const f = findNode(n.downstream)
+        if (f) return f
+      }
+      return null
+    }
+    const node = findNode(tree.value?.downstream)
+    if (node) onJump(node)
+    else ElMessage.info('当前节点')
+  })
+
+  // 窗口 resize 自适应
+  graph.on('canvas:click', () => {})
+  const ro = new ResizeObserver(() => {
+    if (g6El.value) graph?.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
+  })
+  ro.observe(g6El.value)
+  ;(graph as any).__ro = ro
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -55,6 +295,8 @@ async function load() {
     // 默认勾选:当前 + 所有下游(上游不重跑)
     const downs = collectDownstream(tree.value?.downstream)
     checked.value = new Set([currentKey.value, ...downs.map((n) => String(n.processId))])
+    await nextTick()
+    renderChart()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -129,6 +371,12 @@ async function doRerun() {
 onMounted(() => {
   if (props.modelValue) load()
 })
+
+onBeforeUnmount(() => {
+  ;(graph as any)?.__ro?.disconnect()
+  graph?.destroy()
+  graph = null
+})
 </script>
 
 <template>
@@ -142,40 +390,24 @@ onMounted(() => {
   >
     <div v-loading="loading" class="deps-body">
       <div v-if="error" class="deps-error">{{ error }}</div>
-      <!-- 横向思维导图:上游(左) + 当前(中) + 下游(右) -->
       <template v-if="tree">
-        <div class="mindmap">
-          <!-- 上游分支(向左) -->
-          <DepBranch
-            v-if="tree.upstream?.length"
-            :nodes="tree.upstream"
-            direction="left"
-            :current-key="currentKey"
-            :checked="checked"
-            @toggle="toggle"
-            @jump="onJump"
-          />
-          <!-- 当前节点 -->
-          <div class="node-card current">
-            <div class="card-head">
-              <span class="node-name cur">★ {{ processName }}</span>
-              <span class="tag cur">当前</span>
-            </div>
-            <div class="card-sub">
-              <span class="proj">{{ projectName }}</span>
-            </div>
+        <!-- 上游(左):保留 DepBranch 简单展示 -->
+        <div v-if="tree.upstream?.length" class="upstream-wrap">
+          <div class="dep-section-title">上游依赖(仅展示,不参与重跑)</div>
+          <div class="mindmap-up">
+            <DepBranch
+              :nodes="tree.upstream"
+              direction="left"
+              :current-key="currentKey"
+              :checked="checked"
+              @toggle="toggle"
+              @jump="onJump"
+            />
           </div>
-          <!-- 下游分支(向右,并行分叉) -->
-          <DepBranch
-            v-if="tree.downstream?.length"
-            :nodes="tree.downstream"
-            direction="right"
-            :current-key="currentKey"
-            :checked="checked"
-            @toggle="toggle"
-            @jump="onJump"
-          />
         </div>
+        <!-- 下游(右):G6 树(当前为根,默认全选重跑) -->
+        <div class="dep-section-title">下游依赖(点击卡片折叠/展开,双击跳转,点「重跑」勾选)</div>
+        <div ref="g6El" class="g6-canvas"></div>
         <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
       </template>
       <div v-else-if="!loading" class="dep-empty">暂无依赖数据(联系运维在服务器执行全量刷新)</div>
@@ -214,86 +446,39 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .deps-body {
-  max-height: 60vh;
+  max-height: 62vh;
   overflow: auto;
 }
 
-/* 横向思维导图:flex row,居中对齐 */
-.mindmap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: max-content;
-  padding: 12px 4px;
+/* 上游横向分支(左) */
+.upstream-wrap {
+  margin-bottom: 8px;
 }
 
-/* 当前节点样式(与 DepBranch 卡片一致) */
-.node-card {
-  min-width: 150px;
-  max-width: 180px;
-  padding: 8px 10px;
+.mindmap-up {
+  display: flex;
+  align-items: center;
+  min-width: max-content;
+  padding: 4px;
+  overflow-x: auto;
+}
+
+.dep-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: $muted;
+  margin: 4px 0;
+}
+
+/* G6 画布 */
+.g6-canvas {
+  width: 100%;
+  height: 48vh;
+  min-height: 320px;
   border: 1px solid $border;
   border-radius: 8px;
-  background: $panel;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
-  flex-shrink: 0;
-
-  &.current {
-    border-color: $primary;
-    border-width: 2px;
-    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.25);
-  }
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.node-name {
-  font-size: 12px;
-  color: $text;
-  font-weight: 500;
+  background: #fff;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-
-  &.cur {
-    color: $primary;
-    font-weight: 700;
-  }
-}
-
-.tag {
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 3px;
-  flex-shrink: 0;
-
-  &.cur {
-    background: rgba(94, 106, 210, 0.12);
-    color: $primary;
-  }
-}
-
-.card-sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.proj {
-  font-size: 10px;
-  color: $muted;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .deps-error {
@@ -301,92 +486,9 @@ onMounted(() => {
   padding: 8px;
 }
 
-.dep-section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: $muted;
-  margin: 8px 0 4px;
-}
-
 .dep-empty {
   color: $muted;
   font-size: 12px;
   padding: 8px;
-}
-
-.dep-node {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 4px;
-  margin: 2px 0;
-
-  &:hover {
-    background: rgba(94, 106, 210, 0.06);
-  }
-}
-
-.dep-name {
-  font-size: 13px;
-  color: $text;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dep-current {
-  font-weight: 700;
-  color: $primary;
-}
-
-.dep-proj {
-  font-size: 11px;
-  color: $muted;
-  flex-shrink: 0;
-}
-
-.dep-inst {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  background: $bg;
-  color: $muted;
-
-  &.inst-fail {
-    color: #f56c6c;
-    background: rgba(245, 108, 108, 0.1);
-  }
-
-  &.inst-ok {
-    color: #67c23a;
-    background: rgba(103, 194, 58, 0.1);
-  }
-
-  &.inst-run {
-    color: $primary;
-    background: rgba(94, 106, 210, 0.1);
-  }
-}
-
-.dep-tag {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  flex-shrink: 0;
-
-  &.current,
-  &.down {
-    background: rgba(94, 106, 210, 0.12);
-    color: $primary;
-  }
-
-  &.up {
-    background: rgba(245, 108, 108, 0.1);
-    color: #f56c6c;
-  }
 }
 </style>
