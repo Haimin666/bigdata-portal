@@ -59,7 +59,7 @@ export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
   })
 }
 
-// ── 脚本存储(我的目录)────────────────────────────────────────
+// ── 脚本存储(我的目录:平台本地 data/scripts/,经 /api/scripts)──
 export interface ScriptNode {
   id: string
   name: string
@@ -71,12 +71,29 @@ export interface ScriptTree {
   my: ScriptNode[]
 }
 
+async function scriptRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api/scripts${path}`, init)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<T>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as T
+}
+
 export async function listScriptTree(): Promise<ScriptTree> {
-  return request<ScriptTree>('/scripts/tree')
+  return scriptRequest<ScriptTree>('/tree')
 }
 
 export async function createScriptNode(parentId: string | null, name: string, kind: 'dir' | 'file'): Promise<ScriptNode> {
-  return request<ScriptNode>('/scripts/new', {
+  return scriptRequest<ScriptNode>('/new', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ parentId, name, kind })
@@ -84,7 +101,7 @@ export async function createScriptNode(parentId: string | null, name: string, ki
 }
 
 export async function renameScriptNode(id: string, name: string): Promise<ScriptNode> {
-  return request<ScriptNode>('/scripts/rename', {
+  return scriptRequest<ScriptNode>('/rename', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, name })
@@ -92,7 +109,7 @@ export async function renameScriptNode(id: string, name: string): Promise<Script
 }
 
 export async function deleteScriptNode(id: string): Promise<void> {
-  await request<never>('/scripts/delete', {
+  await scriptRequest<never>('/delete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id })
@@ -100,7 +117,7 @@ export async function deleteScriptNode(id: string): Promise<void> {
 }
 
 export async function saveScriptContent(id: string, content: string): Promise<void> {
-  await request<never>('/scripts/save', {
+  await scriptRequest<never>('/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, content })
@@ -108,7 +125,7 @@ export async function saveScriptContent(id: string, content: string): Promise<vo
 }
 
 export async function getScriptContent(id: string): Promise<{ id: string; content: string }> {
-  return request<{ id: string; content: string }>(`/scripts/get?id=${encodeURIComponent(id)}`)
+  return scriptRequest<{ id: string; content: string }>(`/get?id=${encodeURIComponent(id)}`)
 }
 
 // ── 表目录(库→表→字段)────────────────────────────────────────

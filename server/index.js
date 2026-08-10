@@ -381,8 +381,10 @@ app.get('/api/config', (req, res) =>
 
 // ── 工作流依赖采集与级联重跑(/api/ds-deps)───────────────────
 import { initDsDeps, dsDepsRouter } from './ds-deps.js'
+import { dbScriptsRouter } from './db-scripts.js'
 initDsDeps() // 启动加载缓存 + 初始化采集 + 定时刷新
 app.use('/api/ds-deps', dsDepsRouter())
+app.use('/api/scripts', dbScriptsRouter())
 
 // ── SPA fallback(仅非 API 的 GET 路由) ────────────────────────
 app.get('*', (req, res, next) => {
