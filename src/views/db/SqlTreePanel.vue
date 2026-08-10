@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Download } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Download, Coin, Grid } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
@@ -151,10 +151,16 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
   }
 }
 
-/** 点击表/字段 → 插入名称到编辑器光标 */
+/** 点击表/字段:字段插入;表仅展开(复制需点按钮) */
 function onCatalogClick(data: CatNode) {
-  if (data.kind === 'db') return // 库节点仅展开
-  emit('insert', data.kind === 'field' ? data.name : (data.table || data.name))
+  if (data.kind === 'db' || data.kind === 'table') return // 库/表仅展开
+  emit('insert', data.name) // 字段:保持点击插入
+}
+
+/** 复制表名到画布(点复制按钮) */
+function onCopyTable(data: CatNode) {
+  emit('insert', data.table || data.name)
+  ElMessage.success(`已插入 ${data.table || data.name}`)
 }
 
 // datasources 异步到达后重建表目录树(重新加载根库列表)
@@ -228,11 +234,14 @@ onMounted(reloadMy)
           <template #default="{ data }">
             <div class="tree-node">
               <el-icon class="node-icon cat" :class="{ field: (data as CatNode).kind === 'field' }">
-                <Folder v-if="(data as CatNode).kind === 'db'" />
-                <Folder v-else-if="(data as CatNode).kind === 'table'" />
+                <Coin v-if="(data as CatNode).kind === 'db'" />
+                <Grid v-else-if="(data as CatNode).kind === 'table'" />
                 <CaretRight v-else />
               </el-icon>
               <span class="node-name" :title="(data as CatNode).name">{{ (data as CatNode).name }}</span>
+              <span v-if="(data as CatNode).kind === 'table'" class="copy-btn" title="复制表名到画布" @click.stop="onCopyTable(data as CatNode)">
+                <Plus />
+              </span>
               <span v-if="(data as CatNode).typeName" class="field-type">{{ (data as CatNode).typeName }}</span>
             </div>
           </template>
@@ -370,6 +379,29 @@ onMounted(reloadMy)
     font-size: 10px;
     color: $muted;
     flex-shrink: 0;
+  }
+
+  .copy-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: #5e6ad2;
+    color: #fff;
+    font-size: 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+    line-height: 1;
+
+    &:hover {
+      background: #4752b8;
+    }
+  }
+
+  &:hover .copy-btn {
+    display: inline-flex;
   }
 
   .node-ops {
