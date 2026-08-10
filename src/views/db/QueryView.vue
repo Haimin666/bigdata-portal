@@ -65,6 +65,26 @@ async function saveCurrent() {
   }
 }
 
+// 左侧目录宽度(可拖拽,持久化)
+const SIDE_KEY = 'db-query-side-width'
+const sideWidth = ref(parseInt(localStorage.getItem(SIDE_KEY) || '240', 10) || 240)
+
+function onSideDragStart(e: MouseEvent) {
+  const startX = e.clientX
+  const startW = sideWidth.value
+  const onMove = (ev: MouseEvent) => {
+    const w = Math.min(460, Math.max(180, startW + (ev.clientX - startX)))
+    sideWidth.value = w
+  }
+  const onUp = () => {
+    localStorage.setItem(SIDE_KEY, String(sideWidth.value))
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
 // 引擎过滤后的数据源
 const filteredDbs = computed(() =>
   engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
@@ -500,9 +520,10 @@ function isNumeric(val: unknown): boolean {
   <div class="db-query">
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
-      <div class="db-side">
+      <div class="db-side" :style="{ width: sideWidth + 'px' }">
         <SqlTreePanel :dbs="datasources" @open="onOpenFile" @insert="onInsert" />
       </div>
+      <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
     <!-- 顶部工具条 -->
     <div class="toolbar">
@@ -651,6 +672,20 @@ function isNumeric(val: unknown): boolean {
   border: 1px solid $border;
   border-radius: 6px;
   overflow: hidden;
+}
+
+/* 拖拽条 */
+.db-resizer {
+  width: 5px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  border-radius: 3px;
+  transition: background 0.15s;
+
+  &:hover {
+    background: $primary;
+    opacity: 0.4;
+  }
 }
 
 .db-right {

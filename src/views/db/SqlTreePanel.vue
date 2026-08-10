@@ -40,9 +40,9 @@ async function reloadMy() {
   }
 }
 
-/** 文件节点 → 打开(父组件加载内容到编辑器) */
-function onNodeClick(node: ScriptNode) {
-  if (node.type === 'file') emit('open', node)
+/** 节点点击:文件打开;目录展开/折叠由 el-tree 默认行为处理 */
+function onNodeClick(data: ScriptNode) {
+  if (data.type === 'file') emit('open', data)
 }
 
 /** 新建(根级或目录内) */
@@ -192,7 +192,6 @@ onMounted(reloadMy)
           :data="myTree"
           node-key="id"
           default-expand-all
-          :expand-on-click-node="false"
           class="file-tree"
           @node-click="(d: ScriptNode) => onNodeClick(d)"
         >
@@ -270,7 +269,7 @@ onMounted(reloadMy)
     flex: 1;
     padding: 8px 0;
     text-align: center;
-    font-size: 12px;
+    font-size: 14px;
     color: $muted;
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -300,7 +299,7 @@ onMounted(reloadMy)
   flex-shrink: 0;
 
   .toolbar-title {
-    font-size: 12px;
+    font-size: 14px;
     font-weight: 600;
     color: #606266;
   }
@@ -318,7 +317,7 @@ onMounted(reloadMy)
 
 .tree-empty {
   padding: 16px 8px;
-  font-size: 12px;
+  font-size: 14px;
   color: $muted;
   text-align: center;
 }
@@ -327,7 +326,7 @@ onMounted(reloadMy)
   background: transparent;
 
   :deep(.el-tree-node__content) {
-    height: 28px;
+    height: 30px;
     border-radius: 4px;
 
     &:hover {
@@ -367,7 +366,7 @@ onMounted(reloadMy)
   }
 
   .node-name {
-    font-size: 12px;
+    font-size: 14px;
     color: #333;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -376,7 +375,7 @@ onMounted(reloadMy)
   }
 
   .field-type {
-    font-size: 10px;
+    font-size: 12px;
     color: $muted;
     flex-shrink: 0;
   }
@@ -385,12 +384,12 @@ onMounted(reloadMy)
     display: none;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
     background: #5e6ad2;
     color: #fff;
-    font-size: 10px;
+    font-size: 12px;
     cursor: pointer;
     flex-shrink: 0;
     line-height: 1;
@@ -407,21 +406,24 @@ onMounted(reloadMy)
   .node-ops {
     display: none;
     align-items: center;
-    gap: 2px;
+    gap: 3px;
     flex-shrink: 0;
 
     .op {
-      font-size: 12px;
+      font-size: 15px;
       color: #909399;
       cursor: pointer;
-      padding: 1px;
+      padding: 3px;
+      border-radius: 4px;
 
       &:hover {
         color: $primary;
+        background: rgba(94, 106, 210, 0.08);
       }
 
       &.danger:hover {
         color: #f56c6c;
+        background: rgba(245, 108, 108, 0.08);
       }
 
       &.rot {
