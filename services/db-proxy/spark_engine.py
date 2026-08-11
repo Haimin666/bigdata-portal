@@ -57,6 +57,40 @@ def _strip_comments(sql: str) -> str:
     return re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql).strip()
 
 
+_FILE_NOT_FOUND_MARKS = (
+    "FileNotFoundException",
+    "File does not exist",
+    "readCurrentFileNotFoundError",
+    "It is possible the underlying files have been updated",
+)
+
+
+def _is_file_not_found(msg: str) -> bool:
+    """判断异常是否为 HDFS 底层文件被重写导致的 SparkFileNotFoundException。"""
+    return any(m in msg for m in _FILE_NOT_FOUND_MARKS)
+
+
+def _extract_tables(sql: str) -> List[str]:
+    """从 SQL 中提取可能涉及的表名(db.table 或 table),用于 REFRESH。
+
+    只做保守提取:匹配 from/join/update/into/table 关键字后跟的标识符,
+    忽略注释与字符串字面量(先剥离注释,再匹配)。
+    """
+    s = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql)
+    s = re.sub(r"'[^']*'", "''", s)  # 字符串字面量替换为空串
+    tables = re.findall(
+        r"\b(?:from|join|update|into|table)\s+([`\w]+(?:\.[`\w]+)?)",
+        s,
+        re.IGNORECASE,
+    )
+    out = []
+    for t in tables:
+        t = t.strip("`")
+        if t and t.lower() not in ("dual",):
+            out.append(t)
+    return out
+
+
 def is_write_sql(sql: str) -> bool:
     """判定 SQL 是否可能为写操作(去注释后):
     - 只读关键字开头且无写关键字 → 只读
@@ -260,6 +294,25 @@ class SparkEngine:
         return str(v)
 
     # ── SQL 执行 ──────────────────────────────────────────────
+    def _refresh_tables(self, sql: str) -> List[str]:
+        """对 SQL 中涉及的表执行 REFRESH TABLE(metastore 元数据失效后刷新缓存)。
+
+        表不存在时静默跳过(避免 show/desc 等非表 SQL 抛错)。返回实际刷新列表。
+        """
+        refreshed: List[str] = []
+        catalog = self._spark.catalog
+        for t in _extract_tables(sql):
+            try:
+                if "." in t:
+                    db, tbl = t.split(".", 1)
+                    catalog.refreshTable(db.strip("`") + "." + tbl.strip("`"))
+                else:
+                    catalog.refreshTable(t)
+                refreshed.append(t)
+            except Exception:
+                pass
+        return refreshed
+
     def execute_sql(
         self, sql: str, write_unlocked: bool = False, timeout_ms: int = 600000
     ) -> Dict[str, Any]:
@@ -305,6 +358,31 @@ class SparkEngine:
                     "truncated": truncated,
                 }
             except Exception as e:
+                # 常驻 session 元数据缓存过期:底层 HDFS 文件被重写/覆盖后,
+                # Spark 仍按旧文件列表读取 → SparkFileNotFoundException。
+                # 自动 REFRESH 涉及的表并重试一次,规避"REFRESH TABLE"手动操作。
+                msg = str(e)
+                if _is_file_not_found(msg):
+                    try:
+                        refreshed = self._refresh_tables(code)
+                        self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
+                        df = self._spark.sql(code)
+                        rows = df.limit(limit + 1).collect()
+                        truncated = len(rows) > limit
+                        rows = rows[:limit]
+                        columns = df.columns
+                        data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
+                        cost_ms = int((time.time() - start) * 1000)
+                        self._audit("sql retry OK rows=%d cost=%dms" % (len(rows), cost_ms))
+                        return {
+                            "columns": columns,
+                            "rows": data,
+                            "costMs": cost_ms,
+                            "truncated": truncated,
+                        }
+                    except Exception as e2:
+                        self._audit("sql retry FAILED after refresh: %s" % e2)
+                        raise e2
                 self._audit("sql FAILED: %s\n%s" % (e, traceback.format_exc()))
                 raise
 

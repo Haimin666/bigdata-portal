@@ -1,0 +1,83 @@
+{
+    "job": {
+      "setting": {
+        "speed": {
+          "channel": 6
+        },
+        "errorLimit": {
+          "record": 0,
+          "percentage": 0.02
+        }
+      },
+      "content": [
+        {
+          "reader": {
+            "name": "oraclereader",
+            "parameter": {
+            "username": "bi_odsreader",
+            "password": "lion#code_yj.LKC#2021EUKO824",
+              "splitPk": ",",
+              "connection": [
+                {
+                  "querySql": [
+                    "SELECT ACCTCODE,DATA_SOURCE,FINORGCODE,OPETNTYPE,MONTH,FLAG,RPTDATE,ISALLOWPOST,BUSINESS_KEY FROM pre_ccrs.M_P_CRS_SPC_EVTDSCINF  "
+                  ],
+                  "jdbcUrl": [
+                    "jdbc:oracle:thin:@//10.25.2.82:1521/credzy"
+                  ]
+                }
+              ]
+            }
+          },
+          "writer": {
+            "name": "hdfswriter",
+            "parameter": {
+              "defaultFS": "hdfs://lbc",
+              "fileType": "orc",
+              "path": "/user/hive/warehouse/lion_dw_ods.db/pre_ccrs_m_p_crs_spc_evtdscinf/dt=$[yyyy-MM-dd-1]",
+              "hadoopConfig": {
+                "dfs.nameservices": "lbc",
+                "dfs.ha.namenodes.lbc": "nn1,nn2",
+                "dfs.namenode.rpc-address.lbc.nn1": "hadoop-nn-1.bigdata.shiqiao.com:8020",
+                "dfs.namenode.rpc-address.lbc.nn2": "hadoop-nn-2.bigdata.shiqiao.com:8020",
+                "dfs.client.failover.proxy.provider.lbc": "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider"
+              },
+              "fileName": "pre_ccrs_m_p_crs_spc_evtdscinf",
+              "writeMode": "truncate",
+              "fieldDelimiter": ",",
+              "column": [
+                {
+                "name": "acctcode",
+                "type": "string"
+              },{
+                "name": "data_source",
+                "type": "string"
+              },{
+                "name": "finorgcode",
+                "type": "string"
+              },{
+                "name": "opetntype",
+                "type": "string"
+              },{
+                "name": "month",
+                "type": "string"
+              },{
+                "name": "flag",
+                "type": "string"
+              },{
+                "name": "rptdate",
+                "type": "string"
+              },{
+                "name": "isallowpost",
+                "type": "string"
+              },{
+                "name": "business_key",
+                "type": "string"
+              }              
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
