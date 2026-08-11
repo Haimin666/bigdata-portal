@@ -205,11 +205,15 @@ class FlinkGateway:
     ) -> tuple[List[Dict[str, Any]], bool]:
         """翻页取回结果,返回 (rows, truncated)。
 
-        Flink 1.17 SQL Gateway REST:结果接口是
-          GET /v1/sessions/{sid}/operations/{op}/result/{token}?rowFormat=...
-        token 是**路径参数**(从 0 开始),不是 query 参数。返回:
-          {"results":{"columns":[...],"data":[...]},
-           "resultType":"PAYLOAD"/"EOS", "nextResultUri": "..."}
+        Flink 1.17 SQL Gateway REST(实测):
+          GET /v1/sessions/{sid}/operations/{op}/result/{token}
+        token 是**路径参数**(从 0 开始)。返回:
+          {"resultType":"PAYLOAD"/"EOS",
+           "results":{"columns":[{"name":"id",...}],"rowFormat":"JSON","data":[...]},
+           "nextResultUri":"/v1/sessions/{sid}/operations/{op}/result/1"}
+        - 首包(PAYLOAD)可能只有 schema、data 为空 → 必须继续翻页
+        - data 每行是数组,按 columns 顺序取值
+        - resultType=EOS 或 nextResultUri 为空 → 结束
         """
         rows: List[Dict[str, Any]] = []
         token = 0
@@ -219,9 +223,11 @@ class FlinkGateway:
             try:
                 r = requests.get(
                     f"{self.url}/v1/sessions/{sid}/operations/{op_id}/result/{token}",
-                    params={"rowFormat": "PLAIN_TEXT"},
                     timeout=10,
                 )
+                if r.status_code == 404:
+                    # 边界:token 已取完,gateway 对不存在 token 返回 404
+                    break
                 r.raise_for_status()
                 data = r.json()
             except requests.RequestException as e:
@@ -246,6 +252,7 @@ class FlinkGateway:
             if truncated:
                 break
             # 结束标记:EOS 或 nextResultUri 为空 → 停止
+            # 注意:data 为空但 nextResultUri 存在(首包只有 schema)→ 继续翻页
             if data.get("resultType") == "EOS" or not data.get("nextResultUri"):
                 break
             # 解析下一 token:nextResultUri 形如 .../result/{token}
