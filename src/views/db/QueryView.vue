@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Lock, Unlock } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -13,17 +13,94 @@ import 'codemirror/mode/sql/sql.js'
 async function loadAddons() {
   // 空:不加载 addon
 }
-import { listDataSources, queryDb, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, querySpark, sparkAuth, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
 import SqlTreePanel from './SqlTreePanel.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'sparksql' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
+
+// ── Spark 写权限解锁(类似 Jupyter 登录)───────────────────────
+// sparksql 可执行 INSERT/CREATE/DROP 等写操作,必须先密码解锁拿 token
+const SPARK_TOKEN_KEY = 'bigdata-portal.spark-token'
+const sparkToken = ref(sessionStorage.getItem(SPARK_TOKEN_KEY) || '')
+const showSparkAuth = ref(false)
+const sparkPwd = ref('')
+const sparkAuthLoading = ref(false)
+const sparkUnlocked = computed(() => !!sparkToken.value)
+
+/** 打开解锁弹窗,返回 promise:resolve(token) 或 resolve(null) 取消 */
+function openSparkAuth(): Promise<string | null> {
+  return new Promise((resolve) => {
+    sparkAuthResolve = resolve
+    showSparkAuth.value = true
+  })
+}
+let sparkAuthResolve: ((t: string | null) => void) | null = null
+
+async function submitSparkAuth() {
+  if (!sparkPwd.value) {
+    ElMessage.warning('请输入密码')
+    return
+  }
+  sparkAuthLoading.value = true
+  try {
+    const { token } = await sparkAuth(sparkPwd.value)
+    sparkToken.value = token
+    sessionStorage.setItem(SPARK_TOKEN_KEY, token)
+    sparkPwd.value = ''
+    showSparkAuth.value = false
+    ElMessage.success('写权限已解锁(12 小时内有效)')
+    sparkAuthResolve?.(token)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+    sparkAuthResolve?.(null)
+  } finally {
+    sparkAuthLoading.value = false
+    sparkAuthResolve = null
+  }
+}
+
+function cancelSparkAuth() {
+  showSparkAuth.value = false
+  sparkAuthResolve?.(null)
+  sparkAuthResolve = null
+}
+
+function lockSparkWrite() {
+  sparkToken.value = ''
+  sessionStorage.removeItem(SPARK_TOKEN_KEY)
+  ElMessage.info('已锁定 Spark 写权限')
+}
+
+/** 判定 SQL 是否可能为写操作(与后端 server/index.js 的 isSparkWriteSql 保持一致):
+ *  只读关键字开头放行;WITH 前缀且无写关键字放行;含分号/其余一律视为写 */
+function isSparkWriteSql(sql: string): boolean {
+  let s = String(sql)
+    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '')
+    .trim()
+  if (!s) return false
+  const semi = s.split(';')
+  if (semi.length > 2 || (semi.length === 2 && semi[1].trim() !== '')) return true
+  if (semi.length === 2) s = semi[0].trim()
+  if (/^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i.test(s)) return false
+  if (/^WITH\b/i.test(s) && !/\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i.test(s)) return false
+  return true
+}
+
+/** Spark 执行:写语句未解锁时先弹密码框;只读查询直接执行 */
+async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (isSparkWriteSql(sql) && !sparkToken.value) {
+    const tk = await openSparkAuth()
+    if (!tk) throw new Error('已取消:写权限未解锁')
+  }
+  return querySpark(sql, sparkToken.value || undefined)
+}
 
 // 当前打开的文件(我的目录):保存时写回
 const currentFile = ref<ScriptNode | null>(null)
@@ -85,10 +162,17 @@ function onSideDragStart(e: MouseEvent) {
   window.addEventListener('mouseup', onUp)
 }
 
-// 引擎过滤后的数据源
-const filteredDbs = computed(() =>
-  engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
-)
+// SparkSQL 虚拟数据源(Livy 引擎,不在 db-proxy 的 /acl 中)
+const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
+
+// 引擎过滤后的数据源(sparksql 为虚拟源,不进左侧树)
+const filteredDbs = computed(() => {
+  if (engine.value === 'sparksql') return [SPARK_SOURCE]
+  return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
+})
+
+// 左侧树排除 sparksql 虚拟源(db-proxy 无此库,拉表会报错)
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql'))
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
@@ -378,7 +462,7 @@ const activeResult = ref(0)
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
   try {
-    const r = await queryDb(db.value, sql)
+    const r = engine.value === 'sparksql' ? await execSpark(sql) : await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -506,7 +590,7 @@ onMounted(async () => {
 
 watch(engine, (val) => {
   if (!val) return
-  const first = datasources.value.find((d) => d.type === val)
+  const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
 })
 
@@ -521,7 +605,7 @@ function isNumeric(val: unknown): boolean {
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
       <div class="db-side" :style="{ width: sideWidth + 'px' }">
-        <SqlTreePanel :dbs="datasources" @open="onOpenFile" @insert="onInsert" />
+        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" />
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
@@ -530,7 +614,18 @@ function isNumeric(val: unknown): boolean {
       <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable @change="db = filteredDbs[0]?.name || ''">
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
+        <el-option label="SparkSQL" value="sparksql" />
       </el-select>
+      <el-button
+        v-if="engine === 'sparksql'"
+        class="spark-lock-btn"
+        :type="sparkUnlocked ? 'success' : 'warning'"
+        :icon="sparkUnlocked ? Unlock : Lock"
+        size="small"
+        @click="sparkUnlocked ? lockSparkWrite() : openSparkAuth()"
+      >
+        {{ sparkUnlocked ? '写权限已解锁' : '解锁写权限' }}
+      </el-button>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
@@ -645,6 +740,31 @@ function isNumeric(val: unknown): boolean {
       </div>
     </div>
   </div>
+
+  <!-- Spark 写权限解锁弹窗(类似 Jupyter 登录) -->
+  <el-dialog
+    v-model="showSparkAuth"
+    title="Spark 写权限验证"
+    width="400px"
+    :close-on-click-modal="false"
+    @closed="sparkAuthResolve = null"
+  >
+    <div class="spark-auth-tip">
+      <el-icon color="#e6a23c"><Lock /></el-icon>
+      <span>Spark SQL 支持写操作(INSERT / CREATE / DROP / TRUNCATE 等),仅限技术人员使用。请输入写权限密码解锁。</span>
+    </div>
+    <el-input
+      v-model="sparkPwd"
+      type="password"
+      show-password
+      placeholder="请输入 Spark 写权限密码"
+      @keyup.enter="submitSparkAuth"
+    />
+    <template #footer>
+      <el-button @click="cancelSparkAuth">取消</el-button>
+      <el-button type="primary" :loading="sparkAuthLoading" @click="submitSparkAuth">验证</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped lang="scss">
@@ -1111,5 +1231,24 @@ function isNumeric(val: unknown): boolean {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.spark-lock-btn {
+  margin-left: 8px;
+}
+
+.spark-auth-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #606266;
+}
+
+.spark-auth-tip .el-icon {
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 </style>

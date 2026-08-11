@@ -1,0 +1,25 @@
+{
+  "_说明": "bigdata-portal 网关配置(唯一配置源)。复制本文件为 server/config.local.json 并按环境修改;config.local.json 不入库。留空/缺省字段回退环境变量或默认值。",
+  "port": 3000,
+  "yarnRmList": "http://hadoop-nn-1.bigdata.shiqiao.com:8088",
+  "hdfsUrl": "http://hadoop-nn-1.bigdata.shiqiao.com:9870",
+  "dsWebUrl": "http://olds.bigdata.shiqiao.com/dolphinscheduler",
+  "omdUrl": "https://omd.corp.shiqiao.com",
+  "stingrayUrl": "http://stingray.corp.shiqiao.com",
+  "jupyterUrl": "http://127.0.0.1:8888",
+  "dsToken": "",
+  "dbProxyUrl": "http://10.25.15.106:8756",
+  "dbProxyToken": "",
+  "livy": {
+    "scheme": "http",
+    "host": "hadoop-task-1.bigdata.shiqiao.com",
+    "port": 8998
+  },
+  "sparkWritePassword": "",
+  "accounts": {
+    "dsWeb": { "user": "", "pass": "" },
+    "omd": { "user": "", "pass": "" },
+    "stingray": { "user": "", "pass": "" },
+    "streamx": { "user": "", "pass": "" }
+  }
+}

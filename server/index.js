@@ -8,6 +8,8 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
+import { query as sparkQuery } from './spark-livy.js'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
 // (本网关共 7 个代理实例),Node 24 默认 maxListeners=10 会触发 MaxListenersExceededWarning,这里放宽。
@@ -72,12 +74,13 @@ function iframeProxy(targetUrl, prefix) {
   })
 }
 
-// 自动登录端点(凭证:请求体 > 环境变量)
+// 自动登录端点(凭证:请求体 > config.accounts 配置)
 // transport: 'json' 请求体 JSON | 'form' 请求体表单 | 'query' 凭证放 URL query
 // passwordEncode: 'base64' 密码先 base64 编码再发送(OMD)
 function createLoginEndpoint({
   target,
   loginPath,
+  accountKey,
   envUserKey,
   envPassKey,
   userField = 'username',
@@ -93,8 +96,8 @@ function createLoginEndpoint({
     if (!!bodyUser !== !!bodyPass) {
       return res.status(400).json({ ok: false, msg: 'user and password must be provided together' })
     }
-    const user = bodyUser || process.env[envUserKey]
-    const rawPassword = bodyPass || process.env[envPassKey]
+    const user = bodyUser || (accountKey ? config.accounts[accountKey]?.user : undefined) || process.env[envUserKey]
+    const rawPassword = bodyPass || (accountKey ? config.accounts[accountKey]?.pass : undefined) || process.env[envPassKey]
     if (!user || !rawPassword) {
       return res.status(400).json({ ok: false, msg: 'missing credentials' })
     }
@@ -264,6 +267,7 @@ app.post(
     transport: 'form',
     userField: 'userName',
     passField: 'userPassword',
+    accountKey: 'dsWeb',
     envUserKey: 'DSWEB_USER',
     envPassKey: 'DSWEB_PASS'
   })
@@ -279,6 +283,7 @@ app.post(
     userField: 'email',
     passField: 'password',
     passwordEncode: 'base64',
+    accountKey: 'omd',
     envUserKey: 'OMD_USER',
     envPassKey: 'OMD_PASS'
   })
@@ -370,6 +375,125 @@ if (config.dbProxyUrl) {
   )
 }
 
+// ── Spark SQL 执行(Livy)──────────────────────────────────────
+// 数据库查询的 sparksql 引擎:经 /api/spark/query 走 Livy 常驻 session 执行。
+// 不代理整个 Livy,只暴露查询入口,避免前端直接操作 session。
+// 安全:spark.sql() 无只读限制,写语句(INSERT/CREATE/DROP/ALTER/TRUNCATE 等)
+// 必须携带 POST /api/spark/auth 签发的 X-Spark-Token(密码解锁,类似 Jupyter 登录),
+// 未配置 SPARK_WRITE_PASSWORD 时写操作一律禁止(默认只读)。
+const SPARK_WRITE_TOKEN_TTL = 12 * 60 * 60 * 1000 // 12h
+const sparkTokens = new Map() // token -> expiresAt
+
+// 判定 SQL 是否可能为写操作(服务端权威校验,采用「白名单读 + 显式拒绝」策略):
+// 1) 去掉注释后,若以只读关键字开头(SELECT/SHOW/DESC/DESCRIBE/EXPLAIN/SET/USE/WITH 且无写关键字),
+//    放行;否则一律视为写操作,要求 X-Spark-Token。
+// 2) 显式拒绝多语句走私(含分号)与 CTE 前缀的 DML(WITH cte AS (...) INSERT ...)。
+const SPARK_READONLY_KW = /^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i
+const SPARK_WRITE_KW = /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i
+function isSparkWriteSql(sql) {
+  let s = String(sql)
+    // 去注释(行注释与块注释)
+    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '')
+    .trim()
+  if (!s) return false
+  // 多语句走私:任何非末尾分号都拒绝(末尾分号允许)
+  const semi = s.split(';')
+  if (semi.length > 2 || (semi.length === 2 && semi[1].trim() !== '')) return true
+  if (semi.length === 2) s = semi[0].trim()
+  // 只读关键字开头 → 放行(但要排除 WITH ... INSERT 的 CTE-DML)
+  if (SPARK_READONLY_KW.test(s)) return false
+  if (/^WITH\b/i.test(s) && !SPARK_WRITE_KW.test(s)) return false
+  // 其余(含 CTE 前缀 DML、CACHE/ANALYZE 等)一律视为写
+  return true
+}
+
+function issueSparkToken() {
+  const token = randomBytes(24).toString('hex')
+  sparkTokens.set(token, Date.now() + SPARK_WRITE_TOKEN_TTL)
+  return token
+}
+
+function sparkTokenValid(token) {
+  const exp = sparkTokens.get(token)
+  if (!exp) return false
+  if (Date.now() > exp) {
+    sparkTokens.delete(token)
+    return false
+  }
+  return true
+}
+
+if (config.livyUrl) {
+  // 暴力破解防护:每 IP 失败 5 次锁 10 分钟
+  const authFails = new Map() // ip -> { count, lockUntil }
+  function authLocked(ip) {
+    const rec = authFails.get(ip)
+    if (!rec) return false
+    if (rec.lockUntil > Date.now()) return true
+    authFails.delete(ip)
+    return false
+  }
+  function authFail(ip) {
+    const rec = authFails.get(ip) || { count: 0, lockUntil: 0 }
+    rec.count += 1
+    if (rec.count >= 5) {
+      rec.lockUntil = Date.now() + 10 * 60 * 1000
+      rec.count = 0
+    }
+    authFails.set(ip, rec)
+  }
+
+  // 写操作解锁:密码换取 token(类似 Jupyter 登录)
+  app.post('/api/spark/auth', (req, res) => {
+    const { password } = req.body || {}
+    if (!config.sparkWritePassword) {
+      return res.status(403).json({ code: 403, msg: 'Spark 写操作未开放(服务器未配置 SPARK_WRITE_PASSWORD)' })
+    }
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+    if (authLocked(ip)) {
+      return res.status(429).json({ code: 429, msg: '尝试次数过多,请 10 分钟后再试' })
+    }
+    const ok = typeof password === 'string' &&
+      password.length === config.sparkWritePassword.length &&
+      timingSafeEqual(Buffer.from(password), Buffer.from(config.sparkWritePassword))
+    if (!ok) {
+      authFail(ip)
+      return res.status(401).json({ code: 401, msg: '密码错误' })
+    }
+    authFails.delete(ip)
+    res.json({ code: 0, data: { token: issueSparkToken(), expiresIn: SPARK_WRITE_TOKEN_TTL } })
+  })
+
+  app.post('/api/spark/query', async (req, res) => {
+    try {
+      const { sql } = req.body || {}
+      if (!sql || !String(sql).trim()) {
+        return res.status(400).json({ code: 400, msg: 'sql is required' })
+      }
+      // 写语句必须解锁
+      if (isSparkWriteSql(sql)) {
+        const tk = req.get('X-Spark-Token')
+        if (!tk || !sparkTokenValid(tk)) {
+          return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入 Spark 写权限密码' })
+        }
+      }
+      const result = await sparkQuery(String(sql))
+      res.json({ code: 0, data: result })
+    } catch (e) {
+      // 避免向调用方泄漏 Livy 内部错误明细,统一简化为通用消息并记录日志
+      console.error('[spark/query]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark 查询失败,请查看服务端日志' })
+    }
+  })
+} else {
+  app.post('/api/spark/auth', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'livy not configured (config.local.json livy.* 或 LIVY_URL 为空)' })
+  )
+  app.post('/api/spark/query', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'livy not configured (config.local.json livy.* 或 LIVY_URL 为空)' })
+  )
+}
+
 app.post(
   '/api/login/stingray',
   createLoginEndpoint({
@@ -379,6 +503,7 @@ app.post(
     transport: 'query',
     userField: 'username',
     passField: 'password',
+    accountKey: 'stingray',
     envUserKey: 'STINGRAY_USER',
     envPassKey: 'STINGRAY_PASS'
   })

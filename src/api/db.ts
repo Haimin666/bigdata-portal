@@ -5,7 +5,7 @@ export interface DbDataSource {
   name: string
   /** 显示别名(缺省回退 name) */
   label?: string
-  type: 'mysql' | 'oracle'
+  type: 'mysql' | 'oracle' | 'sparksql'
   host: string
   port: number
   user: string
@@ -57,6 +57,52 @@ export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ db, sql })
   })
+}
+
+/** Spark SQL 查询(经网关 /api/spark/query 走 Livy 常驻 session) */
+export async function querySpark(sql: string, writeToken?: string): Promise<DbQueryResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
+  const res = await fetch('/api/spark/query', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sql })
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<DbQueryResult>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as DbQueryResult
+}
+
+/** Spark 写操作解锁:密码换取 token(类似 Jupyter 登录) */
+export async function sparkAuth(password: string): Promise<{ token: string; expiresIn: number }> {
+  const res = await fetch('/api/spark/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password })
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ token: string; expiresIn: number }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as { token: string; expiresIn: number }
 }
 
 // ── 脚本存储(我的目录:平台本地 data/scripts/,经 /api/scripts)──
