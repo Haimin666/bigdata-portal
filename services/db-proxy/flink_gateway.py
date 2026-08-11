@@ -80,9 +80,10 @@ class FlinkGateway:
             )
             r.raise_for_status()
             data = r.json()
-            self._session_id = data.get("sessionId")
+            # Flink SQL Gateway 返回 {"sessionHandle": "uuid", "properties": {...}}
+            self._session_id = data.get("sessionId") or data.get("sessionHandle")
             if not self._session_id:
-                raise RuntimeError(f"gateway 返回无 sessionId: {data}")
+                raise RuntimeError(f"gateway 返回无 sessionHandle: {data}")
             log.info("flink session created: %s", self._session_id)
             return self._session_id
         except requests.RequestException as e:
