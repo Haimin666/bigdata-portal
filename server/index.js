@@ -367,8 +367,11 @@ if (config.dbProxyUrl) {
     }
   })
   app.use('/api/db', (req, res, next) => {
-    // 敏感路径不走透传:spark 引擎由 /api/spark/* 统一鉴权(写解锁),acl/scripts 由独立路由暴露
-    if (/^\/spark\//.test(req.path) || req.path === '/acl' || req.path.startsWith('/scripts')) {
+    // 敏感路径不走透传:
+    //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
+    //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
+    //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
+    if (/^\/spark\//.test(req.path) || req.path.startsWith('/scripts')) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
