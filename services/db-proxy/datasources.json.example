@@ -44,6 +44,8 @@
     "enabled": false,
     "gatewayUrl": "http://127.0.0.1:8083",
     "sessionName": "db-proxy-flink",
+    "executionTarget": "local",
+    "clusterRestUrl": "http://localhost:8082",
     "defaultLimit": 1000,
     "maxLimit": 10000,
     "queryTimeout": 300

@@ -57,6 +57,9 @@ class FlinkGateway:
             return
         self.url = str(cfg.get("gatewayUrl", "http://127.0.0.1:8083")).rstrip("/")
         self.session_name = str(cfg.get("sessionName", "db-proxy-flink"))
+        self.execution_target = str(cfg.get("executionTarget", "local"))
+        # remote 模式需要指定 Flink 集群地址(standalone/yarn-session 的 JobManager)
+        self.cluster_rest = str(cfg.get("clusterRestUrl", "http://localhost:8082")).rstrip("/")
         self.default_limit = int(cfg.get("defaultLimit", 1000))
         self.max_limit = int(cfg.get("maxLimit", 10000))
         self.query_timeout = int(cfg.get("queryTimeout", 300))  # 秒
@@ -73,15 +76,22 @@ class FlinkGateway:
         if self._session_id:
             return self._session_id
         try:
+            # session properties:
+            #  - local:  gateway 进程内嵌 mini cluster(慢:每次冷启动)
+            #  - remote: 连接已常驻的 standalone/yarn Flink 集群(快,效仿 Zeppelin)
+            props: Dict[str, str] = {"execution.target": self.execution_target}
+            if self.execution_target == "remote":
+                # remote 模式下 SQL Gateway 通过 rest 地址找 JobManager
+                props["rest.address"] = self.cluster_rest.replace("http://", "").split(":")[0]
+                try:
+                    props["rest.port"] = str(int(self.cluster_rest.rsplit(":", 1)[1].split("/")[0]))
+                except (IndexError, ValueError):
+                    props["rest.port"] = "8082"
             r = requests.post(
                 f"{self.url}/v1/sessions",
                 json={
                     "sessionName": self.session_name,
-                    # 关键:SQL Gateway 默认按 remote 模式找外部 JobManager(连 rest 端口会 refused)。
-                    # 显式指定 local → gateway 进程内嵌 mini cluster,不需要外部 JobManager。
-                    "properties": {
-                        "execution.target": "local",
-                    },
+                    "properties": props,
                 },
                 timeout=60,
             )
@@ -248,7 +258,11 @@ class FlinkGateway:
                     if len(rows) >= max_rows:
                         truncated = True
                         break
-                    rows.append({cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))})
+                    # 行可能是数组 [v1,v2](按 columns 顺序)或 JSON 对象 {col: value}
+                    if isinstance(row, dict):
+                        rows.append({c: row.get(c) for c in cols})
+                    else:
+                        rows.append({cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))})
             if truncated:
                 break
             # 结束标记:EOS 或 nextResultUri 为空 → 停止
