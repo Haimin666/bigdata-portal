@@ -584,6 +584,8 @@ def spark_query(
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # 兜底:任何异常都透传可读信息,避免 500 Internal Server Error
+        raise HTTPException(status_code=502, detail=str(e)[:1000])
     return {"code": 0, "data": result}
 
 

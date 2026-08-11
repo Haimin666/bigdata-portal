@@ -70,6 +70,22 @@ def _is_file_not_found(msg: str) -> bool:
     return any(m in msg for m in _FILE_NOT_FOUND_MARKS)
 
 
+def _format_spark_error(e: BaseException) -> str:
+    """把 py4j/Spark 异常压缩成人类可读信息(去掉 Java 堆栈,保留要点)。"""
+    msg = str(e)
+    # Py4JJavaError / AnalysisException:取第一个冒号后的核心信息 + 行号提示
+    m = re.search(r"ParseException[^\n]*|AnalysisException[^\n]*|Table or view not found[^\n]*", msg)
+    core = m.group(0) if m else ""
+    # 提取 "== SQL ==" 片段(含 caret 提示行)
+    sql_hint = ""
+    sm = re.search(r"== SQL ==\n.*?(?=\n\s*\n|\Z)", msg, re.S)
+    if sm:
+        sql_hint = "\n" + "\n".join(sm.group(0).splitlines()[:6])
+    if core or sql_hint:
+        return (core + sql_hint).strip() or msg[:500]
+    return msg[:500]
+
+
 def _extract_tables(sql: str) -> List[str]:
     """从 SQL 中提取可能涉及的表名(db.table 或 table),用于 REFRESH。
 
@@ -382,9 +398,9 @@ class SparkEngine:
                         }
                     except Exception as e2:
                         self._audit("sql retry FAILED after refresh: %s" % e2)
-                        raise e2
+                        raise RuntimeError(_format_spark_error(e2))
                 self._audit("sql FAILED: %s\n%s" % (e, traceback.format_exc()))
-                raise
+                raise RuntimeError(_format_spark_error(e))
 
     # ── PySpark 代码执行(信任模式 + 审计)──────────────────────
     def execute_code(self, code: str, timeout_ms: int = 600000) -> Dict[str, Any]:

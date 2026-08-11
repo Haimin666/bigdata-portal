@@ -240,7 +240,7 @@ async function initEditor() {
       c.replaceRange(close, cur)
     }
   })
-  // Ctrl/Cmd + Enter 执行;Tab 缩进;Ctrl/Cmd + S 保存
+  // Ctrl/Cmd + Enter 执行;Tab 缩进(多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
     'Ctrl-Enter': () => {
       void runQuery()
@@ -255,9 +255,33 @@ async function initEditor() {
       void saveCurrent()
     },
     Tab: (c: CodeMirror.Editor) => {
-      const cur = c.getCursor()
-      c.replaceSelection('  ')
-      c.setCursor({ line: cur.line, ch: cur.ch + 2 })
+      const from = c.getCursor('from')
+      const to = c.getCursor('to')
+      c.operation(() => {
+        if (from.line !== to.line) {
+          // 多行选中:每行行首插入两个空格(不破坏选中内容)
+          for (let l = from.line; l <= to.line; l++) {
+            c.replaceRange('  ', { line: l, ch: 0 }, { line: l, ch: 0 })
+          }
+        } else {
+          // 单行/无选中:在光标处插入两个空格
+          const cur = c.getCursor()
+          c.replaceSelection('  ')
+          c.setCursor({ line: cur.line, ch: cur.ch + 2 })
+        }
+      })
+    },
+    'Shift-Tab': (c: CodeMirror.Editor) => {
+      const from = c.getCursor('from')
+      const to = c.getCursor('to')
+      c.operation(() => {
+        // 每行行首去掉最多两个空格
+        for (let l = from.line; l <= to.line; l++) {
+          const line = c.getLine(l)
+          const lead = line.match(/^ {0,2}/)?.[0].length ?? 0
+          if (lead > 0) c.replaceRange('', { line: l, ch: 0 }, { line: l, ch: lead })
+        }
+      })
     }
   })
 }
