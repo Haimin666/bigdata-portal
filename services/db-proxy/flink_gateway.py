@@ -203,15 +203,23 @@ class FlinkGateway:
     def _fetch_results(
         self, sid: str, op_id: str, max_rows: int, start: float
     ) -> tuple[List[Dict[str, Any]], bool]:
-        """翻页取回结果,返回 (rows, truncated)。"""
+        """翻页取回结果,返回 (rows, truncated)。
+
+        Flink 1.17 SQL Gateway REST:结果接口是
+          GET /v1/sessions/{sid}/operations/{op}/result/{token}?rowFormat=...
+        token 是**路径参数**(从 0 开始),不是 query 参数。返回:
+          {"results":{"columns":[...],"data":[...]},
+           "resultType":"PAYLOAD"/"EOS", "nextResultUri": "..."}
+        """
         rows: List[Dict[str, Any]] = []
-        row_token = 0
+        token = 0
         truncated = False
+        cols: List[str] = []
         while len(rows) < max_rows:
             try:
                 r = requests.get(
-                    f"{self.url}/v1/sessions/{sid}/operations/{op_id}/result",
-                    params={"rowToken": row_token},
+                    f"{self.url}/v1/sessions/{sid}/operations/{op_id}/result/{token}",
+                    params={"rowFormat": "PLAIN_TEXT"},
                     timeout=10,
                 )
                 r.raise_for_status()
@@ -223,31 +231,30 @@ class FlinkGateway:
             columns = results.get("columns") or []
             rows_data = results.get("data") or []
             # columns 可能是对象数组 [{"name":"id",...}] 或字符串数组 ["id","name"]
-            if columns and isinstance(columns[0], dict):
-                cols = [c.get("name", f"col{i}") for i, c in enumerate(columns)]
-            else:
-                cols = [str(c) for c in columns]
+            if not cols and columns:
+                if isinstance(columns[0], dict):
+                    cols = [c.get("name", f"col{i}") for i, c in enumerate(columns)]
+                else:
+                    cols = [str(c) for c in columns]
 
-            if not rows_data:
-                break
-            for row in rows_data:
-                if len(rows) >= max_rows:
-                    truncated = True
-                    break
-                rows.append({cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))})
+            if rows_data:
+                for row in rows_data:
+                    if len(rows) >= max_rows:
+                        truncated = True
+                        break
+                    rows.append({cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))})
             if truncated:
                 break
-            # 翻页
-            next_uri = data.get("nextResultUri")
-            if not next_uri:
+            # 结束标记:EOS 或 nextResultUri 为空 → 停止
+            if data.get("resultType") == "EOS" or not data.get("nextResultUri"):
                 break
-            # nextResultUri 形如 /v1/sessions/{sid}/operations/{op}/result?rowToken=N
+            # 解析下一 token:nextResultUri 形如 .../result/{token}
             try:
-                from urllib.parse import urlparse, parse_qs
-
-                qs = parse_qs(urlparse(next_uri).query)
-                row_token = int(qs.get("rowToken", ["0"])[0])
-                if row_token <= 0:
+                nxt = data.get("nextResultUri") or ""
+                tok_part = nxt.rstrip("/").split("/")[-1]
+                if tok_part.isdigit():
+                    token = int(tok_part)
+                else:
                     break
             except Exception:
                 break
@@ -255,8 +262,9 @@ class FlinkGateway:
 
     def _try_cancel_operation(self, sid: str, op_id: str) -> None:
         try:
-            requests.delete(
-                f"{self.url}/v1/sessions/{sid}/operations/{op_id}", timeout=5
+            # 1.17:取消是 POST .../cancel(返回 {"status": "..."})
+            requests.post(
+                f"{self.url}/v1/sessions/{sid}/operations/{op_id}/cancel", timeout=5
             )
         except requests.RequestException:
             pass
