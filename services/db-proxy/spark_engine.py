@@ -140,6 +140,8 @@ class SparkEngine:
         self._spark = None
         self._session_state = "disabled"  # disabled|starting|idle|error
         self._last_error: Optional[str] = None
+        self._current_job_group: Optional[str] = None  # 当前执行中的 Spark jobGroup(可取消)
+        self._cancel_flag = threading.Event()  # 手动/超时取消标记
         self._log_dir = os.path.join(base_dir, str(cfg.get("logDir", "spark-logs")))
         os.makedirs(self._log_dir, exist_ok=True)
         self._audit_file = os.path.join(self._log_dir, "spark-audit.log")
@@ -282,6 +284,44 @@ class SparkEngine:
     def enabled(self) -> bool:
         return bool(self.cfg.get("enabled", False))
 
+    # ── 执行包装:jobGroup + 超时 + 可取消 ─────────────────────
+    def _begin_job(self) -> str:
+        """为当前请求建立 Spark jobGroup(支持 cancelJobGroup 取消),返回 group id。"""
+        gid = "dbp-%d-%d" % (int(time.time() * 1000), threading.get_ident())
+        self._current_job_group = gid
+        self._cancel_flag.clear()
+        try:
+            # interruptOnCancel:取消时中断 driver 侧线程,让 collect() 快速返回而非卡死
+            self._spark.sparkContext.setJobGroup(gid, "db-proxy query", interruptOnCancel=True)
+        except Exception:
+            pass
+        return gid
+
+    def _end_job(self) -> None:
+        self._current_job_group = None
+        self._cancel_flag.clear()
+        try:
+            self._spark.sparkContext.clearJobGroup()
+        except Exception:
+            pass
+
+    def cancel(self) -> bool:
+        """取消当前正在执行的 job(手动停止 / 超时触发)。返回是否确有活动 job。"""
+        gid = self._current_job_group
+        if not gid or self._spark is None:
+            return False
+        self._cancel_flag.set()
+        try:
+            self._spark.sparkContext.cancelJobGroup(gid)
+        except Exception:
+            pass
+        return True
+
+    def _raise_if_cancelled(self) -> None:
+        """执行中途(如 collect 返回后)检查是否被取消,抛可读错误。"""
+        if self._cancel_flag.is_set():
+            raise RuntimeError("查询已停止(用户取消或超时)")
+
     # ── 值 JSON 化 ────────────────────────────────────────────
     @staticmethod
     def _json_value(v: Any) -> Any:
@@ -357,10 +397,18 @@ class SparkEngine:
         start = time.time()
         self._audit("sql db=spark sql=%s" % code[:300])
         with self._lock:
+            gid = self._begin_job()
+            timer: Optional[threading.Timer] = None
+            if timeout_ms and timeout_ms > 0:
+                # 超时自动取消(Spark cancelJobGroup 中断 collect),避免查询卡死占锁
+                timer = threading.Timer(timeout_ms / 1000.0, self.cancel)
+                timer.daemon = True
+                timer.start()
             try:
                 df = self._spark.sql(code)
                 # 强制行数上限:Spark 端 limit 惰性,collect 前再取 limit+1 判断截断
                 rows = df.limit(limit + 1).collect()
+                self._raise_if_cancelled()
                 truncated = len(rows) > limit
                 rows = rows[:limit]
                 columns = df.columns
@@ -378,12 +426,13 @@ class SparkEngine:
                 # Spark 仍按旧文件列表读取 → SparkFileNotFoundException。
                 # 自动 REFRESH 涉及的表并重试一次,规避"REFRESH TABLE"手动操作。
                 msg = str(e)
-                if _is_file_not_found(msg):
+                if _is_file_not_found(msg) and not self._cancel_flag.is_set():
                     try:
                         refreshed = self._refresh_tables(code)
                         self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
                         df = self._spark.sql(code)
                         rows = df.limit(limit + 1).collect()
+                        self._raise_if_cancelled()
                         truncated = len(rows) > limit
                         rows = rows[:limit]
                         columns = df.columns
@@ -399,8 +448,15 @@ class SparkEngine:
                     except Exception as e2:
                         self._audit("sql retry FAILED after refresh: %s" % e2)
                         raise RuntimeError(_format_spark_error(e2))
+                if self._cancel_flag.is_set():
+                    self._audit("sql CANCELLED (manual or timeout) after %dms" % (int((time.time() - start) * 1000)))
+                    raise RuntimeError("查询已停止(用户取消或超时)")
                 self._audit("sql FAILED: %s\n%s" % (e, traceback.format_exc()))
                 raise RuntimeError(_format_spark_error(e))
+            finally:
+                if timer:
+                    timer.cancel()
+                self._end_job()
 
     # ── PySpark 代码执行(信任模式 + 审计)──────────────────────
     def execute_code(
@@ -427,10 +483,19 @@ class SparkEngine:
         namespace["show"] = _print
 
         with self._lock:
+            self._begin_job()
+            timer: Optional[threading.Timer] = None
+            if timeout_ms and timeout_ms > 0:
+                timer = threading.Timer(timeout_ms / 1000.0, self.cancel)
+                timer.daemon = True
+                timer.start()
             try:
                 exec(compile(code, "<pyspark>", "exec"), namespace)  # noqa: S102 信任模式
                 result = namespace.get("result")
                 cost_ms = int((time.time() - start) * 1000)
+                if self._cancel_flag.is_set():
+                    self._audit("pycode CANCELLED after %dms" % cost_ms)
+                    raise RuntimeError("查询已停止(用户取消或超时)")
                 if result is not None:
                     # DataFrame → 表格
                     if hasattr(result, "columns") and hasattr(result, "collect"):
@@ -456,8 +521,15 @@ class SparkEngine:
                 self._audit("pycode done cost=%dms result=%s" % (cost_ms, str(out.get("columns"))))
                 return out
             except Exception as e:
+                if self._cancel_flag.is_set():
+                    self._audit("pycode CANCELLED (manual or timeout) after %dms" % (int((time.time() - start) * 1000)))
+                    raise RuntimeError("查询已停止(用户取消或超时)")
                 self._audit("pycode FAILED: %s\n%s" % (e, traceback.format_exc()))
                 raise
+            finally:
+                if timer:
+                    timer.cancel()
+                self._end_job()
 
     # ── 日志透传 ──────────────────────────────────────────────
     def read_logs(self, offsets: Optional[Dict[str, int]] = None) -> Dict[str, Any]:

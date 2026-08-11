@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
-import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus } from './spark-gateway.js'
+import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, cancel as sparkCancel } from './spark-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
@@ -350,6 +350,18 @@ app.use(
 // Stingray API(cookie 代理)
 app.use('/__/stingray', iframeProxy(config.stingrayUrl + '/__/stingray', '/__/stingray'))
 
+// ── 门户配置(前端可读):模块显隐等───────────────────────────────
+// 仅暴露白名单配置(模块列表),不泄露账号密码等敏感字段。
+app.get('/api/config/modules', (req, res) => {
+  res.json({
+    code: 0,
+    data: {
+      // 空数组 = 全部展示;非空 = 仅展示名单内模块(菜单 name)
+      enabledModules: config.enabledModules
+    }
+  })
+})
+
 // ── DB 代理(客户机侧 services/db-proxy)─────────────────────────
 // 平台无法直连数据库,经客户机的只读 HTTP 代理执行查询。
 // 安全:目标必须命中配置的 DB_PROXY_URL(SSRF 防护);未配置时代理不可用。
@@ -524,6 +536,17 @@ if (config.dbProxyUrl) {
       res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
     }
   })
+
+  // 停止当前执行的 spark 查询/代码(前端"停止"按钮;无需写 token,随时可停)
+  app.post('/api/spark/cancel', async (req, res) => {
+    try {
+      const data = await sparkCancel()
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[spark/cancel]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark 停止失败,请查看服务端日志' })
+    }
+  })
 } else {
   app.post('/api/spark/auth', (req, res) =>
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
@@ -535,6 +558,9 @@ if (config.dbProxyUrl) {
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
   app.get('/api/spark/status', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+  app.post('/api/spark/cancel', (req, res) =>
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
 }

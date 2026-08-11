@@ -611,6 +611,18 @@ def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
     return {"code": 0, "data": SPARK_ENGINE.status()}
 
 
+@app.post("/spark/cancel")
+def spark_cancel(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    """取消当前正在执行的 spark 查询/代码(手动停止或超时均走此逻辑)。"""
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    cancelled = SPARK_ENGINE.cancel()
+    return {"code": 0, "data": {"cancelled": cancelled}}
+
+
 # ── 脚本存储(我的目录:保存 SQL 脚本)────────────────────────────
 # 目录树元数据:scripts/tree.json;文件内容:scripts/files/<id>.sql
 # 可用环境变量 DB_SCRIPTS_DIR 覆盖(docker 挂载建议挂此目录)

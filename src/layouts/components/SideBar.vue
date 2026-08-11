@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { menus } from '@/config/menu'
+import { menus, type MenuItem } from '@/config/menu'
+import { getEnabledModules } from '@/api/db'
 import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
@@ -32,6 +33,18 @@ const icons: Record<string, Component> = {
 
 // 当前激活菜单(直接按路由路径)
 const activePath = computed(() => route.path)
+
+// 菜单项:服务端 enabledModules 白名单过滤(空 = 全部展示)
+const enabled = ref<string[] | null>(null)
+const filteredMenus = computed<MenuItem[]>(() => {
+  const allow = enabled.value
+  if (!allow || allow.length === 0) return menus
+  return menus.filter((m) => allow.includes(m.name))
+})
+
+onMounted(async () => {
+  enabled.value = await getEnabledModules()
+})
 </script>
 
 <template>
@@ -45,7 +58,7 @@ const activePath = computed(() => route.path)
       class="portal-menu"
       @select="(path: string) => emit('select', path)"
     >
-      <el-menu-item v-for="m in menus" :key="m.path" :index="m.path">
+      <el-menu-item v-for="m in filteredMenus" :key="m.path" :index="m.path">
         <el-icon><component :is="icons[m.icon]" /></el-icon>
         <template #title>
           <span>{{ m.title }}</span>

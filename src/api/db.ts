@@ -19,6 +19,21 @@ export interface DbQueryResult {
   truncated: boolean
 }
 
+/** 门户模块显隐配置(服务端 config.local.json 的 enabledModules) */
+export async function getEnabledModules(): Promise<string[]> {
+  try {
+    const res = await fetch('/api/config/modules')
+    if (!res.ok) return []
+    const body = (await res.json()) as { code?: number; data?: { enabledModules?: string[] } }
+    if (body.code !== undefined && body.code !== 0) return []
+    const list = body.data?.enabledModules
+    return Array.isArray(list) ? list : []
+  } catch {
+    // 配置接口不可用时按"全部展示"处理
+    return []
+  }
+}
+
 interface ApiResponse<T> {
   code?: number
   data?: T
@@ -81,6 +96,24 @@ export async function querySpark(sql: string, writeToken?: string, kind: 'sql' |
   const body = (await res.json()) as ApiResponse<DbQueryResult>
   if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
   return body.data as DbQueryResult
+}
+
+/** 停止当前执行的 Spark 查询/代码(前端"停止"按钮) */
+export async function cancelSpark(): Promise<{ cancelled: boolean }> {
+  const res = await fetch('/api/spark/cancel', { method: 'POST' })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ cancelled: boolean }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as { cancelled: boolean }
 }
 
 /** Spark driver 日志增量读取(经网关透传 db-proxy;per-file offset 防漂移) */

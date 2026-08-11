@@ -58,3 +58,9 @@ export async function status() {
   const res = await proxy('/spark/status', { timeoutMs: 10000 })
   return res.data
 }
+
+/** 取消当前正在执行的 spark 查询/代码(前端"停止"按钮) */
+export async function cancel() {
+  const res = await proxy('/spark/cancel', { method: 'POST', timeoutMs: 10000 })
+  return res.data
+}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Lock, Unlock } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryDb, querySpark, sparkAuth, sparkLogs, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, querySpark, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
 import SqlTreePanel from './SqlTreePanel.vue'
 
 defineOptions({ name: 'DbQueryView' })
@@ -588,6 +588,19 @@ async function runQuery() {
   }
 }
 
+/** 停止当前 spark 查询/代码(spark 引擎执行中可用,避免长时间查询卡死) */
+async function stopSpark() {
+  try {
+    await cancelSpark()
+    // 停止日志轮询,立即释放 loading 状态
+    stopSparkLogPolling()
+    loading.value = false
+    ElMessage.info('已请求停止,Spark 正在取消当前 job...')
+  } catch (e) {
+    ElMessage.error(`停止失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
 /** 执行全部(python 整段执行;SQL 按分号切段逐段执行) */
 async function runAllQuery() {
   if (!db.value) {
@@ -734,6 +747,9 @@ function isNumeric(val: unknown): boolean {
       <el-divider direction="vertical" />
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
+      <el-button v-if="(engine === 'sparksql' || engine === 'pyspark') && loading" type="danger" :icon="VideoPause" @click="stopSpark">
+        停止
+      </el-button>
       <el-button :loading="loading" @click="runAllQuery">执行全部</el-button>
       <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
         执行<kbd class="exec-kbd">⌘↵</kbd>
