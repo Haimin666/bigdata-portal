@@ -76,7 +76,7 @@ class FlinkGateway:
             r = requests.post(
                 f"{self.url}/v1/sessions",
                 json={"sessionName": self.session_name},
-                timeout=10,
+                timeout=60,
             )
             r.raise_for_status()
             data = r.json()
@@ -113,11 +113,13 @@ class FlinkGateway:
                 start = time.time()
 
                 # 1) 提交 statement
+                #    注意:embedded 模式下第一条 statement 提交时才初始化 Flink
+                #    mini cluster,可能耗时几十秒 → 提交超时放宽到 180s(只慢首次)
                 try:
                     r = requests.post(
                         f"{self.url}/v1/sessions/{sid}/statements",
                         json={"statement": sql},
-                        timeout=15,
+                        timeout=180,
                     )
                     r.raise_for_status()
                     op = r.json()
