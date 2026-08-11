@@ -17,6 +17,7 @@
     "master": "yarn",
     "deployMode": "client",
     "appName": "db-proxy-spark",
+    "sparkHome": "/opt/spark/spark-3.4.2-bin-hadoop3",
     "driverMemory": "4g",
     "executorMemory": "8g",
     "executorCores": 2,
@@ -150,6 +151,15 @@ class SparkEngine:
                 raise RuntimeError("spark session create failed: %s" % e)
 
     def _build_session(self):
+        # 显式指定 SPARK_HOME:避免 CDH 默认 Spark 2.4 与 pyspark 3.x 的 JVM 不匹配
+        # (Spark 2.4 无 PythonUtils.isEncryptionEnabled,getOrCreate 直接失败)
+        spark_home = str(self.cfg.get("sparkHome", "")).strip()
+        if spark_home:
+            os.environ["SPARK_HOME"] = spark_home
+            spark_bin = os.path.join(spark_home, "bin")
+            if spark_bin not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = spark_bin + os.pathsep + os.environ.get("PATH", "")
+
         from pyspark import SparkConf
         from pyspark.sql import SparkSession
 

@@ -24,6 +24,7 @@
     "master": "yarn",
     "deployMode": "client",
     "appName": "db-proxy-spark",
+    "sparkHome": "/opt/spark/spark-3.4.2-bin-hadoop3",
     "driverMemory": "4g",
     "executorMemory": "8g",
     "executorCores": 2,
