@@ -21,3 +21,5 @@ dist/
 .playwright-cli/
 data/
 *.png
+# 原型演示目录(不入库)
+demo-proto/

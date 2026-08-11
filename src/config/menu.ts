@@ -34,17 +34,6 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
-    path: '/ds',
-    title: '海豚调度',
-    name: 'ds',
-    icon: 'Odometer',
-    kind: 'subapp',
-    url: '/apps/dsweb/ui/#/home',
-    login: 'ds',
-    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe
-    iframe: true
-  },
-  {
     path: '/query',
     title: '即时查询',
     name: 'stingray',
@@ -57,13 +46,14 @@ export const menus: MenuItem[] = [
     iframe: true
   },
   {
-    path: '/omd',
-    title: '我的数据',
-    name: 'omd',
-    icon: 'DataLine',
+    path: '/ds',
+    title: '离线开发',
+    name: 'ds',
+    icon: 'Odometer',
     kind: 'subapp',
-    // 跨源 iframe 直连(OpenMetadata 无 X-Frame-Options 限制,认证为 localStorage token 非 cookie)
-    url: 'https://omd.corp.shiqiao.com/',
+    url: '/apps/dsweb/ui/#/home',
+    login: 'ds',
+    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe
     iframe: true
   },
   {
@@ -74,6 +64,28 @@ export const menus: MenuItem[] = [
     kind: 'subapp',
     // 跨源 iframe 直连(StreamX hash 路由,无 X-Frame-Options 限制)
     url: 'https://streamx.corp.shiqiao.com/#/login?redirect=/flink/app',
+    iframe: true
+  },
+  {
+    path: '/jupyter',
+    title: 'Jupyter开发',
+    name: 'jupyter',
+    icon: 'Notebook',
+    kind: 'subapp',
+    // 同源代理路径 + 原生 iframe:网关把 /apps/jupyter 反代到宿主机 jupyter(host 网络 8888),
+    // base_url=/apps/jupyter 使其页面/API/ws 路径自带前缀;认证沿用 jupyter 自身密码,
+    // 首次打开手动登录一次,cookie 种在门户域,切 tab 后 kernel 状态保留
+    url: '/apps/jupyter/lab',
+    iframe: true
+  },
+  {
+    path: '/omd',
+    title: '数据血缘',
+    name: 'omd',
+    icon: 'DataLine',
+    kind: 'subapp',
+    // 跨源 iframe 直连(OpenMetadata 无 X-Frame-Options 限制,认证为 localStorage token 非 cookie)
+    url: 'https://omd.corp.shiqiao.com/',
     iframe: true
   }
 ]

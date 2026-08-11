@@ -218,6 +218,11 @@ app.use(
 
 // ── DS Web 子应用 ──────────────────────────────────────────────
 app.use('/apps/dsweb', iframeProxy(config.dsWebUrl, '/apps/dsweb'))
+// ── JupyterLab 子应用 ──────────────────────────────────────────
+// jupyter 容器 host 网络监听宿主机 8888,start.sh 注入 --ServerApp.base_url=/apps/jupyter,
+// 因此其页面/API/ws 路径自带 /apps/jupyter 前缀,这里原样转发(不剥前缀)即可;
+// 认证沿用 jupyter 自身密码,首次打开手动登录一次,cookie 经 onProxyRes 重写后种在门户域。
+app.use('/apps/jupyter', iframeProxy(config.jupyterUrl, '/apps/jupyter'))
 // 海豚 UI 的 HTML 内资源与运行时 API 均为绝对路径 /dolphinscheduler/...(见 ui/index.html),
 // 门户域需提供同路径代理,否则子应用资源会命中 SPA fallback 导致白屏。
 // 配置了 DS_TOKEN 时向所有请求注入 token header(海豚 API token 认证优先于 cookie,
@@ -402,6 +407,14 @@ const wsProxy = httpProxy.createProxyServer({
   changeOrigin: true
 })
 
+// JupyterLab kernel 通信/终端走 ws,路径自带 /apps/jupyter 前缀(base_url),
+// 原样转发给宿主机 jupyter 即可。
+const jupyterWsProxy = httpProxy.createProxyServer({
+  target: config.jupyterUrl,
+  ws: true,
+  changeOrigin: true
+})
+
 const server = app.listen(config.port, () => {
   console.log(`[bigdata-portal] gateway listening on http://localhost:${config.port}`)
   console.log(`  RM:      ${config.resourceManagers.join(', ')}`)
@@ -409,10 +422,13 @@ const server = app.listen(config.port, () => {
   console.log(`  DS Web:  ${config.dsWebUrl}`)
   console.log(`  OMD:     ${config.omdUrl}`)
   console.log(`  Stingray:${config.stingrayUrl}`)
+  console.log(`  Jupyter: ${config.jupyterUrl}`)
 })
 
 server.on('upgrade', (req, socket, head) => {
   if (req.url.startsWith('/__/stingray')) {
     wsProxy.ws(req, socket, head)
+  } else if (req.url.startsWith('/apps/jupyter')) {
+    jupyterWsProxy.ws(req, socket, head)
   }
 })
