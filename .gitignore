@@ -25,3 +25,6 @@ data/
 *.png
 # 原型演示目录(不入库)
 demo-proto/
+services/db-proxy/datasources.json
+mysql_online_conns.json
+tmp/

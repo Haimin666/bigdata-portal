@@ -477,7 +477,7 @@ onBeforeUnmount(() => {
   min-height: 320px;
   border: 1px solid $border;
   border-radius: 8px;
-  background: #fff;
+  background: var(--bd-panel, #ffffff);
   overflow: hidden;
 }
 

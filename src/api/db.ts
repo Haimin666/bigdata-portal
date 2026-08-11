@@ -5,7 +5,7 @@ export interface DbDataSource {
   name: string
   /** 显示别名(缺省回退 name) */
   label?: string
-  type: 'mysql' | 'oracle' | 'sparksql' | 'pyspark'
+  type: 'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql'
   host: string
   port: number
   user: string
@@ -101,6 +101,33 @@ export async function querySpark(sql: string, writeToken?: string, kind: 'sql' |
 /** 停止当前执行的 Spark 查询/代码(前端"停止"按钮) */
 export async function cancelSpark(): Promise<{ cancelled: boolean }> {
   const res = await fetch('/api/spark/cancel', { method: 'POST' })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ cancelled: boolean }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as { cancelled: boolean }
+}
+
+/** FlinkSQL 查询(经网关 /api/flink/query 走 db-proxy → Flink SQL Gateway) */
+export async function queryFlink(sql: string): Promise<DbQueryResult> {
+  return request<DbQueryResult>('/flink/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql })
+  })
+}
+
+/** 停止当前执行的 Flink 查询 */
+export async function cancelFlink(): Promise<{ cancelled: boolean }> {
+  const res = await fetch('/api/flink/cancel', { method: 'POST' })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {

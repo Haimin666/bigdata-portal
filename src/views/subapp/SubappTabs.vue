@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { Close, Refresh, FullScreen } from '@element-plus/icons-vue'
+import { Close, Refresh, FullScreen, Sunny, Moon } from '@element-plus/icons-vue'
+import { computed } from 'vue'
 import type { MenuItem } from '@/config/menu'
+import { getTheme, toggleTheme } from '@/utils/theme'
 
 defineOptions({ name: 'SubappTabs' })
 
@@ -22,6 +24,13 @@ const emit = defineEmits<{
   refresh: []
   toggleFullscreen: []
 }>()
+
+// 主题图标跟随当前主题(暗色显示月亮,亮色显示太阳;点击切换)
+const isDark = computed(() => getTheme() === 'dark')
+
+function onToggleTheme() {
+  toggleTheme()
+}
 </script>
 
 <template>
@@ -39,6 +48,10 @@ const emit = defineEmits<{
       </el-icon>
     </div>
     <div class="tab-actions">
+      <el-icon class="action-icon" title="切换深浅色" @click="onToggleTheme">
+        <Sunny v-if="!isDark" />
+        <Moon v-else />
+      </el-icon>
       <el-icon class="action-icon" title="刷新" @click="emit('refresh')"><Refresh /></el-icon>
       <el-icon class="action-icon" title="全屏" @click="emit('toggleFullscreen')"><FullScreen /></el-icon>
     </div>

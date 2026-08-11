@@ -256,7 +256,7 @@ onMounted(reloadMy)
   flex-direction: column;
   height: 100%;
   border-right: 1px solid $border;
-  background: #fafbfc;
+  background: var(--bd-panel-sub, #fafbfc);
   overflow: hidden;
 }
 

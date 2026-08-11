@@ -40,6 +40,14 @@
     "logDir": "spark-logs",
     "sparkConf": {}
   },
+  "flink": {
+    "enabled": false,
+    "gatewayUrl": "http://127.0.0.1:8083",
+    "sessionName": "db-proxy-flink",
+    "defaultLimit": 1000,
+    "maxLimit": 10000,
+    "queryTimeout": 300
+  },
   "datasources": [
     {
       "name": "sq_ccrs2",

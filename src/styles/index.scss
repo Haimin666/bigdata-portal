@@ -22,9 +22,9 @@ body {
    默认字号 13px、表头 13px 600,行高紧凑(12px 内边距) */
 .el-table {
   font-size: 13px;
-  --el-table-header-bg-color: #f7f8fa;
+  --el-table-header-bg-color: var(--bd-table-header);
   --el-table-border-color: $border;
-  --el-table-row-hover-bg-color: #f5f6fa;
+  --el-table-row-hover-bg-color: var(--bd-table-hover);
 
   th.el-table__cell {
     font-size: 13px;

@@ -23,14 +23,15 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryDb, querySpark, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { applyTheme, getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -181,16 +182,19 @@ function onSideDragStart(e: MouseEvent) {
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
 // PySpark 虚拟数据源(python 编辑器,走 db-proxy execute_code 通道)
 const PYSPARK_SOURCE: DbDataSource = { name: 'pyspark', label: 'PySpark', type: 'pyspark', host: '', port: 0, user: '' }
+// FlinkSQL 虚拟数据源(走 db-proxy → Flink SQL Gateway)
+const FLINK_SOURCE: DbDataSource = { name: 'flink', label: 'FlinkSQL', type: 'flinksql', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql/pyspark 为虚拟源,不进左侧树)
+// 引擎过滤后的数据源(sparksql/pyspark/flinksql 为虚拟源,不进左侧树)
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
   if (engine.value === 'pyspark') return [PYSPARK_SOURCE]
+  if (engine.value === 'flinksql') return [FLINK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
-// 左侧树排除 spark 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark'))
+// 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark' && d.type !== 'flinksql'))
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
@@ -201,7 +205,7 @@ let completionTimer: number | null = null
 // 默认 SQL:清空(用户自行编写)
 const DEFAULT_SQL = ''
 
-// 编辑器主题:dark(默认)/ light,持久化到 localStorage
+// 编辑器主题:dark(默认)/ light,持久化到 localStorage;与全局主题联动
 const THEME_KEY = 'db-query-theme'
 const themeMode = ref<'dark' | 'light'>(
   localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
@@ -216,6 +220,8 @@ const MAX_FONT = 24
 function toggleTheme() {
   themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
   localStorage.setItem(THEME_KEY, themeMode.value)
+  // 编辑器主题切换与全局主题联动(主界面深浅一致)
+  applyTheme(themeMode.value)
 }
 
 function adjustFont(delta: number) {
@@ -510,13 +516,17 @@ const activeResult = ref(0)
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
+  const isFlink = engine.value === 'flinksql'
   const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
   if (isSpark) {
     clearSparkLogs()
     startSparkLogPolling()
   }
   try {
-    const r = isSpark ? await execSpark(sql, kind) : await queryDb(db.value, sql)
+    let r
+    if (isFlink) r = await queryFlink(sql)
+    else if (isSpark) r = await execSpark(sql, kind)
+    else r = await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -588,14 +598,18 @@ async function runQuery() {
   }
 }
 
-/** 停止当前 spark 查询/代码(spark 引擎执行中可用,避免长时间查询卡死) */
-async function stopSpark() {
+/** 停止当前查询(引擎执行中可用,避免长时间查询卡死) */
+async function stopQuery() {
   try {
-    await cancelSpark()
+    if (engine.value === 'flinksql') {
+      await cancelFlink()
+    } else {
+      await cancelSpark()
+    }
     // 停止日志轮询,立即释放 loading 状态
     stopSparkLogPolling()
     loading.value = false
-    ElMessage.info('已请求停止,Spark 正在取消当前 job...')
+    ElMessage.info('已请求停止,正在取消当前 job...')
   } catch (e) {
     ElMessage.error(`停止失败:${e instanceof Error ? e.message : e}`)
   }
@@ -671,13 +685,17 @@ async function copyCell(val: unknown) {
 
 // ── 初始化 ───────────────────────────────────────────────────
 onMounted(async () => {
+  // 编辑器主题与全局主题对齐(全局 dark 时编辑器默认 dark,除非用户单独设置过)
+  if (!localStorage.getItem(THEME_KEY)) {
+    themeMode.value = getTheme() === 'dark' ? 'dark' : 'light'
+  }
   try {
     datasources.value = await listDataSources()
     if (datasources.value.length) {
       const first = datasources.value.find(
         (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'sparksql'
       )
-      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' | 'pyspark' : ''
+      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
       ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
@@ -720,6 +738,7 @@ function isNumeric(val: unknown): boolean {
         <el-option label="Oracle" value="oracle" />
         <el-option label="SparkSQL" value="sparksql" />
         <el-option label="PySpark" value="pyspark" />
+        <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
       <el-button
         v-if="engine === 'sparksql' || engine === 'pyspark'"
@@ -747,7 +766,7 @@ function isNumeric(val: unknown): boolean {
       <el-divider direction="vertical" />
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
-      <el-button v-if="(engine === 'sparksql' || engine === 'pyspark') && loading" type="danger" :icon="VideoPause" @click="stopSpark">
+      <el-button v-if="(engine === 'sparksql' || engine === 'pyspark' || engine === 'flinksql') && loading" type="danger" :icon="VideoPause" @click="stopQuery">
         停止
       </el-button>
       <el-button :loading="loading" @click="runAllQuery">执行全部</el-button>

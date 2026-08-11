@@ -75,7 +75,7 @@ onMounted(async () => {
 <style scoped lang="scss">
 .portal-aside {
   position: relative;
-  background: #f0f1f5;
+  background: var(--bd-sidebar, #f0f1f5);
   border-right: 1px solid $border;
   transition: width 0.2s;
   overflow: visible;
