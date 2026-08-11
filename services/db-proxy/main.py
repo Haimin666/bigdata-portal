@@ -573,7 +573,7 @@ def spark_query(
         if req.kind == "pyspark":
             if not req.code:
                 raise HTTPException(status_code=400, detail="code required for pyspark")
-            result = SPARK_ENGINE.execute_code(req.code, req.timeoutMs)
+            result = SPARK_ENGINE.execute_code(req.code, req.timeoutMs, req.writeUnlocked)
         else:
             if not req.sql:
                 raise HTTPException(status_code=400, detail="sql required")

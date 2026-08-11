@@ -6,14 +6,23 @@ import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
 import 'codemirror/mode/python/python.js'
-
-// CodeMirror 5 的 addon 是 UMD,在 Vite 的 CJS 转换下注册不稳定
-// (addon 挂到内部 require 的实例,与我们 import 的实例可能不一致)。
-// 本项目全部自实现所需功能(括号匹配/自动闭合/当前行/提示浮层),
-// 不依赖任何 addon —— 避免构建/加载兼容问题。
-async function loadAddons() {
-  // 空:不加载 addon
-}
+// 官方 addon(静态 import,Vite 下以 CJS 转换后挂到同一 CodeMirror 实例):
+// 补全 / 折叠 / 括号匹配与自动闭合 / 光标行 / 选中高亮 / 容器自适应刷新
+import 'codemirror/addon/hint/show-hint.js'
+import 'codemirror/addon/hint/sql-hint.js'
+import 'codemirror/addon/hint/anyword-hint.js'
+import 'codemirror/addon/hint/show-hint.css'
+import 'codemirror/addon/fold/foldcode.js'
+import 'codemirror/addon/fold/foldgutter.js'
+import 'codemirror/addon/fold/indent-fold.js'
+import 'codemirror/addon/fold/brace-fold.js'
+import 'codemirror/addon/fold/comment-fold.js'
+import 'codemirror/addon/fold/foldgutter.css'
+import 'codemirror/addon/edit/matchbrackets.js'
+import 'codemirror/addon/edit/closebrackets.js'
+import 'codemirror/addon/selection/active-line.js'
+import 'codemirror/addon/search/match-highlighter.js'
+import 'codemirror/addon/display/autorefresh.js'
 import { listDataSources, queryDb, querySpark, sparkAuth, sparkLogs, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
 import SqlTreePanel from './SqlTreePanel.vue'
 
@@ -21,7 +30,7 @@ defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'sparksql' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -94,24 +103,29 @@ function isSparkWriteSql(sql: string): boolean {
   return true
 }
 
-/** Spark 执行:SQL 写语句未解锁时先弹密码框;只读 SQL 直接执行 */
-async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (isSparkWriteSql(sql) && !sparkToken.value) {
+/** Spark 执行:SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行 */
+async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  const needsAuth = kind === 'pyspark' || (kind === 'sql' && isSparkWriteSql(sql))
+  if (needsAuth && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写权限未解锁')
   }
-  return querySpark(sql, sparkToken.value || undefined)
+  return querySpark(sql, sparkToken.value || undefined, kind)
 }
 
 // 当前打开的文件(我的目录):保存时写回
 const currentFile = ref<ScriptNode | null>(null)
 
-/** 打开文件:加载 SQL 内容到编辑器 */
+/** 打开文件:加载 SQL/Python 内容到编辑器(.py 自动切 PySpark 引擎) */
 async function onOpenFile(node: ScriptNode) {
   try {
     const { content } = await getScriptContent(node.id)
     cm?.setValue(content || '')
     currentFile.value = node
+    // .py 文件自动切到 PySpark 引擎(python 编辑器)
+    if (node.name.toLowerCase().endsWith('.py')) {
+      engine.value = 'pyspark'
+    }
     ElMessage.success(`已打开 ${node.name}`)
   } catch (e) {
     ElMessage.error(`打开失败:${e instanceof Error ? e.message : e}`)
@@ -165,20 +179,24 @@ function onSideDragStart(e: MouseEvent) {
 
 // SparkSQL 虚拟数据源(db-proxy 引擎,不在 /acl 中)
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
+// PySpark 虚拟数据源(python 编辑器,走 db-proxy execute_code 通道)
+const PYSPARK_SOURCE: DbDataSource = { name: 'pyspark', label: 'PySpark', type: 'pyspark', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql 为虚拟源,不进左侧树)
+// 引擎过滤后的数据源(sparksql/pyspark 为虚拟源,不进左侧树)
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
+  if (engine.value === 'pyspark') return [PYSPARK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
 // 左侧树排除 spark 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql'))
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark'))
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
 const canvasRef = ref<HTMLElement>()
 let cm: CodeMirror.Editor | null = null
+let completionTimer: number | null = null
 
 // 默认 SQL:清空(用户自行编写)
 const DEFAULT_SQL = ''
@@ -207,12 +225,6 @@ function adjustFont(delta: number) {
 
 async function initEditor() {
   if (!cmRef.value || cm) return
-  // 先动态加载 addon(注册到 window.CodeMirror),再创建编辑器
-  try {
-    await loadAddons()
-  } catch (e) {
-    console.warn('[db-query] CodeMirror addon 加载失败:', e)
-  }
   cm = CodeMirror(cmRef.value, {
     value: DEFAULT_SQL,
     mode: 'text/x-sql',
@@ -221,26 +233,41 @@ async function initEditor() {
     tabSize: 2,
     indentUnit: 2,
     lineWrapping: true,
-    theme: 'default'
+    theme: 'default',
+    // ── 官方 addon 增强 ──────────────────────────────
+    // 括号匹配与自动闭合(替换自实现)
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    // 光标行高亮 + 选中词高亮
+    styleActiveLine: true,
+    highlightSelectionMatches: true,
+    // 代码折叠(SQL 子查询/CTE、python 函数体)
+    foldGutter: true,
+    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+    foldOptions: {
+      rangeFinder: CodeMirror.fold.combine(CodeMirror.fold.brace, CodeMirror.fold.indent, CodeMirror.fold.comment)
+    },
+    // 容器尺寸变化自动 refresh(tab 常驻池中非激活创建也能正确布局)
+    autoRefresh: true
   })
   // 首次挂载若容器尺寸未稳定(如 tab 常驻池中非激活创建),内容会挤到行号前。
   // 等 DOM 稳定后强制 refresh 重算布局。
   await nextTick()
   cm.refresh()
-  // 括号匹配(自实现):光标邻接括号时高亮配对
-  cm.on('cursorActivity', (c: CodeMirror.Editor) => updateBracketMatch(c))
-  // 自动闭合括号
-  cm.on('beforeChange', (c: CodeMirror.Editor, change: CodeMirror.EditorChangeCancellable) => {
+  // ── 补全触发:输入字母/下划线后 250ms 弹出(避免每键弹闪);浮层打开时 Tab 选词 ──
+  cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
     if (change.origin !== '+input') return
-    const ch = change.text[0] ?? ''
-    if (!ch || ch.length !== 1) return
-    if (['(', '[', '{'].includes(ch)) {
-      const close = ch === '(' ? ')' : ch === '[' ? ']' : '}'
-      const cur = c.getCursor()
-      c.replaceRange(close, cur)
-    }
+    const ch = change.text[0] || ''
+    if (!/[\w.]/.test(ch)) return
+    if (completionTimer) clearTimeout(completionTimer)
+    completionTimer = window.setTimeout(() => {
+      c.showHint({
+        completeSingle: false,
+        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : CodeMirror.hint.sql
+      })
+    }, 250)
   })
-  // Ctrl/Cmd + Enter 执行;Tab 缩进(多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
+  // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
     'Ctrl-Enter': () => {
       void runQuery()
@@ -254,7 +281,15 @@ async function initEditor() {
     'Cmd-S': () => {
       void saveCurrent()
     },
+    'Ctrl-Space': (c: CodeMirror.Editor) => {
+      c.showHint({
+        completeSingle: false,
+        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : CodeMirror.hint.sql
+      })
+    },
     Tab: (c: CodeMirror.Editor) => {
+      // 补全浮层打开时:交给 show-hint 选词(不要缩进)
+      if (c.state.completionActive) return
       const from = c.getCursor('from')
       const to = c.getCursor('to')
       c.operation(() => {
@@ -284,67 +319,6 @@ async function initEditor() {
       })
     }
   })
-}
-
-// ── 括号匹配(自实现,markText 高亮)──────────────────────────
-let bracketMarks: CodeMirror.TextMarker[] = []
-
-function updateBracketMatch(c: CodeMirror.Editor) {
-  // 清除旧标记
-  bracketMarks.forEach((m) => m.clear())
-  bracketMarks = []
-  const pos = c.getCursor().ch
-  const line = c.getLine(c.getCursor().line)
-  if (!line) return
-  const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
-  const openers: Record<string, string> = { '(': ')', '[': ']', '{': '}' }
-  const ch = line[pos] ?? ''
-  const prev = line[pos - 1] ?? ''
-  const mark = (from: { line: number; ch: number }, to: { line: number; ch: number }) => {
-    const m = c.markText(from, to, { className: 'bracket-match' })
-    bracketMarks.push(m)
-  }
-  const curLine = c.getCursor().line
-  // 光标前是闭合括号 → 向前找
-  if (pairs[prev]) {
-    const openCh = pairs[prev] ?? ''
-    let depth = 0
-    const text = c.getValue()
-    const idx = c.indexFromPos({ line: curLine, ch: pos - 1 })
-    for (let i = idx; i >= 0; i--) {
-      const ch2 = text[i] ?? ''
-      if (ch2 === prev) depth++
-      else if (ch2 === openCh) {
-        depth--
-        if (depth === 0) {
-          const openPos = c.posFromIndex(i)
-          mark({ line: curLine, ch: pos - 1 }, { line: curLine, ch: pos })
-          mark(openPos, { line: openPos.line, ch: openPos.ch + 1 })
-          return
-        }
-      }
-    }
-  }
-  // 光标后是开括号 → 向后找
-  if (openers[ch]) {
-    const closeCh = openers[ch] ?? ''
-    let depth = 0
-    const text = c.getValue()
-    const idx = c.indexFromPos({ line: curLine, ch: pos })
-    for (let i = idx; i < text.length; i++) {
-      const ch2 = text[i] ?? ''
-      if (ch2 === ch) depth++
-      else if (ch2 === closeCh) {
-        depth--
-        if (depth === 0) {
-          const closePos = c.posFromIndex(i)
-          mark({ line: curLine, ch: pos }, { line: curLine, ch: pos + 1 })
-          mark(closePos, { line: closePos.line, ch: closePos.ch + 1 })
-          return
-        }
-      }
-    }
-  }
 }
 
 onMounted(() => {
@@ -481,7 +455,7 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
 }
 
 /**
- * 待执行 SQL:优先选中内容;未选中则取光标所在段(分号切分)。
+ * 待执行内容:优先选中;未选中时 SQL 取光标所在段(分号切分),python 取全文。
  * 找不到段(如全文只有注释)回退全文。
  */
 function getSqlToRun(): string {
@@ -489,7 +463,9 @@ function getSqlToRun(): string {
   // 1. 有选区 → 执行选中
   const sel = cm.getSelection()
   if (sel.trim()) return sel
-  // 2. 无选区 → 光标所在段
+  // 2. python 编辑器:无选区执行全文(整段提交,不做分号切分)
+  if (engine.value === 'pyspark') return cm.getValue()
+  // 3. 无选区 → 光标所在段
   const cursorIdx = cm.indexFromPos(cm.getCursor())
   for (const seg of splitSqlSegments(cm.getValue())) {
     if (seg.start <= cursorIdx && cursorIdx <= seg.end) {
@@ -500,9 +476,13 @@ function getSqlToRun(): string {
   return cm.getValue()
 }
 
-// ── SQL 格式化(简单:关键字换行缩进)─────────────────────────
+// ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
 function formatSql() {
   if (!cm) return
+  if (engine.value === 'pyspark') {
+    ElMessage.info('Python 模式暂不支持格式化')
+    return
+  }
   const s = cm.getValue().trim()
   if (!s) return
   const keywords = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'UNION', 'FETCH', 'OFFSET']
@@ -529,13 +509,14 @@ const activeResult = ref(0)
 
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
-  const isSpark = engine.value === 'sparksql'
+  const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
+  const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
   if (isSpark) {
     clearSparkLogs()
     startSparkLogPolling()
   }
   try {
-    const r = engine.value === 'sparksql' ? await execSpark(sql) : await queryDb(db.value, sql)
+    const r = isSpark ? await execSpark(sql, kind) : await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -568,7 +549,7 @@ async function execSegments(segs: string[]) {
   activeResult.value = segs.length - 1
 }
 
-/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行) */
+/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
 async function runQuery() {
   if (!db.value) {
     ElMessage.warning('请先选择数据库')
@@ -577,6 +558,19 @@ async function runQuery() {
   const target = getSqlToRun().trim()
   if (!target) {
     ElMessage.warning('请输入 SQL')
+    return
+  }
+  // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
+  if (engine.value === 'pyspark') {
+    loading.value = true
+    error.value = ''
+    try {
+      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
+      await execOne(target, 0)
+      activeResult.value = 0
+    } finally {
+      loading.value = false
+    }
     return
   }
   // 目标内容按分号拆段:选中多段/一段都逐条执行
@@ -594,21 +588,33 @@ async function runQuery() {
   }
 }
 
-/** 执行全部段(分号切分,逐段执行) */
+/** 执行全部(python 整段执行;SQL 按分号切段逐段执行) */
 async function runAllQuery() {
   if (!db.value) {
     ElMessage.warning('请先选择数据库')
     return
   }
   if (!cm) return
-  const segs = getSegments(cm.getValue())
-  if (!segs.length) {
-    ElMessage.warning('没有可执行的 SQL')
-    return
-  }
   loading.value = true
   error.value = ''
   try {
+    // python 编辑器整段执行
+    if (engine.value === 'pyspark') {
+      const target = cm.getValue().trim()
+      if (!target) {
+        ElMessage.warning('请输入 Python 代码')
+        return
+      }
+      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
+      await execOne(target, 0)
+      activeResult.value = 0
+      return
+    }
+    const segs = getSegments(cm.getValue())
+    if (!segs.length) {
+      ElMessage.warning('没有可执行的 SQL')
+      return
+    }
     await execSegments(segs)
   } finally {
     loading.value = false
@@ -623,7 +629,9 @@ function exportCsv(idx?: number) {
     return
   }
   const esc = (v: unknown) => {
-    const s = v == null ? '' : String(v)
+    let s = v == null ? '' : String(v)
+    // 防 Excel 公式注入:以 = + - @ 或制表/回车开头的单元格前缀单引号
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
   const header = r.columns.map(esc).join(',')
@@ -656,7 +664,7 @@ onMounted(async () => {
       const first = datasources.value.find(
         (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'sparksql'
       )
-      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' : ''
+      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' | 'pyspark' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
       ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
@@ -671,7 +679,8 @@ watch(engine, (val) => {
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
   if (cm) {
-    cm.setOption('mode', 'text/x-sql')
+    // python 编辑器切换为 python 模式,其余为 SQL 模式
+    cm.setOption('mode', val === 'pyspark' ? 'text/x-python' : 'text/x-sql')
     cm.refresh()
   }
 })
@@ -697,9 +706,10 @@ function isNumeric(val: unknown): boolean {
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="SparkSQL" value="sparksql" />
+        <el-option label="PySpark" value="pyspark" />
       </el-select>
       <el-button
-        v-if="engine === 'sparksql'"
+        v-if="engine === 'sparksql' || engine === 'pyspark'"
         class="spark-lock-btn"
         :type="sparkUnlocked ? 'success' : 'warning'"
         :icon="sparkUnlocked ? Unlock : Lock"
@@ -746,6 +756,7 @@ function isNumeric(val: unknown): boolean {
     <div class="sql-hint">
       <span>Ctrl/Cmd + Enter 执行</span>
       <span>· Tab 缩进</span>
+      <span>· Ctrl/Cmd + Space 补全</span>
       <span>· 拖拽分割条调整画布高度</span>
     </div>
 

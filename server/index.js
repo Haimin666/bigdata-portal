@@ -367,6 +367,10 @@ if (config.dbProxyUrl) {
     }
   })
   app.use('/api/db', (req, res, next) => {
+    // 敏感路径不走透传:spark 引擎由 /api/spark/* 统一鉴权(写解锁),acl/scripts 由独立路由暴露
+    if (/^\/spark\//.test(req.path) || req.path === '/acl' || req.path.startsWith('/scripts')) {
+      return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
+    }
     dbProxy(req, res, next)
   })
 } else {
@@ -471,12 +475,19 @@ if (config.dbProxyUrl) {
       if (!sql || !String(sql).trim()) {
         return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
       }
-      // 写语句必须解锁(SQL 引擎;pyspark 信任模式由门户网关统一鉴权后放行)
+      // 写语句必须解锁(SQL 引擎);pyspark 为任意 Python 执行,同样必须解锁(信任模式)
       let writeUnlocked = false
       if (k === 'sql' && isSparkWriteSql(sql)) {
         const tk = req.get('X-Spark-Token')
         if (!tk || !sparkTokenValid(tk)) {
           return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入 Spark 写权限密码' })
+        }
+        writeUnlocked = true
+      }
+      if (k === 'pyspark') {
+        const tk = req.get('X-Spark-Token')
+        if (!tk || !sparkTokenValid(tk)) {
+          return res.status(403).json({ code: 403, msg: 'PySpark 为任意代码执行,请先解锁 Spark 写权限' })
         }
         writeUnlocked = true
       }

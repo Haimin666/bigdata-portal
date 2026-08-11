@@ -403,12 +403,17 @@ class SparkEngine:
                 raise RuntimeError(_format_spark_error(e))
 
     # ── PySpark 代码执行(信任模式 + 审计)──────────────────────
-    def execute_code(self, code: str, timeout_ms: int = 600000) -> Dict[str, Any]:
+    def execute_code(
+        self, code: str, timeout_ms: int = 600000, write_unlocked: bool = False
+    ) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("spark engine not enabled (datasources.json spark.enabled=false)")
         self._ensure_initialized()
         if len(code) > int(self.cfg.get("maxSqlLen", 65536)):
             raise ValueError("code too long")
+        # 信任模式:任意 Python 等价于全量写权限,必须 allowWrite + writeUnlocked
+        if not (bool(self.cfg.get("allowWrite", False)) and write_unlocked):
+            raise PermissionError("pyspark execution not allowed (read-only)")
         start = time.time()
         self._audit("pycode >>>\n%s" % code[:2000])
         # 信任模式:执行于受限命名空间,提供 spark/sc;约定 result 变量承载结果
