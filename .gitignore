@@ -1,4 +1,5 @@
 # 本地凭证与敏感配置,不入库
+datasources.json
 .env.local
 # 网关 JSON 配置(唯一配置源,含账号/令牌,不入库)
 server/config.local.json
