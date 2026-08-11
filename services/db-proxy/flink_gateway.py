@@ -75,7 +75,14 @@ class FlinkGateway:
         try:
             r = requests.post(
                 f"{self.url}/v1/sessions",
-                json={"sessionName": self.session_name},
+                json={
+                    "sessionName": self.session_name,
+                    # 关键:SQL Gateway 默认按 remote 模式找外部 JobManager(连 rest 端口会 refused)。
+                    # 显式指定 local → gateway 进程内嵌 mini cluster,不需要外部 JobManager。
+                    "properties": {
+                        "execution.target": "local",
+                    },
+                },
                 timeout=60,
             )
             r.raise_for_status()

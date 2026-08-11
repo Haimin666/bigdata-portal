@@ -1,9 +1,11 @@
 #!/bin/bash
 # flink-gateway.sh —— Flink SQL Gateway 启停脚本(db-proxy 机器)
 #
-# 用独立的 JDK11 启动(系统 JAVA_HOME 是 Java8,不改系统环境变量,
-# 只对 SQL Gateway 这一次启动生效)。SQL Gateway 是 Flink 1.17 自带 REST 服务,
-# db-proxy 通过 HTTP 转发到它执行 FlinkSQL。
+# 用独立的 JDK11 启动(系统 JAVA_HOME 是 Java8,不改系统环境变量)。
+# 关键:sql-gateway.sh 不认 FLINK_CONF_DIR 环境变量,仍读 $FLINK_HOME/conf;
+# 而那份配置是 StreamX 共用的(rest.address: 0.0.0.0,embedded 模式下
+# 内嵌 JobManager 连 0.0.0.0:8081 必然 refused)。
+# → 用 -D 启动参数显式覆盖关键配置,不修改任何 flink-conf.yaml。
 #
 # 用法: ./flink-gateway.sh {start|stop|status|restart}
 # 日志: /opt/streamx/flink/flink-1.17.2/log/*sql-gateway*.log
@@ -19,11 +21,23 @@ start() {
   fi
   cd "$FLINK_HOME" || { echo "FLINK_HOME 不存在: $FLINK_HOME"; exit 1; }
   export JAVA_HOME="$JDK11_HOME"
-  bin/sql-gateway.sh start
-  # 等待就绪(最多 30s)
-  for i in $(seq 1 30); do
+  # -D 覆盖关键配置,不修改 StreamX 共用的 flink-conf.yaml:
+  #  rest.port 用 8082(8081 被占用);session 执行模式 local 在 db-proxy 创建会话时指定
+  bin/sql-gateway.sh start \
+    -Drest.address=localhost \
+    -Drest.bind-address=0.0.0.0 \
+    -Drest.port=8082 \
+    -Djobmanager.rpc.address=localhost \
+    -Djobmanager.rpc.port=6124 \
+    -Dhigh-availability=none \
+    -Dstate.backend=filesystem \
+    -Dstate.checkpoints.dir=file:///tmp/flink-checkpoints \
+    -Dstate.savepoints.dir=file:///tmp/flink-savepoints \
+    -Dtaskmanager.numberOfTaskSlots=2
+  # 等待就绪(最多 60s,内嵌 JobManager 冷启动较慢)
+  for i in $(seq 1 60); do
     if curl -s "http://127.0.0.1:${GATEWAY_PORT}/v1/info" >/dev/null 2>&1; then
-      echo "SQL Gateway 启动成功: $(curl -s http://127.0.0.1:${GATEWAY_PORT}/v1/info)"
+      echo "SQL Gateway 已就绪: $(curl -s http://127.0.0.1:${GATEWAY_PORT}/v1/info)"
       return 0
     fi
     sleep 1
