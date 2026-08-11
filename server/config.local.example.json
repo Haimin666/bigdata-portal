@@ -10,11 +10,7 @@
   "dsToken": "",
   "dbProxyUrl": "http://10.25.15.106:8756",
   "dbProxyToken": "",
-  "livy": {
-    "scheme": "http",
-    "host": "hadoop-task-1.bigdata.shiqiao.com",
-    "port": 8998
-  },
+  "_spark说明": "Spark 引擎由 db-proxy 集成(自建网关,弃用 Livy)。写操作仍需 sparkWritePassword 在门户解锁;db-proxy 侧 datasources.json 的 spark.allowWrite 为第二道防线。",
   "sparkWritePassword": "",
   "accounts": {
     "dsWeb": { "user": "", "pass": "" },

@@ -56,6 +56,16 @@ def _read_config() -> Dict[str, Any]:
 
 CONFIG = _read_config()
 
+# Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
+from spark_engine import init_engine  # noqa: E402
+
+SPARK_CFG = CONFIG.get("spark") or {}
+SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SPARK_ENGINE = init_engine(SPARK_CFG, SPARK_BASE_DIR)
+if SPARK_ENGINE.enabled:
+    log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
+             SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
+
 # 服务配置(JSON 顶层,缺失用默认值)
 AUTH_TOKEN = str(CONFIG.get("authToken", ""))
 LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
@@ -536,8 +546,67 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),
+            "spark": SPARK_ENGINE.status(),
         },
     }
+
+
+# ── Spark 引擎(集成:常驻 client session + SQL/PySpark + 日志透传)────
+class SparkQueryReq(BaseModel):
+    kind: str = "sql"  # "sql" | "pyspark"
+    sql: Optional[str] = None
+    code: Optional[str] = None
+    writeUnlocked: bool = False
+    timeoutMs: int = 600000
+
+
+@app.post("/spark/query")
+def spark_query(
+    req: SparkQueryReq, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    try:
+        if req.kind == "pyspark":
+            if not req.code:
+                raise HTTPException(status_code=400, detail="code required for pyspark")
+            result = SPARK_ENGINE.execute_code(req.code, req.timeoutMs)
+        else:
+            if not req.sql:
+                raise HTTPException(status_code=400, detail="sql required")
+            result = SPARK_ENGINE.execute_sql(req.sql, req.writeUnlocked, req.timeoutMs)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"code": 0, "data": result}
+
+
+@app.get("/spark/logs")
+def spark_logs(
+    jvm: int = 0, audit: int = 0, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    return {"code": 0, "data": SPARK_ENGINE.read_logs({"jvm": jvm, "audit": audit})}
+
+
+@app.get("/spark/status")
+def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    return {"code": 0, "data": SPARK_ENGINE.status()}
 
 
 # ── 脚本存储(我的目录:保存 SQL 脚本)────────────────────────────

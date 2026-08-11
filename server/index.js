@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
-import { query as sparkQuery } from './spark-livy.js'
+import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus } from './spark-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
@@ -423,7 +423,7 @@ function sparkTokenValid(token) {
   return true
 }
 
-if (config.livyUrl) {
+if (config.dbProxyUrl) {
   // 暴力破解防护:每 IP 失败 5 次锁 10 分钟
   const authFails = new Map() // ip -> { count, lockUntil }
   function authLocked(ip) {
@@ -466,31 +466,62 @@ if (config.livyUrl) {
 
   app.post('/api/spark/query', async (req, res) => {
     try {
-      const { sql } = req.body || {}
+      const { sql, kind } = req.body || {}
+      const k = kind === 'pyspark' ? 'pyspark' : 'sql'
       if (!sql || !String(sql).trim()) {
-        return res.status(400).json({ code: 400, msg: 'sql is required' })
+        return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
       }
-      // 写语句必须解锁
-      if (isSparkWriteSql(sql)) {
+      // 写语句必须解锁(SQL 引擎;pyspark 信任模式由门户网关统一鉴权后放行)
+      let writeUnlocked = false
+      if (k === 'sql' && isSparkWriteSql(sql)) {
         const tk = req.get('X-Spark-Token')
         if (!tk || !sparkTokenValid(tk)) {
           return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入 Spark 写权限密码' })
         }
+        writeUnlocked = true
       }
-      const result = await sparkQuery(String(sql))
+      const result = await sparkQuery(String(sql), { kind: k, writeUnlocked })
       res.json({ code: 0, data: result })
     } catch (e) {
-      // 避免向调用方泄漏 Livy 内部错误明细,统一简化为通用消息并记录日志
       console.error('[spark/query]', e instanceof Error ? e.message : e)
       res.status(502).json({ code: 502, msg: 'spark 查询失败,请查看服务端日志' })
     }
   })
+
+  // Spark driver 日志透传(增量),供前端查询页日志面板展示
+  app.get('/api/spark/logs', async (req, res) => {
+    try {
+      const offset = Number(req.query.offset) || 0
+      const data = await sparkReadLogs(offset)
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[spark/logs]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark 日志读取失败' })
+    }
+  })
+
+  // Spark 引擎状态(会话/appId/配置快照)
+  app.get('/api/spark/status', async (req, res) => {
+    try {
+      const data = await sparkStatus()
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[spark/status]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
+    }
+  })
 } else {
   app.post('/api/spark/auth', (req, res) =>
-    res.status(503).json({ code: 503, msg: 'livy not configured (config.local.json livy.* 或 LIVY_URL 为空)' })
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
   app.post('/api/spark/query', (req, res) =>
-    res.status(503).json({ code: 503, msg: 'livy not configured (config.local.json livy.* 或 LIVY_URL 为空)' })
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+  app.get('/api/spark/logs', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+  app.get('/api/spark/status', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
 }
 

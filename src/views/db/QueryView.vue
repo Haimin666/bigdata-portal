@@ -5,6 +5,7 @@ import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
+import 'codemirror/mode/python/python.js'
 
 // CodeMirror 5 的 addon 是 UMD,在 Vite 的 CJS 转换下注册不稳定
 // (addon 挂到内部 require 的实例,与我们 import 的实例可能不一致)。
@@ -13,14 +14,14 @@ import 'codemirror/mode/sql/sql.js'
 async function loadAddons() {
   // 空:不加载 addon
 }
-import { listDataSources, queryDb, querySpark, sparkAuth, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, querySpark, sparkAuth, sparkLogs, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
 import SqlTreePanel from './SqlTreePanel.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'sparksql' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -93,13 +94,13 @@ function isSparkWriteSql(sql: string): boolean {
   return true
 }
 
-/** Spark 执行:写语句未解锁时先弹密码框;只读查询直接执行 */
-async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (isSparkWriteSql(sql) && !sparkToken.value) {
+/** Spark 执行:SQL 写语句未解锁时先弹密码框;只读 SQL / pyspark 直接执行 */
+async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (kind === 'sql' && isSparkWriteSql(sql) && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写权限未解锁')
   }
-  return querySpark(sql, sparkToken.value || undefined)
+  return querySpark(sql, sparkToken.value || undefined, kind)
 }
 
 // 当前打开的文件(我的目录):保存时写回
@@ -162,17 +163,19 @@ function onSideDragStart(e: MouseEvent) {
   window.addEventListener('mouseup', onUp)
 }
 
-// SparkSQL 虚拟数据源(Livy 引擎,不在 db-proxy 的 /acl 中)
+// SparkSQL / PySpark 虚拟数据源(db-proxy 引擎,不在 /acl 中)
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
+const PYSPARK_SOURCE: DbDataSource = { name: 'pyspark', label: 'PySpark', type: 'pyspark', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql 为虚拟源,不进左侧树)
+// 引擎过滤后的数据源(sparksql/pyspark 为虚拟源,不进左侧树)
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
+  if (engine.value === 'pyspark') return [PYSPARK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
-// 左侧树排除 sparksql 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql'))
+// 左侧树排除 spark 虚拟源(db-proxy 无此库,拉表会报错)
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark'))
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
@@ -327,12 +330,55 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopSparkLogPolling()
   if (cm) {
     const el = cm.getWrapperElement()
     el.remove()
     cm = null
   }
 })
+
+// ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
+const showSparkLogs = ref(false)
+const sparkLogText = ref('')
+const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
+let sparkLogTimer: number | null = null
+
+/** 拉取 spark 日志增量并追加 */
+async function pollSparkLogs() {
+  try {
+    const data = await sparkLogs(sparkLogOffsets.value)
+    if (data.content) {
+      sparkLogText.value += data.content
+      // 日志超长时只保留尾部 500KB
+      if (sparkLogText.value.length > 500000) {
+        sparkLogText.value = sparkLogText.value.slice(-500000)
+      }
+    }
+    sparkLogOffsets.value = data.offsets
+  } catch {
+    /* 日志接口失败不打断查询 */
+  }
+}
+
+function startSparkLogPolling() {
+  stopSparkLogPolling()
+  showSparkLogs.value = true
+  void pollSparkLogs()
+  sparkLogTimer = window.setInterval(() => void pollSparkLogs(), 3000)
+}
+
+function stopSparkLogPolling() {
+  if (sparkLogTimer != null) {
+    window.clearInterval(sparkLogTimer)
+    sparkLogTimer = null
+  }
+}
+
+function clearSparkLogs() {
+  sparkLogText.value = ''
+  sparkLogOffsets.value = { jvm: 0, audit: 0 }
+}
 
 // 画布高度(可拖拽)
 const canvasHeight = ref(280)
@@ -461,8 +507,18 @@ const activeResult = ref(0)
 
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
+  const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
+  if (isSpark) {
+    clearSparkLogs()
+    startSparkLogPolling()
+  }
   try {
-    const r = engine.value === 'sparksql' ? await execSpark(sql) : await queryDb(db.value, sql)
+    const r =
+      engine.value === 'sparksql'
+        ? await execSpark(sql, 'sql')
+        : engine.value === 'pyspark'
+          ? await execSpark(sql, 'pyspark')
+          : await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -473,6 +529,8 @@ async function execOne(sql: string, index: number): Promise<void> {
       truncated: false,
       error: e instanceof Error ? e.message : String(e)
     }
+  } finally {
+    if (isSpark) stopSparkLogPolling()
   }
 }
 
@@ -592,6 +650,11 @@ watch(engine, (val) => {
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
+  // PySpark 模式切 python 高亮,其余保持 SQL 高亮
+  if (cm) {
+    cm.setOption('mode', val === 'pyspark' ? 'python' : 'text/x-sql')
+    cm.refresh()
+  }
 })
 
 /** 单元格是否数值(右对齐) */
@@ -615,6 +678,7 @@ function isNumeric(val: unknown): boolean {
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="SparkSQL" value="sparksql" />
+        <el-option label="PySpark" value="pyspark" />
       </el-select>
       <el-button
         v-if="engine === 'sparksql'"
@@ -731,6 +795,19 @@ function isNumeric(val: unknown): boolean {
           </div>
         </template>
       </div>
+    </div>
+
+    <!-- Spark driver 日志透传(仅 spark 引擎执行时展示) -->
+    <div v-if="showSparkLogs" class="spark-logs-wrap">
+      <div class="spark-logs-head">
+        <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> Spark 引擎日志</span>
+        <span class="spark-logs-actions">
+          <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
+          <el-button text size="small" @click="clearSparkLogs">清空</el-button>
+          <el-button text size="small" @click="showSparkLogs = false; stopSparkLogPolling()">收起</el-button>
+        </span>
+      </div>
+      <pre class="spark-logs-body">{{ sparkLogText || '(等待 Spark 输出…)' }}</pre>
     </div>
 
     <!-- 空状态 -->
@@ -1231,6 +1308,49 @@ function isNumeric(val: unknown): boolean {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Spark 引擎日志透传面板 */
+.spark-logs-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+}
+.spark-logs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  flex-shrink: 0;
+}
+.spark-logs-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.spark-logs-actions {
+  display: flex;
+  align-items: center;
+}
+.spark-logs-body {
+  flex: 1;
+  margin: 0;
+  padding: 10px 14px;
+  overflow: auto;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
 }
 
 .spark-lock-btn {

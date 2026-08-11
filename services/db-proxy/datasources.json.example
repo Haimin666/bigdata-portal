@@ -19,6 +19,26 @@
   "writableTables": ["finance_order_trade.*"],
   "executableProcedures": ["credzy.update_balance"],
   "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
+  "spark": {
+    "enabled": false,
+    "master": "yarn",
+    "deployMode": "client",
+    "appName": "db-proxy-spark",
+    "driverMemory": "4g",
+    "executorMemory": "8g",
+    "executorCores": 2,
+    "maxExecutors": 15,
+    "minExecutors": 1,
+    "executorIdleTimeout": "120s",
+    "queue": "default",
+    "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
+    "defaultLimit": 1000,
+    "maxLimit": 10000,
+    "maxSqlLen": 65536,
+    "allowWrite": false,
+    "logDir": "spark-logs",
+    "sparkConf": {}
+  },
   "datasources": [
     {
       "name": "sq_ccrs2",

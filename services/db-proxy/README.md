@@ -116,3 +116,62 @@ python3.7 main.py
 
 > 提示:客户机防火墙需放行 8756 端口,并确认平台服务器能访问
 > `10.25.15.106:8756`(可用 `curl http://10.25.15.106:8756/health` 验证)。
+
+## Spark 引擎(自建网关,替代 Livy)
+
+db-proxy 内集成一个**常驻 client 模式 SparkSession**(自建 Spark 网关,放弃 Livy),
+SQL 与 PySpark 代码共用同一 session,支持临时视图跨请求保留。
+
+### 配置(datasources.json 顶层 `spark` 段,缺省 = 引擎禁用)
+
+```json
+"spark": {
+  "enabled": true,
+  "master": "yarn",
+  "deployMode": "client",
+  "appName": "db-proxy-spark",
+  "driverMemory": "4g",
+  "executorMemory": "8g",
+  "executorCores": 2,
+  "maxExecutors": 15,
+  "minExecutors": 1,
+  "queue": "default",
+  "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
+  "defaultLimit": 1000,
+  "maxLimit": 10000,
+  "maxSqlLen": 65536,
+  "allowWrite": false,
+  "logDir": "spark-logs",
+  "sparkConf": {}
+}
+```
+
+### 特性
+
+- **懒加载**:首次 `/spark/query` 才创建 SparkSession;未配 spark 或未装 pyspark 不影响
+  MySQL/Oracle 查询(db-proxy 启动即用)。
+- **串行执行**:同一时刻只跑一个请求(threading.Lock),避免 SparkSession 并发串扰。
+- **SQL 写限制**:默认只读——`SELECT/SHOW/DESC/EXPLAIN/SET/USE` 放行;写语句
+  (INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等)需 `allowWrite: true` 且请求带
+  `writeUnlocked: true`(由门户网关在 X-Spark-Token 校验通过后置位)。
+- **PySpark 代码**:信任模式(执行于 `{spark, sc}` 命名空间),完整审计日志;
+  代码里把结果赋给 `result` 变量(DataFrame 或 dict 列表)即返回表格,
+  否则返回 `print()` 捕获的 stdout。
+- **日志透传**:log4j 重定向到 `spark-logs/spark-jvm.log`(driver JVM 日志),
+  Python 侧审计写 `spark-logs/spark-audit.log`;`GET /spark/logs?offset=N` 增量读取,
+  门户前端查询页自动轮询展示。
+
+### 依赖
+
+- Python 3.8+ 且安装 `pyspark`(版本与目标集群 Spark 匹配,如 `pyspark==3.4.2`)。
+- 运行机器需可提交 YARN(spark-submit 客户端、HADOOP_CONF_DIR)并直连 Hive Metastore
+  (thrift://hadoop-nn-1:9083)。
+- SparkSession 创建耗时较长(30~90s),首个请求会等待;之后复用常驻 session。
+
+### 接口
+
+| 端点 | 说明 |
+|---|---|
+| `POST /spark/query` | body `{kind: "sql"\|"pyspark", sql/code, writeUnlocked, timeoutMs}` |
+| `GET /spark/logs?offset=N` | 增量读取 driver 日志 |
+| `GET /spark/status` | session 状态 / appId / 配置快照 |
