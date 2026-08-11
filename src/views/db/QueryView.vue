@@ -21,7 +21,7 @@ defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'sparksql' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -94,13 +94,13 @@ function isSparkWriteSql(sql: string): boolean {
   return true
 }
 
-/** Spark 执行:SQL 写语句未解锁时先弹密码框;只读 SQL / pyspark 直接执行 */
-async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (kind === 'sql' && isSparkWriteSql(sql) && !sparkToken.value) {
+/** Spark 执行:SQL 写语句未解锁时先弹密码框;只读 SQL 直接执行 */
+async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (isSparkWriteSql(sql) && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写权限未解锁')
   }
-  return querySpark(sql, sparkToken.value || undefined, kind)
+  return querySpark(sql, sparkToken.value || undefined)
 }
 
 // 当前打开的文件(我的目录):保存时写回
@@ -163,19 +163,17 @@ function onSideDragStart(e: MouseEvent) {
   window.addEventListener('mouseup', onUp)
 }
 
-// SparkSQL / PySpark 虚拟数据源(db-proxy 引擎,不在 /acl 中)
+// SparkSQL 虚拟数据源(db-proxy 引擎,不在 /acl 中)
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
-const PYSPARK_SOURCE: DbDataSource = { name: 'pyspark', label: 'PySpark', type: 'pyspark', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql/pyspark 为虚拟源,不进左侧树)
+// 引擎过滤后的数据源(sparksql 为虚拟源,不进左侧树)
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
-  if (engine.value === 'pyspark') return [PYSPARK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
 // 左侧树排除 spark 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark'))
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql'))
 
 // ── CodeMirror 编辑器 ───────────────────────────────────────
 const cmRef = ref<HTMLElement>()
@@ -507,18 +505,13 @@ const activeResult = ref(0)
 
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
-  const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
+  const isSpark = engine.value === 'sparksql'
   if (isSpark) {
     clearSparkLogs()
     startSparkLogPolling()
   }
   try {
-    const r =
-      engine.value === 'sparksql'
-        ? await execSpark(sql, 'sql')
-        : engine.value === 'pyspark'
-          ? await execSpark(sql, 'pyspark')
-          : await queryDb(db.value, sql)
+    const r = engine.value === 'sparksql' ? await execSpark(sql) : await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -636,7 +629,10 @@ onMounted(async () => {
   try {
     datasources.value = await listDataSources()
     if (datasources.value.length) {
-      engine.value = datasources.value[0].type
+      const first = datasources.value.find(
+        (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'sparksql'
+      )
+      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
       ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
@@ -650,9 +646,8 @@ watch(engine, (val) => {
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
-  // PySpark 模式切 python 高亮,其余保持 SQL 高亮
   if (cm) {
-    cm.setOption('mode', val === 'pyspark' ? 'python' : 'text/x-sql')
+    cm.setOption('mode', 'text/x-sql')
     cm.refresh()
   }
 })
@@ -678,7 +673,6 @@ function isNumeric(val: unknown): boolean {
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="SparkSQL" value="sparksql" />
-        <el-option label="PySpark" value="pyspark" />
       </el-select>
       <el-button
         v-if="engine === 'sparksql'"
