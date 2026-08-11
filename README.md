@@ -75,23 +75,28 @@ scripts/npmctl.sh build     # 仅构建前端
 
 进程信息:`scripts/npmctl.sh` 将主进程 PID 写入项目根 `.portal.pid`,日志在 `.portal.log`;端口可用环境变量 `PORT` 覆盖。
 
-## 环境变量(server/config.js,支持项目根 .env.local)
+## 配置(唯一来源:server/config.local.json)
 
-| 变量 | 默认值 | 说明 |
+所有网关配置集中在一个文件:**`server/config.local.json`**(gitignore 不入库,含账号/令牌)。
+把 `server/config.local.example.json` 复制为 `config.local.json` 并按环境修改即可,缺省字段回退默认值。
+
+| 字段 | 默认值 | 说明 |
 |---|---|---|
-| `PORT` | `3000` | 网关端口 |
-| `GATEWAY_URL` | `http://localhost:3000` | Vite dev 代理目标 |
-| `YARN_RM_LIST` | `http://hadoop-nn-1.bigdata.shiqiao.com:8088` | RM 列表(逗号分隔) |
-| `HDFS_URL` | `http://hadoop-nn-1.bigdata.shiqiao.com:9870` | HDFS NameNode |
-| `DS_WEB_URL` | `http://olds.bigdata.shiqiao.com/dolphinscheduler` | 海豚 |
-| `OMD_URL` | `https://omd.corp.shiqiao.com` | OMD |
-| `STINGRAY_URL` | `http://stingray.corp.shiqiao.com` | Stingray |
-| `DSWEB_USER/PASS` | — | 海豚自动登录凭证 |
-| `DS_TOKEN` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,任务监控项目列表即该 token 用户可见(无无权限项目);换 token 改此项后重启网关 |
-| `STINGRAY_USER/PASS` | — | Stingray 自动登录凭证 |
-| `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
+| `port` | `3000` | 网关端口(shell/docker 显式 `PORT` 优先) |
+| `yarnRmList` | `http://hadoop-nn-1.bigdata.shiqiao.com:8088` | RM 列表(逗号分隔) |
+| `hdfsUrl` | `http://hadoop-nn-1.bigdata.shiqiao.com:9870` | HDFS NameNode |
+| `dsWebUrl` | `http://olds.bigdata.shiqiao.com/dolphinscheduler` | 海豚 |
+| `omdUrl` | `https://omd.corp.shiqiao.com` | OMD |
+| `stingrayUrl` | `http://stingray.corp.shiqiao.com` | Stingray |
+| `dsToken` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,任务监控项目列表即该 token 用户可见(无无权限项目);换 token 改此项后重启网关 |
+| `dbProxyUrl` | — | 客户机 DB 代理服务地址(如 `http://10.25.15.106:8756`),空则数据库查询不可用 |
+| `dbProxyToken` | — | db-proxy 鉴权 token(与客户机 `datasources.json` 的 `authToken` 一致) |
+| `livy` | `hadoop-task-1.bigdata.shiqiao.com:8998` | Livy(Spark SQL)地址,`{scheme, host, port}` |
+| `sparkWritePassword` | — | Spark SQL 写操作解锁密码;空则写语句一律禁止(只读) |
+| `accounts.dsWeb/omd/stingray/streamx` | — | 各子系统自动登录凭证(`{user, pass}`) |
 
-凭证只放 `.env.local`(gitignore),不入库;前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先。
+凭证只放 `config.local.json`(gitignore),不入库;前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先。
+改配置后需重启网关(dev 一键脚本里网关是独立进程,不会自动重启)。
 
 ## 子应用接入说明
 
@@ -137,7 +142,7 @@ NPM_REGISTRY=<内网 npm 源,可选> \
 scripts/dockerctl.sh up
 ```
 
-`docker-compose.yml` 已声明健康检查(探测 `/api/config`),凭证与各系统地址由运行时注入项目根 `.env.local`(不影响构建,不进镜像);无需凭证也能启动,仅子系统免登录回退默认值。
+`docker-compose.yml` 已声明健康检查(探测 `/api/config`),配置唯一来源 `server/config.local.json` 挂载只读进容器(不影响构建,不入镜像);无需凭证也能启动,仅子系统免登录回退默认值。
 
 ### Nginx 前置(可选)
 

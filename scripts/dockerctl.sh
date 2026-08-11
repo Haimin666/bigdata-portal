@@ -15,7 +15,7 @@
 #   ps       查看容器状态
 #
 # 前置:已安装 Docker(含 docker compose v2,或旧版 docker-compose)。
-# 凭证与各系统地址从项目根 .env.local 注入(见 docker-compose.yml)。
+# 配置唯一来源:server/config.local.json(挂载进容器,不入库)。
 # 内网构建(无法访问 docker.io)时,用环境变量指定基础镜像与 npm 源,如:
 #   BASE_IMAGE=harbor.example.com/library/node:20-alpine NPM_REGISTRY=http://npm.example.com/repository/npm-public/ ./scripts/dockerctl.sh up
 # ============================================================================
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 COMPOSE_FILE="docker-compose.yml"
-ENV_FILE=".env.local"
+ENV_FILE="server/config.local.json"
 IMAGE="bigdata-portal:latest"
 
 # 兼容 docker compose(v2)与 docker-compose(v1)

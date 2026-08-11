@@ -1,9 +1,8 @@
 # bigdata-portal Docker Compose
 #
 # 一键脚本入口:scripts/dockerctl.sh(等价命令见 README)。
-# 配置优先读 server/config.local.json(挂载只读,含账号/令牌,不入库);
-# 缺省字段回退 .env.local 环境变量 / 默认值。
-# 若两者都缺失,服务仍可启动,但子系统地址/免登录凭证回退到默认值。
+# 配置唯一来源:server/config.local.json(挂载只读,含账号/令牌,不入库)。
+# 若该文件缺失,服务仍可启动,但子系统地址/免登录凭证回退到默认值。
 services:
   portal:
     build:
@@ -20,14 +19,10 @@ services:
     ports:
       # 宿主机 9910 → 容器 9910(容器内网关监听 PORT=9910,healthcheck 同上)
       - "9910:9910"
-    env_file:
-      - .env.local
     environment:
       NODE_ENV: production
-      # 网关监听端口与对外保持一致(server/config.js 读 PORT)
+      # 网关监听端口与对外保持一致(server/config.js 读 PORT,显式环境变量优先)
       PORT: 9910
-      # 工作流依赖缓存文件(docker 需挂载目录持久化,见 volumes)
-      DS_DEPS_CACHE_FILE: /app/data/ds-deps.json
       # Jupyter 容器 host 网络监听宿主机 8888,经 host.docker.internal 访问;
       # 若 jupyter 跑在其他机器,改为 http://该机器IP:8888
       JUPYTER_URL: ${JUPYTER_URL:-http://host.docker.internal:8888}
@@ -37,7 +32,7 @@ services:
     volumes:
       # 依赖缓存持久化(重启不丢;采集 4000+ 工作流需数分钟)
       - ./data:/app/data
-      # 网关 JSON 配置挂载只读(优先配置源;账号/令牌都在这里,不入库)
+      # 网关 JSON 配置挂载只读(唯一配置源;账号/令牌都在这里,不入库)
       - ./server/config.local.json:/app/server/config.local.json:ro
     healthcheck:
       # 网关 /api/config 返回 200 视为健康

@@ -20,10 +20,9 @@ import config from './config.js'
 const DS_BASE = config.dsWebUrl
 const DS_TOKEN = config.dsToken || ''
 // 缓存文件路径(默认项目根 data/;docker 挂载 /app/data)
-const CACHE_FILE =
-  process.env.DS_DEPS_CACHE_FILE || path.join(import.meta.dirname, '../data/ds-deps.json')
+const CACHE_FILE = config.dsDepsCacheFile
 // 定时刷新周期(毫秒,默认 1h)
-const REFRESH_INTERVAL = parseInt(process.env.DS_DEPS_REFRESH_INTERVAL || String(60 * 60 * 1000), 10)
+const REFRESH_INTERVAL = config.dsDepsRefreshInterval
 // 采集并发数
 const CONCURRENCY = 10
 

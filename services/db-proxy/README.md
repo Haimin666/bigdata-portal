@@ -106,11 +106,12 @@ python3.7 main.py
 
 ## 平台接入
 
-平台网关 `server/config.js` 配置 `DB_PROXY_URL`(如 `http://10.25.15.106:8756`),
-网关 `/api/db/*` 会代理到该地址。平台服务器 `.env.local` 加:
+平台网关 `server/config.js` 配置 `dbProxyUrl`(如 `http://10.25.15.106:8756`),
+网关 `/api/db/*` 会代理到该地址。平台服务器 `server/config.local.json` 加:
 
-```bash
-DB_PROXY_URL=http://10.25.15.106:8756
+```json
+"dbProxyUrl": "http://10.25.15.106:8756",
+"dbProxyToken": "与客户机 datasources.json 的 authToken 一致"
 ```
 
 > 提示:客户机防火墙需放行 8756 端口,并确认平台服务器能访问

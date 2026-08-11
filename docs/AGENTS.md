@@ -60,7 +60,9 @@ bigdata-portal/
 │   └── types/ utils/ styles/
 ├── server/
 │   ├── index.js                 # Express 网关(代理/登录/config/WebSocket)
-│   └── config.js                # 环境变量 + .env.local 加载
+│   ├── config.js                # 读 server/config.local.json(唯一配置源)
+│   ├── config.local.example.json# 配置模板(复制为 config.local.json 使用)
+│   ├── config.local.json        # 实际配置(gitignore 不入库,含账号/令牌)
 ├── scripts/dev.mjs              # 一键启动:网关 + Vite
 ├── vite.config.ts               # dev 代理(ws:true)
 ├── package.json / tsconfig.json / Dockerfile
@@ -82,27 +84,26 @@ npm run dev:vite     # 前端
 - 修改 `src/*` 由 Vite HMR 热更新;改 `src/config/menu.ts` 会整页 reload
 - 提交前必须:`npx vue-tsc --noEmit` 与 `npm run build`
 
-## 5. 环境变量与凭证
+## 5. 配置与凭证
 
-**`server/config.js` 启动时零依赖加载项目根 `.env.local`**(已 gitignore,不入库)。已存在的环境变量优先于 .env.local。
+**配置唯一来源:`server/config.local.json`**(已 gitignore,不入库)。启动时优先读该 JSON,缺省字段回退环境变量/默认值;已不读取 `.env.local`。
 
-| 变量 | 默认值 | 说明 |
+| JSON 字段 | 默认值 | 说明 |
 |---|---|---|
-| `PORT` | `3000` | 网关端口 |
-| `GATEWAY_URL` | `http://localhost:3000` | Vite 代理目标(dev) |
-| `YARN_RM_LIST` | `http://hadoop-nn-1...:8088` | RM 列表(逗号分隔) |
-| `HDFS_URL` | `http://hadoop-nn-1...:9870` | HDFS NameNode |
-| `DS_WEB_URL` | `http://olds.../dolphinscheduler` | 海豚 |
-| `OMD_URL` | `https://omd.corp.shiqiao.com` | OMD |
-| `STINGRAY_URL` | `http://stingray.corp.shiqiao.com` | Stingray |
-| `DSWEB_USER/PASS` | — | 海豚自动登录凭证 |
-| `DS_TOKEN` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,项目列表即该 token 用户可见;任务监控/海豚 UI 免登录均依赖它 |
-| `STINGRAY_USER/PASS` | — | Stingray 自动登录凭证(密码带点!) |
+| `port` | `3000` | 网关端口(显式环境变量 `PORT` 优先) |
+| `yarnRmList` | `http://hadoop-nn-1...:8088` | RM 列表(逗号分隔) |
+| `hdfsUrl` | `http://hadoop-nn-1...:9870` | HDFS NameNode |
+| `dsWebUrl` | `http://olds.../dolphinscheduler` | 海豚 |
+| `omdUrl` | `https://omd.corp.shiqiao.com` | OMD |
+| `stingrayUrl` | `http://stingray.corp.shiqiao.com` | Stingray |
+| `accounts.dsWeb.user/pass` | — | 海豚自动登录凭证 |
+| `dsToken` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,项目列表即该 token 用户可见;任务监控/海豚 UI 免登录均依赖它 |
+| `accounts.stingray.user/pass` | — | Stingray 自动登录凭证(密码带点!) |
 | `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
 
 **凭证规则**:
-- 敏感凭证只放 `.env.local`,**禁止写死进代码/提交 git**
-- 前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先于网关 env 兜底
+- 敏感凭证只放 `server/config.local.json`,**禁止写死进代码/提交 git**(gitignore 已忽略)
+- 前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先于网关配置兜底
 
 ## 6. 子应用接入方式
 
@@ -176,7 +177,7 @@ npm run dev:vite     # 前端
 
 12. **OMD 登录有风控**:连续失败触发锁定(`Failed Login Attempts Exceeded`),调试最多试 3 次,不通询问用户(见记忆 omd-login-risk-control)。
 
-13. **`.env.local` 由 server/config.js 启动时加载**(零依赖),已存在 env 优先。改 .env.local 后需重启网关(dev 一键脚本里网关是独立进程,不会自动重启)。
+13. **配置唯一来源 `server/config.local.json`**(server/config.js 启动时读取,已不再加载 .env.local)。改配置后需重启网关(dev 一键脚本里网关是独立进程,不会自动重启)。
 
 14. **Node 24 的噪音警告处理**:`util._extend` 来自 http-proxy@1.18.1(已停维护),启动参数加 `--no-deprecation` 抑制;`MaxListenersExceededWarning` 由 http-proxy-middleware v3 每个代理实例注册 close 监听导致,`EventEmitter.defaultMaxListeners = 20` 放宽。
 
@@ -184,7 +185,7 @@ npm run dev:vite     # 前端
 
 ## 9. 与开发人员的配合规则
 
-1. **凭证安全**:密码只写 `.env.local`(gitignore),绝不硬编码进源码或提交;查看/修改凭证前先确认不泄露。
+1. **凭证安全**:密码只写 `server/config.local.json`(gitignore),绝不硬编码进源码或提交;查看/修改凭证前先确认不泄露。
 2. **OMD 登录调试**:最多 3 次,3 次不通停止,用 ask 询问用户(风控会锁账号)。
 3. **内网系统验证**:YARN/HDFS/海豚/Stingray/OMD 均为内网,改动代理后必须重启网关并用 curl 实测链路(资源 200、登录 API 行为),不能只改代码不验证。
 4. **服务运行**:开发调试时保持 `npm run dev` 后台运行(bash background job),修改 server 代码后重启网关进程再验证。

@@ -1,5 +1,5 @@
-// 网关配置:优先读 server/config.local.json(唯一配置源),
-// 缺失字段回退到环境变量 / 默认值(兼容旧 .env.local 部署)。
+// 网关配置:唯一配置源 server/config.local.json(gitignore 不入库),
+// 缺失字段回退到环境变量 / 默认值(兼容旧部署,运行时不再读取 .env.local)。
 
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -12,18 +12,6 @@ if (existsSync(cfgFile)) {
     fileCfg = JSON.parse(readFileSync(cfgFile, 'utf8'))
   } catch (e) {
     console.error(`[config] 解析 ${cfgFile} 失败:${e.message},回退到环境变量`)
-  }
-}
-
-// ── 2. 加载项目根 .env.local(零依赖,仅填充未设置的环境变量)────
-// shell 显式 export 的优先于 .env.local。
-const envFile = path.join(import.meta.dirname, '../.env.local')
-if (existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line)
-    if (m && process.env[m[1]] === undefined) {
-      process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
-    }
   }
 }
 
@@ -107,5 +95,9 @@ export default {
       user: pick(fileCfg.accounts?.streamx?.user, 'STREAMX_USER', ''),
       pass: pick(fileCfg.accounts?.streamx?.pass, 'STREAMX_PASS', '')
     }
-  }
+  },
+  // 存储路径(默认项目内 data/,docker 挂载 ./data:/app/data 自动对齐)
+  dbScriptsDir: pick(fileCfg.dbScriptsDir, 'DB_SCRIPTS_DIR', path.join(import.meta.dirname, '../data/scripts')),
+  dsDepsCacheFile: pick(fileCfg.dsDepsCacheFile, 'DS_DEPS_CACHE_FILE', path.join(import.meta.dirname, '../data/ds-deps.json')),
+  dsDepsRefreshInterval: pickInt(fileCfg.dsDepsRefreshInterval, 'DS_DEPS_REFRESH_INTERVAL', 60 * 60 * 1000)
 }

@@ -5,9 +5,9 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import config from './config.js'
 
-const SCRIPTS_DIR =
-  process.env.DB_SCRIPTS_DIR || path.join(import.meta.dirname, '../data/scripts')
+const SCRIPTS_DIR = config.dbScriptsDir
 const TREE_FILE = path.join(SCRIPTS_DIR, 'tree.json')
 const FILES_DIR = path.join(SCRIPTS_DIR, 'files')
 
