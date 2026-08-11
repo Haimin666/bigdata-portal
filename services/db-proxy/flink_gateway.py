@@ -143,7 +143,11 @@ class FlinkGateway:
                             "message": "查询已取消",
                         }
                     st = self._op_status(sid, op_id)
-                    state = (st.get("status") or {}).get("status", "RUNNING")
+                    # Flink 1.17:status 字段是字符串("RUNNING"),不是嵌套对象
+                    state = st.get("status")
+                    if isinstance(state, dict):
+                        state = state.get("status", "RUNNING")
+                    state = str(state or "RUNNING").upper()
                     if state in ("FINISHED", "COMPLETED"):
                         rows, truncated = self._fetch_results(
                             sid, op_id, max_rows, start
@@ -158,7 +162,9 @@ class FlinkGateway:
                             "message": "",
                         }
                     if state == "FAILED":
-                        err = (st.get("status") or {}).get("error", "")
+                        err = st.get("error") or (st.get("status") if isinstance(st.get("status"), str) else "")
+                        if not err and isinstance(st.get("status"), dict):
+                            err = st["status"].get("error", "")
                         raise RuntimeError(f"flink 执行失败: {err or 'unknown error'}")
                     if state == "CANCELED":
                         return {
@@ -209,7 +215,11 @@ class FlinkGateway:
             results = data.get("results") or {}
             columns = results.get("columns") or []
             rows_data = results.get("data") or []
-            cols = [c.get("name", f"col{i}") for i, c in enumerate(columns)]
+            # columns 可能是对象数组 [{"name":"id",...}] 或字符串数组 ["id","name"]
+            if columns and isinstance(columns[0], dict):
+                cols = [c.get("name", f"col{i}") for i, c in enumerate(columns)]
+            else:
+                cols = [str(c) for c in columns]
 
             if not rows_data:
                 break
