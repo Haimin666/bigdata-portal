@@ -56,16 +56,6 @@ def _read_config() -> Dict[str, Any]:
 
 CONFIG = _read_config()
 
-# Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
-from spark_engine import init_engine  # noqa: E402
-
-SPARK_CFG = CONFIG.get("spark") or {}
-SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SPARK_ENGINE = init_engine(SPARK_CFG, SPARK_BASE_DIR)
-if SPARK_ENGINE.enabled:
-    log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
-             SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
-
 # 服务配置(JSON 顶层,缺失用默认值)
 AUTH_TOKEN = str(CONFIG.get("authToken", ""))
 LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
@@ -100,6 +90,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("db-proxy")
+
+# Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
+from spark_engine import init_engine  # noqa: E402
+
+SPARK_CFG = CONFIG.get("spark") or {}
+SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SPARK_ENGINE = init_engine(SPARK_CFG, SPARK_BASE_DIR)
+if SPARK_ENGINE.enabled:
+    log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
+             SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
 
 # 驱动按需导入(未装对应驱动不阻塞另一个类型)
 try:
