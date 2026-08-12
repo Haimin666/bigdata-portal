@@ -124,6 +124,8 @@ function goUserManage() {
     color: $primary;
     font-weight: 600;
     border-color: $primary;
+    box-shadow: inset 0 2px 0 $primary;
+    background: color-mix(in srgb, $primary 5%, transparent);
   }
 }
 

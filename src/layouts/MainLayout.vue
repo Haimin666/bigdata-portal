@@ -88,26 +88,90 @@ function onFullscreenChange() {
 }
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
 onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
+
+// ── 顶部状态条时钟 ──
+const clockText = ref('')
+let clockTimer: ReturnType<typeof setInterval> | null = null
+function tickClock() {
+  clockText.value = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+}
+onMounted(() => {
+  tickClock()
+  clockTimer = setInterval(tickClock, 1000)
+})
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
+})
 </script>
 
 <template>
-  <el-container class="portal-layout">
-    <SideBar :collapsed="collapsed" @select="handleSelect" @toggle-collapse="collapsed = !collapsed" />
-    <el-container>
-      <el-main class="portal-main">
-        <TabStage
-          :tabs="tabs"
-          @switch="handleTabSwitch"
-          @close="closeTab"
-          @refresh="handleRefresh"
-          @toggle-fullscreen="toggleFullscreen"
-        />
-      </el-main>
+  <div class="portal-root">
+    <!-- 顶部状态条(深空控制台) -->
+    <div class="portal-statusbar">
+      <span class="sb-left"><span class="sb-dot"></span>BIGDATA-PORTAL // CONSOLE ONLINE</span>
+      <span class="sb-right">{{ clockText }}</span>
+    </div>
+    <el-container class="portal-layout">
+      <SideBar :collapsed="collapsed" @select="handleSelect" @toggle-collapse="collapsed = !collapsed" />
+      <el-container>
+        <el-main class="portal-main">
+          <TabStage
+            :tabs="tabs"
+            @switch="handleTabSwitch"
+            @close="closeTab"
+            @refresh="handleRefresh"
+            @toggle-fullscreen="toggleFullscreen"
+          />
+        </el-main>
+      </el-container>
     </el-container>
-  </el-container>
+  </div>
 </template>
 
 <style scoped lang="scss">
+.portal-root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶部状态条(深空控制台) */
+.portal-statusbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 18px;
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: $muted;
+  border-bottom: 1px solid var(--bd-border);
+  background: color-mix(in srgb, $bg 85%, transparent);
+}
+.sb-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px #34d399;
+  animation: sbPulse 1.6s infinite;
+}
+@keyframes sbPulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.sb-right {
+  color: $muted;
+}
+
 .portal-layout {
   height: 100%;
 }

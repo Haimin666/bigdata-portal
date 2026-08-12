@@ -62,7 +62,8 @@ onMounted(async () => {
 <template>
   <el-aside :width="props.collapsed ? '64px' : '220px'" class="portal-aside">
     <div class="portal-logo">
-      <span class="logo-text">大数据门户</span>
+      <span class="logo-dot"></span>
+      <span class="logo-text">BIGDATA 门户</span>
     </div>
     <el-menu
       :default-active="activePath"
@@ -97,16 +98,58 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   height: 56px;
+  font-size: 15px;
   font-weight: 700;
+  letter-spacing: 3px;
   color: $text;
   white-space: nowrap;
   overflow: hidden;
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  border-bottom: 1px solid var(--bd-border);
+}
+.logo-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: $primary;
+  box-shadow: 0 0 8px $primary;
+  animation: logoPulse 1.6s infinite;
+}
+@keyframes logoPulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .portal-menu {
   border-right: none;
   background: transparent;
+
+  /* 菜单项 hover/选中:深空控制台(青色 ▸ 指示) */
+  :deep(.el-menu-item) {
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: $muted;
+    height: 44px;
+    line-height: 44px;
+    transition: color 0.2s, background 0.2s;
+  }
+  :deep(.el-menu-item:hover) {
+    color: $text;
+    background: color-mix(in srgb, $primary 6%, transparent);
+  }
+  :deep(.el-menu-item.is-active) {
+    color: $primary;
+    background: color-mix(in srgb, $primary 9%, transparent);
+    border-right: 2px solid $primary;
+  }
+  :deep(.el-menu-item.is-active)::before {
+    content: '▸';
+    margin-right: 6px;
+    font-size: 11px;
+  }
 }
 
 .collapse-bar {
