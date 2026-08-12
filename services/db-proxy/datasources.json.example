@@ -43,7 +43,7 @@
   "flink": {
     "enabled": true,
     "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
-    "yarnAppId": "application_1640577060002_5162757",
+    "yarnAppId": "application_1640577060002_5164597",
     "sessionName": "db-proxy-flink-session",
     "queue": "default",
     "defaultLimit": 1000,
@@ -61,9 +61,11 @@
         "type": "mysql-cdc",
         "defaults": {
           "hostname": "mysql-bi.corp.shiqiao.com",
-          "port": "3344",
-          "username": "dsj_reader",
-          "password": "Zv3.cJl5jYIEUvgXfq",
+          "port": "3343",
+          "username": "bigdata_cdc",
+          "password": "s5C7tJdBRT.4",
+          "scan.incremental.snapshot.enabled": "true",
+          "scan.incremental.snapshot.chunk.key-column": "id",
           "scan.startup.mode": "initial"
         },
         "dynamicFields": [
@@ -77,7 +79,7 @@
         "label": "Kafka",
         "type": "kafka",
         "defaults": {
-          "properties.bootstrap.servers": "KAFKA_BROKER_1:9092,KAFKA_BROKER_2:9092",
+          "properties.bootstrap.servers": "kafka-01.bigdata.shiqiao.com:9092,kafka-02.bigdata.shiqiao.com:9092,kafka-03.bigdata.shiqiao.com:9092",
           "properties.group.id": "flusr_dbproxy",
           "scan.startup.mode": "earliest-offset",
           "format": "json"
