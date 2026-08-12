@@ -49,7 +49,12 @@
     "defaultLimit": 1000,
     "maxLimit": 10000,
     "queryTimeout": 300,
-    "allowWrite": false
+    "allowWrite": false,
+    "pipelineJars": [
+      "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
+      "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",
+      "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-kafka-1.17.2.jar"
+    ]
   },
   "datasources": [
     {

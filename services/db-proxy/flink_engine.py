@@ -5,10 +5,19 @@
 连接已部署的 Flink YARN Session(execution.target=yarn-session),
 SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡顿。
 
+支持脚本式执行(与 Flink SQL Client 一致):
+  SET 'key' = 'value';
+  CREATE CATALOG xxx WITH (...);
+  USE CATALOG `xxx`;
+  CREATE TABLE ... WITH (connector = 'mysql-cdc' / 'paimon' / 'kafka' ...);
+  SELECT ...;
+按 `;` 分割逐条执行,最后一条查询语句的结果返回给前端。
+
 要求:
 - apache-flink==1.17.2(pip 安装)
 - Java 11(PyFlink 1.17 需要;javaHome 配置项指定,不污染系统环境变量)
 - HADOOP_CONF_DIR 可访问(连 YARN 用)
+- connector jar(paimon / mysql-cdc / kafka 等)通过 pipelineJars 配置加载
 
 配置段(datasources.json -> "flink"):
 {
@@ -19,8 +28,12 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
   "queue": "default",                       # 提交 job 的 YARN 队列(可选)
   "defaultLimit": 1000,
   "maxLimit": 10000,
-  "queryTimeout": 300,                      # 结果 collect 超时(秒)
-  "allowWrite": false                       # true 才允许 DDL/DML,默认只读
+  "queryTimeout": 300,                      # 查询结果收集超时(秒),防流式源阻塞
+  "allowWrite": false,                      # true 才允许 DDL/DML,默认只读
+  "pipelineJars": [                         # connector jar,file:// 或绝对路径
+    "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
+    "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar"
+  ]
 }
 """
 
@@ -28,7 +41,7 @@ import os
 import re
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from spark_engine import is_write_sql  # 复用 SQL 读写白名单判定
 
@@ -46,6 +59,47 @@ def _clean_sql(sql: str) -> str:
     s = re.sub(r"--[^\n]*", "", sql)
     s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
     return s.strip().strip(";").strip()
+
+
+def split_flink_sql(script: str) -> List[str]:
+    """按 `;` 分割 Flink SQL 脚本,跳过单引号字符串与注释内的分号。"""
+    statements: List[str] = []
+    cur: List[str] = []
+    in_str = False
+    in_line_comment = False
+    i, n = 0, len(script)
+    while i < n:
+        c = script[i]
+        nxt = script[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            cur.append(c)
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if c == "-" and nxt == "-":
+            in_line_comment = True
+            cur.append(c)
+            i += 1
+            continue
+        if c == "'":
+            in_str = not in_str
+            cur.append(c)
+            i += 1
+            continue
+        if c == ";" and not in_str:
+            s = "".join(cur).strip()
+            if s:
+                statements.append(s)
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    s = "".join(cur).strip()
+    if s:
+        statements.append(s)
+    return statements
 
 
 def _extract_columns_schema(result) -> List[str]:
@@ -156,6 +210,22 @@ class FlinkEngine:
         queue = str(self.cfg.get("queue", "")).strip()
         if queue:
             config.set_string("yarn.application.queue", queue)
+        # connector jar(paimon / mysql-cdc / kafka ...)
+        jars = self.cfg.get("pipelineJars") or []
+        if isinstance(jars, str):
+            jars = [j for j in jars.replace(";", ",").split(",") if j.strip()]
+        if jars:
+            jar_list = []
+            for j in jars:
+                j = j.strip()
+                if not j:
+                    continue
+                if not j.startswith("file:"):
+                    j = "file://" + j
+                jar_list.append(j)
+            config.set_string("pipeline.jars", ";".join(jar_list))
+            if log:
+                log.info("flink pipeline.jars=%d", len(jar_list))
 
         settings = (
             EnvironmentSettings.new_instance()
@@ -166,66 +236,147 @@ class FlinkEngine:
         return TableEnvironment.create(settings)
 
     # ── 查询 ──────────────────────────────────────────────
-    def execute_sql(self, sql: str, limit: int = 0) -> Dict[str, Any]:
-        """执行 FlinkSQL:SELECT 返回表格;DDL/DML 受 allowWrite 控制。"""
+    def execute_script(self, script: str, limit: int = 0) -> Dict[str, Any]:
+        """执行 Flink SQL 脚本(多条语句,`;` 分隔)。
+
+        - SET 'k' = 'v'            → 会话配置
+        - USE [CATALOG] `x`        → 切换 catalog / database
+        - CREATE CATALOG / TABLE   → DDL(受 allowWrite 控制)
+        - SELECT / SHOW / DESC     → 查询,最后一条的结果返回
+        """
         self._ensure_initialized()
         with self._lock:
-            clean = _clean_sql(sql)
-            if not clean:
+            statements = split_flink_sql(script)
+            if not statements:
                 raise ValueError("empty sql")
-            if is_write_sql(clean) and not self._allow_write:
-                raise PermissionError(
-                    "flink write is disabled (datasources.json flink.allowWrite=false), "
-                    "only SELECT/SHOW/DESC/EXPLAIN allowed"
-                )
+            # 写语句白名单检查(逐条)
+            for stmt in statements:
+                clean = _clean_sql(stmt)
+                if is_write_sql(clean) and not self._allow_write:
+                    raise PermissionError(
+                        "flink write is disabled (datasources.json flink.allowWrite=false), "
+                        "only SELECT/SHOW/DESC/EXPLAIN allowed"
+                    )
             if limit <= 0:
                 limit = self._default_limit
             limit = min(limit, self._max_limit)
 
             t0 = time.time()
             self._cancel_flag.clear()
+            last_result: Optional[Dict[str, Any]] = None
             try:
-                from pyflink.table import Table
-                # SELECT 走 sql_query(有表结果);DDL/DML 走 execute_sql
-                if re.match(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b", clean, re.IGNORECASE):
-                    table = self._t_env.sql_query(clean)
-                    result = table.execute()
-                else:
-                    result = self._t_env.execute_sql(clean)
-
-                # 记下 JobClient 供取消
-                try:
-                    self._current_job_client = result.get_job_client()
-                except Exception:
-                    self._current_job_client = None
-
-                columns = _extract_columns_schema(result)
-                rows: List[List[Any]] = []
-                # 读操作才有行;DDL/DML 的 collect 可能为空
-                if re.match(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b", clean, re.IGNORECASE):
-                    collected = 0
-                    for row in result.collect():
-                        if self._cancel_flag.is_set():
-                            break
-                        if collected >= limit:
-                            break
-                        rows.append([_fmt_value(v) for v in row])
-                        collected += 1
-
-                truncated = collected >= limit
+                for stmt in statements:
+                    last_result = self._exec_one(stmt, limit)
                 cost_ms = int((time.time() - t0) * 1000)
-                self._audit("execute_sql ok in %dms (rows=%d) :: %.120s" % (cost_ms, len(rows), clean))
-                return {
-                    "columns": columns,
-                    "rows": rows,
-                    "costMs": cost_ms,
-                    "truncated": truncated,
-                }
+                if last_result is None:
+                    last_result = {
+                        "columns": [],
+                        "rows": [],
+                        "costMs": cost_ms,
+                        "truncated": False,
+                        "message": "ok (%d statements)" % len(statements),
+                    }
+                else:
+                    last_result["costMs"] = cost_ms
+                self._audit("execute_script ok in %dms (%d stmts) :: %.120s" % (cost_ms, len(statements), _clean_sql(script)))
+                return last_result
             except Exception as e:
-                self._audit("execute_sql failed :: %.120s :: %s" % (clean, e))
+                self._audit("execute_script failed :: %.120s :: %s" % (_clean_sql(script), e))
                 raise
             finally:
                 self._current_job_client = None
+
+    def _exec_one(self, stmt: str, limit: int) -> Optional[Dict[str, Any]]:
+        """执行单条语句。查询类返回结果 dict;SET/USE/DDL 返回 None。"""
+        stmt_s = stmt.strip()
+
+        # SET 'key' = 'value'
+        m = re.match(r"^SET\s+'([^']+)'\s*=\s*(.+)$", stmt_s, re.IGNORECASE)
+        if m:
+            key = m.group(1)
+            value = m.group(2).strip().strip("'")
+            self._t_env.get_config().set(key, value)
+            if log:
+                log.info("flink SET %s = %s", key, value)
+            return None
+
+        # USE CATALOG `x`
+        m = re.match(r"^USE\s+CATALOG\s+`?([\w-]+)`?\s*$", stmt_s, re.IGNORECASE)
+        if m:
+            self._t_env.use_catalog(m.group(1))
+            return None
+
+        # USE `db`
+        m = re.match(r"^USE\s+`?([\w-]+)`?\s*$", stmt_s, re.IGNORECASE)
+        if m:
+            self._t_env.use_database(m.group(1))
+            return None
+
+        # 查询类
+        is_query = bool(re.match(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b", stmt_s, re.IGNORECASE))
+
+        if is_query:
+            result = self._t_env.execute_sql(stmt_s)
+            try:
+                self._current_job_client = result.get_job_client()
+            except Exception:
+                self._current_job_client = None
+            columns = _extract_columns_schema(result)
+            rows, truncated = self._collect_rows(result, limit)
+            return {"columns": columns, "rows": rows, "truncated": truncated}
+        else:
+            # DDL / DML(CREATE / DROP / INSERT ...)
+            result = self._t_env.execute_sql(stmt_s)
+            try:
+                self._current_job_client = result.get_job_client()
+            except Exception:
+                self._current_job_client = None
+            return None
+
+    def _collect_rows(self, result, limit: int) -> Tuple[List[List[Any]], bool]:
+        """收集结果行,带超时与取消(防 CDC/kafka 流式源无限阻塞)。"""
+        collected: List[List[Any]] = []
+        stop = threading.Event()
+        job_client = None
+        try:
+            job_client = result.get_job_client()
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                for row in result.collect():
+                    if stop.is_set() or self._cancel_flag.is_set():
+                        break
+                    collected.append([_fmt_value(v) for v in row])
+                    if len(collected) >= limit:
+                        break
+            except Exception:
+                pass  # 超时/取消后 collect 抛错属预期
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(self._query_timeout)
+        truncated = False
+        if t.is_alive():
+            # 超时:停止收集,尝试取消 job
+            truncated = True
+            stop.set()
+            self._cancel_flag.set()
+            if job_client is not None:
+                try:
+                    job_client.cancel()
+                except Exception:
+                    pass
+            # 等 collect 线程退出
+            t.join(5)
+        if len(collected) >= limit:
+            truncated = True
+        return collected, truncated
+
+    def execute_sql(self, sql: str, limit: int = 0) -> Dict[str, Any]:
+        """兼容单条 SQL(内部走脚本解析)。"""
+        return self.execute_script(sql, limit)
 
     def cancel(self) -> bool:
         """取消当前正在执行的 job(超时/手动停止)。"""
