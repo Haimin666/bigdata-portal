@@ -43,7 +43,7 @@
   "flink": {
     "enabled": true,
     "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
-    "yarnAppId": "application_1640577060002_5164597",
+    "yarnAppId": "application_xxx",
     "sessionName": "db-proxy-flink-session",
     "queue": "default",
     "defaultLimit": 1000,
@@ -60,10 +60,10 @@
         "label": "MySQL(CDC)",
         "type": "mysql-cdc",
         "defaults": {
-          "hostname": "mysql-bi.corp.shiqiao.com",
+          "hostname": "CHANGE_ME",
           "port": "3343",
-          "username": "bigdata_cdc",
-          "password": "s5C7tJdBRT.4",
+          "username": "CHANGE_ME",
+          "password": "CHANGE_ME",
           "scan.incremental.snapshot.enabled": "true",
           "scan.incremental.snapshot.chunk.key-column": "id",
           "scan.startup.mode": "initial"
@@ -79,8 +79,8 @@
         "label": "Kafka",
         "type": "kafka",
         "defaults": {
-          "properties.bootstrap.servers": "kafka-01.bigdata.shiqiao.com:9092,kafka-02.bigdata.shiqiao.com:9092,kafka-03.bigdata.shiqiao.com:9092",
-          "properties.group.id": "flusr_dbproxy",
+          "properties.bootstrap.servers": "CHANGE_ME_BROKER_1:9092,CHANGE_ME_BROKER_2:9092",
+          "properties.group.id": "CHANGE_ME_GROUP",
           "scan.startup.mode": "earliest-offset",
           "format": "json"
         },
@@ -92,7 +92,7 @@
         "label": "HBase(维表)",
         "type": "hbase-2.2",
         "defaults": {
-          "zookeeper.quorum": "olap-worker-01.bigdata.shiqiao.com:2181,olap-worker-02.bigdata.shiqiao.com:2181,olap-worker-03.bigdata.shiqiao.com:2181"
+          "zookeeper.quorum": "CHANGE_ME_ZK_1:2181,CHANGE_ME_ZK_2:2181,CHANGE_ME_ZK_3:2181"
         },
         "dynamicFields": [
           {"key": "table-name", "label": "HBase 表名", "placeholder": "如 lion_dw:dim_cmmlion_sys_dictionary_bak"}
