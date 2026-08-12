@@ -41,15 +41,15 @@
     "sparkConf": {}
   },
   "flink": {
-    "enabled": false,
+    "enabled": true,
     "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
-    "yarnAppId": "application_xxx",
+    "yarnAppId": "application_1640577060002_5162757",
     "sessionName": "db-proxy-flink-session",
     "queue": "default",
     "defaultLimit": 1000,
     "maxLimit": 10000,
     "queryTimeout": 300,
-    "allowWrite": false,
+    "allowWrite": true,
     "pipelineJars": [
       "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",
@@ -60,10 +60,10 @@
         "label": "MySQL(CDC)",
         "type": "mysql-cdc",
         "defaults": {
-          "hostname": "10.26.2.23",
-          "port": "3343",
-          "username": "bigdata_cdc",
-          "password": "xxx",
+          "hostname": "mysql-bi.corp.shiqiao.com",
+          "port": "3344",
+          "username": "dsj_reader",
+          "password": "Zv3.cJl5jYIEUvgXfq",
           "scan.startup.mode": "initial"
         },
         "dynamicFields": [
@@ -77,8 +77,8 @@
         "label": "Kafka",
         "type": "kafka",
         "defaults": {
-          "properties.bootstrap.servers": "kafka-01:9092,kafka-02:9092",
-          "properties.group.id": "flusr_xxx",
+          "properties.bootstrap.servers": "KAFKA_BROKER_1:9092,KAFKA_BROKER_2:9092",
+          "properties.group.id": "flusr_dbproxy",
           "scan.startup.mode": "earliest-offset",
           "format": "json"
         },
@@ -90,7 +90,7 @@
         "label": "HBase(维表)",
         "type": "hbase-2.2",
         "defaults": {
-          "zookeeper.quorum": "olap-worker-01:2181,olap-worker-02:2181,olap-worker-03:2181"
+          "zookeeper.quorum": "olap-worker-01.bigdata.shiqiao.com:2181,olap-worker-02.bigdata.shiqiao.com:2181,olap-worker-03.bigdata.shiqiao.com:2181"
         },
         "dynamicFields": [
           {"key": "table-name", "label": "HBase 表名", "placeholder": "如 lion_dw:dim_cmmlion_sys_dictionary_bak"}
