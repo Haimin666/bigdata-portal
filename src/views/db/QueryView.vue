@@ -954,7 +954,7 @@ function isNumeric(val: unknown): boolean {
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
       <el-button
-        v-if="engine === 'sparksql' || engine === 'pyspark'"
+        v-if="engine"
         class="spark-lock-btn"
         :type="sparkUnlocked ? 'success' : 'warning'"
         :icon="sparkUnlocked ? Unlock : Lock"
