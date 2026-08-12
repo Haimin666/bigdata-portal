@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import G6 from '@antv/g6'
 import {
@@ -10,6 +10,7 @@ import {
   type CascadeNode
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
+import { getTheme } from '@/utils/theme'
 
 defineOptions({ name: 'DsDepsDialog' })
 
@@ -73,8 +74,21 @@ function buildTreeData(): any {
   }
 }
 
+/** 深空主题取色:运行时读 CSS 变量(切换主题后重渲染即生效) */
+function cv(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+const C = {
+  primary: () => cv('--bd-primary', '#5e6ad2'),
+  text: () => cv('--bd-text', '#333'),
+  muted: () => cv('--bd-muted', '#888'),
+  panel: () => cv('--bd-panel', '#fff'),
+  bg: () => cv('--bd-bg', '#f5f7fa'),
+  border: () => cv('--bd-border', '#c9cdd6')
+}
+
 const stColor = (s: string | null) =>
-  s === 'SUCCESS' ? '#67c23a' : s === 'FAILURE' ? '#f56c6c' : s === 'RUNNING' ? '#5e6ad2' : '#c9cdd6'
+  s === 'SUCCESS' ? '#67c23a' : s === 'FAILURE' ? '#f56c6c' : s === 'RUNNING' ? C.primary() : C.border()
 const stMark = (s: string | null) => (s === 'SUCCESS' ? '✓ 成功' : s === 'FAILURE' ? '✗ 失败' : s === 'RUNNING' ? '● 运行中' : '近1天无实例')
 const stText = (s: string | null) => (s === 'SUCCESS' || s === 'FAILURE' || s === 'RUNNING' ? s : '')
 const cronText = (c: string | null | undefined) =>
@@ -95,7 +109,7 @@ function registerDepCard() {
         const cur = cfg.isCurrent
         const name = cfg.label || cfg.name || cfg.id
         const sel = cfg.__selected
-        const border = cur ? '#5e6ad2' : stColor(st)
+        const border = cur ? C.primary() : stColor(st)
 
         const key = group.addShape('rect', {
           attrs: {
@@ -104,7 +118,7 @@ function registerDepCard() {
             width: W,
             height: H,
             radius: 8,
-            fill: cur ? 'rgba(94,106,210,0.06)' : '#fff',
+            fill: C.panel(),
             stroke: border,
             lineWidth: cur ? 2.5 : 1.5,
             shadowColor: 'rgba(0,0,0,0.08)',
@@ -121,7 +135,7 @@ function registerDepCard() {
             text: (cur ? '★ ' : '') + name,
             fontSize: 12,
             fontWeight: cur ? 700 : 500,
-            fill: cur ? '#5e6ad2' : '#333',
+            fill: cur ? C.primary() : C.text(),
             textAlign: 'left',
             textBaseline: 'middle'
           }
@@ -134,7 +148,7 @@ function registerDepCard() {
             y: -H / 2 + 32,
             text: `${proj}  ${stMark(st)}${stText(st) ? ' ' + stText(st) : ''}`,
             fontSize: 10,
-            fill: '#888',
+            fill: C.muted(),
             textAlign: 'left',
             textBaseline: 'middle'
           }
@@ -148,7 +162,7 @@ function registerDepCard() {
               y: -H / 2 + 50,
               text: cronText(crt),
               fontSize: 10,
-              fill: '#a8abb2',
+              fill: C.muted(),
               textAlign: 'left',
               textBaseline: 'middle'
             }
@@ -165,8 +179,8 @@ function registerDepCard() {
               width: 32,
               height: 18,
               radius: 4,
-              fill: sel ? '#5e6ad2' : '#fff',
-              stroke: '#5e6ad2',
+              fill: sel ? C.primary() : C.panel(),
+              stroke: C.primary(),
               lineWidth: 1,
               cursor: 'pointer'
             }
@@ -178,7 +192,7 @@ function registerDepCard() {
               y: -H / 2 + 29,
               text: sel ? '已选' : '重跑',
               fontSize: 10,
-              fill: sel ? '#fff' : '#5e6ad2',
+              fill: sel ? C.bg() : C.primary(),
               textAlign: 'center',
               textBaseline: 'middle',
               cursor: 'pointer'
@@ -208,7 +222,7 @@ function renderChart() {
     },
     defaultEdge: {
       type: 'cubic-horizontal',
-      style: { stroke: '#b9c2d0', lineWidth: 1.5, endArrow: { path: G6.Arrow.triangle(4, 6, 0), d: 0 } }
+      style: { stroke: C.border(), lineWidth: 1.5, endArrow: { path: G6.Arrow.triangle(4, 6, 0), d: 0 } }
     },
     layout: {
       type: 'compactBox',
@@ -370,6 +384,13 @@ async function doRerun() {
 
 onMounted(() => {
   if (props.modelValue) load()
+  // 深浅主题切换后重渲染依赖图(取色走 CSS 变量)
+  watch(
+    () => getTheme(),
+    () => {
+      if (tree.value) renderChart()
+    }
+  )
 })
 
 onBeforeUnmount(() => {

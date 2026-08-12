@@ -186,8 +186,8 @@ function crontabText(n: DepNode): string {
       top: -50%;
       width: 18px;
       height: 50%;
-      border-left: 2px solid #c9cdd6;
-      border-bottom: 2px solid #c9cdd6;
+      border-left: 2px solid $border;
+      border-bottom: 2px solid $border;
       border-bottom-left-radius: 10px;
     }
   }
@@ -200,8 +200,8 @@ function crontabText(n: DepNode): string {
       top: -50%;
       width: 18px;
       height: 50%;
-      border-right: 2px solid #c9cdd6;
-      border-bottom: 2px solid #c9cdd6;
+      border-right: 2px solid $border;
+      border-bottom: 2px solid $border;
       border-bottom-right-radius: 10px;
     }
   }
@@ -211,7 +211,7 @@ function crontabText(n: DepNode): string {
   min-width: 150px;
   max-width: 180px;
   padding: 7px 10px;
-  border: 1px solid #e6e8ec;
+  border: 1px solid $border;
   border-radius: 8px;
   background: $panel;
   display: flex;
@@ -230,9 +230,9 @@ function crontabText(n: DepNode): string {
   &.current {
     border-color: $primary;
     border-width: 2px;
-    box-shadow: 0 2px 10px rgba(94, 106, 210, 0.2);
+    box-shadow: 0 2px 10px rgba(0, 229, 255, 0.18);
     cursor: default;
-    background: rgba(94, 106, 210, 0.04);
+    background: color-mix(in srgb, $primary 5%, transparent);
   }
 
   /* 状态色左边框 */
@@ -279,7 +279,7 @@ function crontabText(n: DepNode): string {
 
   &:hover {
     color: $primary;
-    background: rgba(94, 106, 210, 0.1);
+    background: color-mix(in srgb, $primary 10%, transparent);
   }
 }
 
@@ -288,16 +288,16 @@ function crontabText(n: DepNode): string {
   padding: 0 5px;
   border-radius: 4px;
   flex-shrink: 0;
-  background: rgba(94, 106, 210, 0.1);
+  background: color-mix(in srgb, $primary 10%, transparent);
   color: $primary;
 
   &.cur {
-    background: rgba(94, 106, 210, 0.15);
+    background: color-mix(in srgb, $primary 15%, transparent);
     color: $primary;
     font-weight: 600;
   }
   &.down {
-    background: rgba(94, 106, 210, 0.1);
+    background: color-mix(in srgb, $primary 10%, transparent);
     color: $primary;
   }
   &.up {
@@ -338,13 +338,13 @@ function crontabText(n: DepNode): string {
   }
   &.inst-run {
     color: $primary;
-    background: rgba(94, 106, 210, 0.1);
+    background: color-mix(in srgb, $primary 10%, transparent);
   }
 }
 
 .card-cron {
   font-size: 10px;
-  color: #c0c4cc;
+  color: $muted;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: nowrap;
   overflow: hidden;
