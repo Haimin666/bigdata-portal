@@ -193,7 +193,12 @@ app.use('/hadoopapi', (req, res, next) => {
 // 页面内绝对根路径链接(href/src="/xxx")统一重写为 /yarniframe/xxx,子页面与
 // 静态资源才能跟随(单一 query 代理做不到这一点)。
 const yarnRmUrl = config.resourceManagers[0]
-const yarnRmProxy = httpProxy.createProxyServer({ target: yarnRmUrl, changeOrigin: true, secure: false })
+const yarnRmProxy = httpProxy.createProxyServer({
+  target: yarnRmUrl,
+  changeOrigin: true,
+  secure: false,
+  selfHandleResponse: true // 库不再自动 pipe,全部由下方 proxyRes 手动转发,避免双写
+})
 yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
   delete proxyRes.headers['x-frame-options']
   const cookies = proxyRes.headers['set-cookie']
@@ -201,7 +206,6 @@ yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
   if (proxyRes.headers.location) {
     proxyRes.headers.location = rewriteLocation(proxyRes.headers.location, yarnRmUrl, '/yarniframe')
   }
-  // 注册了 proxyRes 监听后 http-proxy 不再自动 pipe,需手动处理
   const type = proxyRes.headers['content-type'] || ''
   if (!type.includes('text/html')) {
     proxyRes.pipe(res)
@@ -230,16 +234,50 @@ app.use('/yarniframe', (req, res) => {
 
 // ── YARN iframe 动态代理(/api/iframe-proxy?url=...)──────────
 // 用于非 RM 主机(如 NodeManager 日志 hadoop-dn-0x:8042):iframe src 指向门户,
-// 后端按白名单主机动态转发。页面内资源仍是相对路径时无法跟随,仅适合
-// 主文档即内容(NM 日志页是服务端渲染 HTML,可正常阅读)。
+// 后端按白名单主机动态转发。HTML 中的绝对根路径链接(/xxx)重写为继续走本代理,
+// 使日志页的样式与 error 日志链接可跟随,不再误入门户 SPA。
 function isYarnProxyAllowed(host) {
   return (config.yarnProxyAllowHosts || []).some((s) =>
     s.startsWith('.') ? host.endsWith(s) : host === s
   )
 }
-const yarnDynamicProxy = httpProxy.createProxyServer({ changeOrigin: true, secure: false })
-yarnDynamicProxy.on('proxyRes', (proxyRes) => {
+const yarnDynamicProxy = httpProxy.createProxyServer({
+  changeOrigin: true,
+  secure: false,
+  selfHandleResponse: true
+})
+yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
   delete proxyRes.headers['x-frame-options']
+  // 302 重定向 → 继续走代理(否则浏览器直连内网失败)
+  const origin = proxyRes.req?.headers?.host ? `http://${proxyRes.req.headers.host}` : ''
+  if (proxyRes.headers.location && origin) {
+    try {
+      const loc = new URL(proxyRes.headers.location, origin)
+      proxyRes.headers.location = `/api/iframe-proxy?url=${encodeURIComponent(loc.href)}`
+    } catch {
+      /* 保持原样 */
+    }
+  }
+  const type = proxyRes.headers['content-type'] || ''
+  if (!type.includes('text/html')) {
+    proxyRes.pipe(res)
+    return
+  }
+  const chunks = []
+  proxyRes.on('data', (c) => chunks.push(c))
+  proxyRes.on('end', () => {
+    let html = Buffer.concat(chunks).toString('utf8')
+    // 绝对根路径链接 → 继续走动态代理: /xxx?y=1 → /api/iframe-proxy?url=<enc(origin)/xxx?y=1>
+    if (origin) {
+      html = html.replace(
+        /(href|src)\s*=\s*(["'])\/(?!api\/iframe-proxy)((?:[^"'])*)(["'])/g,
+        (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + '/' + path)}${q2}`
+      )
+    }
+    delete proxyRes.headers['content-length']
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
+    res.end(html)
+  })
 })
 app.get('/api/iframe-proxy', (req, res) => {
   const target = String(req.query.url || '')
