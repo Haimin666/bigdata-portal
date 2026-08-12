@@ -669,6 +669,8 @@ def flink_query(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if log:
+            log.exception("flink query failed: %.200s", str(e))
         raise HTTPException(status_code=502, detail=str(e)[:1000])
     return {"code": 0, "data": result}
 
