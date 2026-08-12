@@ -28,6 +28,8 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
 {
   "enabled": true,
   "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
+  "flinkHome": "",                      # 留空自动用 pyflink 自带 1.17.2 运行时
+                                        # (覆盖系统遗留的旧 FLINK_HOME,如 /opt/flink-1.10.1)
   "yarnAppId": "application_xxx",          # 常驻 YARN Session 的 application id
   "sessionName": "db-proxy-flink-session",
   "queue": "default",                       # 提交 job 的 YARN 队列(可选)
@@ -180,6 +182,38 @@ class FlinkEngine:
         # HADOOP_CONF_DIR 缺失时用默认,连 YARN 必需
         if not os.environ.get("HADOOP_CONF_DIR"):
             os.environ["HADOOP_CONF_DIR"] = "/etc/hadoop/conf"
+        self._apply_flink_home()
+
+    def _apply_flink_home(self) -> None:
+        """进程内覆盖 FLINK_HOME/LIB/OPT,强制指向 pyflink 自带 1.17.2 运行时。
+
+        根因:客户机环境遗留 FLINK_HOME=/opt/flink-1.10.1/,pyflink 的
+        find_flink_home() 优先信任环境变量 → gateway JVM classpath 全变成
+        1.10.1 旧 jar,PythonEnvUtils 解析失败(JavaPackage not callable)。
+        这里在创建引擎前覆盖,仅当前进程生效,不动系统/集群环境变量。
+        """
+        flink_home = str(self.cfg.get("flinkHome", "")).strip()
+        if not flink_home:
+            try:
+                import pyflink
+                flink_home = os.path.dirname(os.path.abspath(pyflink.__file__))
+            except Exception:
+                flink_home = ""
+        if not flink_home or not os.path.isdir(flink_home):
+            if log:
+                log.warning("flink flinkHome not found, keep existing FLINK_HOME=%s",
+                            os.environ.get("FLINK_HOME"))
+            return
+        os.environ["FLINK_HOME"] = flink_home
+        for key, sub in (("FLINK_LIB_DIR", "lib"), ("FLINK_OPT_DIR", "opt")):
+            d = os.path.join(flink_home, sub)
+            if os.path.isdir(d):
+                os.environ[key] = d
+        if log:
+            log.info("flink FLINK_HOME=%s LIB=%s OPT=%s",
+                     os.environ.get("FLINK_HOME"),
+                     os.environ.get("FLINK_LIB_DIR"),
+                     os.environ.get("FLINK_OPT_DIR"))
 
     def _build_base_config(self):
         """构造连接 YARN Session 的公共 Configuration。"""
