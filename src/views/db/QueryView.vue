@@ -93,15 +93,45 @@ function lockSparkWrite() {
 }
 
 /** 判定 SQL 是否可能为写操作(与后端 server/index.js 的 isSparkWriteSql 保持一致):
- *  只读关键字开头放行;WITH 前缀且无写关键字放行;含分号/其余一律视为写 */
+ *  只读关键字开头放行;WITH 前缀且无写关键字放行;含分号/其余一律视为写。
+ *  引号感知切分(字符串内分号不算多语句),并拦截 SELECT INTO OUTFILE/LOAD_FILE 走私 */
 function isSparkWriteSql(sql: string): boolean {
-  let s = String(sql)
+  const raw = String(sql)
+  // MySQL/MariaDB 可执行注释 /*! ... */ 与 /*M! ... */ 会被数据库执行,绝不能当普通注释删除 —— 检测到一律视为写
+  if (/\*[Mm]?!/.test(raw)) return true
+  let s = raw
     .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '')
     .trim()
   if (!s) return false
-  const semi = s.split(';')
-  if (semi.length > 2 || (semi.length === 2 && semi[1].trim() !== '')) return true
-  if (semi.length === 2) s = semi[0].trim()
+  // 引号感知切分:跳过单引号字符串内的分号
+  const parts: string[] = []
+  let cur = ''
+  let inStr = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\' && i + 1 < s.length) {
+      cur += c + s[i + 1]
+      i++
+      continue
+    }
+    if (c === "'") {
+      inStr = !inStr
+      cur += c
+      continue
+    }
+    if (c === ';' && !inStr) {
+      parts.push(cur)
+      cur = ''
+      continue
+    }
+    cur += c
+  }
+  parts.push(cur)
+  const last = parts[parts.length - 1].trim()
+  if (parts.length > 2 || (parts.length === 2 && last !== '')) return true
+  s = last || parts[0].trim()
+  // SELECT 前缀走私(INTO OUTFILE/DUMPFILE、LOAD_FILE)视为写
+  if (/\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(/i.test(s)) return true
   if (/^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i.test(s)) return false
   if (/^WITH\b/i.test(s) && !/\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i.test(s)) return false
   return true
@@ -684,6 +714,28 @@ async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record
   }
 }
 
+/** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
+ *  token 过期(网关 403)自动重新解锁后重试一次 */
+async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (isSparkWriteSql(sql) && !sparkToken.value) {
+    const tk = await openSparkAuth()
+    if (!tk) throw new Error('已取消:写操作未解锁')
+  }
+  try {
+    return await queryDb(db.value, sql, sparkToken.value || undefined)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/解锁|token|401|403/i.test(msg)) {
+      sparkToken.value = ''
+      sessionStorage.removeItem(SPARK_TOKEN_KEY)
+      const tk2 = await openSparkAuth()
+      if (!tk2) throw new Error('已取消:写操作未解锁')
+      return queryDb(db.value, sql, tk2)
+    }
+    throw e
+  }
+}
+
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
@@ -697,7 +749,7 @@ async function execOne(sql: string, index: number): Promise<void> {
     let r
     if (isFlink) r = await execFlink(sql)
     else if (isSpark) r = await execSpark(sql, kind)
-    else r = await queryDb(db.value, sql)
+    else r = await execDb(sql)
     results.value[index] = { sql, ...r }
   } catch (e) {
     results.value[index] = {
@@ -843,7 +895,16 @@ onMounted(async () => {
   }
 })
 
-watch(engine, (val) => {
+watch(engine, async (val, old) => {
+  // flink 切换即需解锁:未解锁先弹密码框;取消则回退原引擎(不解锁不能使用 flink)
+  if (val === 'flinksql' && !sparkToken.value) {
+    const tk = await openSparkAuth()
+    if (!tk) {
+      ElMessage.warning('Flink 需先解锁才能使用')
+      engine.value = old && old !== 'flinksql' ? old : ''
+      return
+    }
+  }
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''

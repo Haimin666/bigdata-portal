@@ -70,17 +70,8 @@ ALLOWED_DBS = [str(s).strip() for s in CONFIG.get("allowedDbs", []) if str(s).st
 ALLOWED_TABLES = [
     str(s).strip() for s in CONFIG.get("allowedTables", []) if str(s).strip()
 ]
-# 可写白名单:格式 "db.table"(单表)或 "db.*"(整库),如 ["finance_order_trade.*", "credzx.audit_log"]
-# 命中才允许写操作(INSERT/UPDATE/DELETE),默认只读(不配 = 全只读)
-WRITABLE_TABLES = [
-    str(s).strip() for s in CONFIG.get("writableTables", []) if str(s).strip()
-]
-# 可执行过程白名单:格式 "name.procedure"(数据源名.过程名),
-# 如 ["credzy.update_balance"]。命中才放行 CALL/BEGIN/EXEC 过程调用;
-# 过程内部操作对代理是黑盒,单独授权更清晰。未配 = 禁止执行过程
-EXECUTABLE_PROCEDURES = [
-    str(s).strip() for s in CONFIG.get("executableProcedures", []) if str(s).strip()
-]
+# 可写白名单 / 过程白名单已移除:权限管控收口到门户网关(密码解锁),db-proxy 仅保留
+# 鉴权 + 库/表白名单 + 资源护栏(多语句/行数/长度/超时)
 # Oracle thick 模式:客户端库目录(含 libclntsh.so),连 11g 必配
 ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
 
@@ -304,12 +295,12 @@ READ_ONLY_SQL_RE = re.compile(
 
 
 def check_read_only_sql(sql: str) -> bool:
-    """是否为查询类 SQL(SELECT/SHOW/DESC/EXPLAIN/WITH),默认放行。"""
+    """是否为查询类 SQL(SELECT/SHOW/DESC/EXPLAIN/WITH),用于区分查询/写执行路径。"""
     return bool(READ_ONLY_SQL_RE.match(sql))
 
 
 def check_single_statement(sql: str) -> None:
-    """多语句注入防护:只读库拒绝包含多个分号分隔语句的 SQL。
+    """多语句注入防护:拒绝包含多个分号分隔语句的 SQL。
     允许末尾一个结尾分号(如 'SELECT 1;'),其余分号视为多语句。"""
     s = sql.strip()
     # 去掉末尾分号后,若仍含分号 → 多语句
@@ -317,71 +308,7 @@ def check_single_statement(sql: str) -> None:
     if ";" in body:
         raise HTTPException(
             status_code=403,
-            detail="multiple statements not allowed (read-only)",
-        )
-
-
-def check_writable(sql: str, db: str) -> None:
-    """写操作权限:SQL 涉及的所有表必须命中 WRITABLE_TABLES(name.表 或 name.*)。
-    name = 数据源唯一标识(前端请求的 db 参数),多个数据源可指向同一真实库
-    (service),权限绑定到数据源而不是库名。SQL 里写真实库名(service)或裸表名
-    都会归一化到当前数据源的 name 再匹配。未配置 → 全库只读。"""
-    ds = get_datasource(db)
-    # 提取写操作涉及的表(INSERT INTO / UPDATE / DELETE FROM)
-    tables = [m.group(1) for m in TABLE_RE.finditer(sql)]
-    if not tables:
-        # 无法识别表名(如 VALUES 常量),保守拒绝
-        raise HTTPException(status_code=403, detail="cannot determine target table")
-    for t in tables:
-        # 归一化为 "name.table":
-        # - 裸表名 → 补当前数据源 name
-        # - 带前缀且前缀=当前库 service(真实库名)→ 归一化为 name
-        # - 其他前缀(跨库引用)→ 按原样
-        if "." in t:
-            prefix, tbl = t.split(".", 1)
-            full = f"{db}.{tbl}" if prefix == ds.service else t
-        else:
-            full = f"{db}.{t}"
-        allowed = False
-        for w in WRITABLE_TABLES:
-            if w.endswith(".*"):
-                # name.* 匹配该数据源所有表
-                if full.startswith(w[:-1]):
-                    allowed = True
-                    break
-            elif w == full:
-                allowed = True
-                break
-        if not allowed:
-            raise HTTPException(
-                status_code=403,
-                detail=f"table '{t}' not writable (default read-only)",
-            )
-
-
-def check_executable_procedure(sql: str, db: str) -> None:
-    """过程调用校验:提取过程名,命中 EXECUTABLE_PROCEDURES(name.procedure)才放行。
-    支持 CALL proc、BEGIN proc; END;、EXEC proc。未配白名单 → 一律拒绝。"""
-    s = sql.strip()
-    m = re.match(
-        r"^(?:CALL|EXEC)\s+([A-Za-z0-9_$.]+)", s, re.IGNORECASE
-    ) or re.match(
-        r"^BEGIN\s+([A-Za-z0-9_$.]+)\b", s, re.IGNORECASE
-    )
-    if not m:
-        # 非过程语法但也没表名可校验 → 保守拒绝
-        raise HTTPException(status_code=403, detail="unsupported statement type")
-    proc = m.group(1)
-    # 归一化:白名单按 name 配
-    # - 裸过程名 "proc" → db.proc
-    # - "包.过程" → db.pkg.proc
-    # - 已带 db 前缀 "db.proc" / "db.pkg.proc" → 原样
-    first = proc.split(".")[0]
-    full = proc if first == db or proc.count(".") >= 2 else f"{db}.{proc}"
-    if full not in EXECUTABLE_PROCEDURES:
-        raise HTTPException(
-            status_code=403,
-            detail=f"procedure '{proc}' not in executableProcedures",
+            detail="multiple statements not allowed",
         )
 
 
@@ -528,16 +455,12 @@ def query(
         )
     check_db_allowed(req.db)
     ds = get_datasource(req.db)
-    # 查询类(SELECT/SHOW/DESC/EXPLAIN/WITH):默认放行,仅防多语句注入
-    if check_read_only_sql(req.sql):
-        check_single_statement(req.sql)
+    # 权限管控已收口到门户网关(密码解锁);此处仅保留资源护栏:
+    # 1) 多语句防护(防注入走私) 2) 表级白名单(如配置) 3) 行数/长度/超时
+    if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
+        pass  # 过程块内多分号属正常语法,放行
     else:
-        # 过程调用(CALL/BEGIN/EXEC)→ 单独过程白名单,块内多分号属正常语法
-        if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
-            check_executable_procedure(req.sql, req.db)
-        else:
-            check_single_statement(req.sql)
-            check_writable(req.sql, req.db)
+        check_single_statement(req.sql)
     check_tables_allowed(req.sql)
     result = fetch(req.sql, req.db)
     # 审计日志:时间/库/SQL/行数/耗时
@@ -561,8 +484,6 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "datasources": [ds.to_dict() for ds in DATASOURCES.values()],
             "allowedDbs": ALLOWED_DBS or sorted(DATASOURCES.keys()),
             "allowedTables": ALLOWED_TABLES,
-            "writableTables": WRITABLE_TABLES,
-            "executableProcedures": EXECUTABLE_PROCEDURES,
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,
             "maxSqlLen": MAX_SQL_LEN,

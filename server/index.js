@@ -45,7 +45,7 @@ const auth = setupAuth(app, config)
 // 受保护路径:未登录一律 401(除 /api/auth/* 与静态资源/SPA 页面,由前端路由守卫拦截)。
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 const PROTECTED_PREFIXES = [
-  '/api/db', '/api/spark', '/api/flink', '/api/users',
+  '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
@@ -579,7 +579,7 @@ if (config.dbProxyUrl) {
     //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
     //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
     //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || req.path.startsWith('/scripts')) {
+    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || req.path === '/query' || req.path.startsWith('/scripts')) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
@@ -605,16 +605,54 @@ const sparkTokens = new Map() // token -> expiresAt
 // 2) 显式拒绝多语句走私(含分号)与 CTE 前缀的 DML(WITH cte AS (...) INSERT ...)。
 const SPARK_READONLY_KW = /^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i
 const SPARK_WRITE_KW = /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i
+// SELECT 前缀走私:MySQL 可用 SELECT ... INTO OUTFILE/DUMPFILE 写服务器文件,
+// LOAD_FILE() 读服务器文件 —— 均视为写/敏感操作,需解锁
+const SPARK_SELECT_SMUGGLE = /\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(/i
+
+/** 按分号切分,跳过单引号字符串内的分号(与 flink split_flink_sql 同思路) */
+function splitSqlStatements(s) {
+  const parts = []
+  let cur = ''
+  let inStr = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\' && i + 1 < s.length) {
+      cur += c + s[i + 1]
+      i++
+      continue
+    }
+    if (c === "'") {
+      inStr = !inStr
+      cur += c
+      continue
+    }
+    if (c === ';' && !inStr) {
+      parts.push(cur)
+      cur = ''
+      continue
+    }
+    cur += c
+  }
+  parts.push(cur)
+  return parts
+}
+
 function isSparkWriteSql(sql) {
-  let s = String(sql)
+  const raw = String(sql)
+  // MySQL/MariaDB 可执行注释 /*! ... */ 与 /*M! ... */ 会被数据库执行,绝不能当普通注释删除 —— 检测到一律视为写
+  if (/\*[Mm]?!/.test(raw)) return true
+  let s = raw
     // 去注释(行注释与块注释)
     .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '')
     .trim()
   if (!s) return false
-  // 多语句走私:任何非末尾分号都拒绝(末尾分号允许)
-  const semi = s.split(';')
-  if (semi.length > 2 || (semi.length === 2 && semi[1].trim() !== '')) return true
-  if (semi.length === 2) s = semi[0].trim()
+  // 多语句走私:引号感知切分,非末尾分号都拒绝
+  const parts = splitSqlStatements(s)
+  const last = parts[parts.length - 1].trim()
+  if (parts.length > 2 || (parts.length === 2 && last !== '')) return true
+  s = last || parts[0].trim()
+  // SELECT 前缀走私(INTO OUTFILE/DUMPFILE、LOAD_FILE)视为写
+  if (SPARK_SELECT_SMUGGLE.test(s)) return true
   // 只读关键字开头 → 放行(但要排除 WITH ... INSERT 的 CTE-DML)
   if (SPARK_READONLY_KW.test(s)) return false
   if (/^WITH\b/i.test(s) && !SPARK_WRITE_KW.test(s)) return false
@@ -886,6 +924,37 @@ if (config.dbProxyUrl) {
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
 }
+
+// ── MySQL/Oracle 查询(写操作密码解锁,与 Spark 共用密码)─────────
+// 权限已收口到门户:db-proxy 移除读写白名单后,此处对写 SQL 要求 X-Spark-Token。
+// 只读查询直接转发;写语句(INSERT/UPDATE/DELETE/DDL)必须解锁;其余 /api/db 接口
+// (dbs/tables/fields/acl)仍走 /api/db 透传,且 /api/db/query 已被拦截防绕过。
+app.post('/api/dbquery/query', async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  const sql = String(req.body?.sql || '')
+  if (isSparkWriteSql(sql)) {
+    const tk = req.get('X-Spark-Token')
+    if (!tk || !sparkTokenValid(tk)) {
+      return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入密码(与 Spark 同一密码)' })
+    }
+  }
+  try {
+    const r = await fetch(config.dbProxyUrl + '/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
+      body: JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(Number(req.body?.timeoutMs) || 120000)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+    res.json({ code: 0, data: body.data })
+  } catch (e) {
+    console.error('[dbquery/query]', e instanceof Error ? e.message : e)
+    res.status(502).json({ code: 502, msg: '查询失败,请查看服务端日志' })
+  }
+})
 
 app.post(
   '/api/login/stingray',

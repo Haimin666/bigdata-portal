@@ -87,16 +87,17 @@ python3.7 main.py
 
 ## 安全约束
 
-1. **默认只读**:所有库默认只读——SQL 必须以 `SELECT/SHOW/DESC/EXPLAIN/WITH` 开头,`INSERT/UPDATE/DELETE/DROP` 等一律 403
-2. **可写白名单(后台配置)**:`writableTables` 支持 `"name.*"`(该数据源全表可写)/ `"name.table"`(单表可写),**name = 数据源唯一标识**(前端请求的 db 参数,多个数据源可指向同一真实库)。SQL 里写真实库名或裸表名都会归一化到当前数据源 name 再匹配;未配 = 全只读
-3. **过程白名单(单独配置)**:`executableProcedures` 格式 `"name.procedure"`(或 `"name.pkg.proc"` 包过程),如 `["credzy.update_balance"]`。`CALL/BEGIN/EXEC` 调用命中才放行;过程内部操作对代理是黑盒,未配 = 禁止执行过程
-4. **多语句防护**:拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许(过程 BEGIN...END 块除外)
-5. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
-6. **表白名单**:`allowedTables` 开启后从 SQL 提取表名校验
-7. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
-8. **SQL 长度上限**:超过 `maxSqlLen`(默认 32768 字节)拒绝,防超大 SQL
-9. **超时**:连接/查询超时可配,防远端卡死
-10. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
+1. **鉴权**:配置了 `authToken` 后,请求需带请求头 `X-DB-Token: <token>`(网关自动注入);未配 = 无鉴权(仅内网可信环境)
+2. **权限收口到门户**:读写权限已移除(db-proxy 不再有 writableTables/只读判定/过程白名单),由**门户网关统一管控**——mysql/oracle/spark/flink 写操作需门户密码解锁(`X-Spark-Token`,与 Spark 同一密码);db-proxy 仅保留资源护栏
+3. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
+4. **表白名单(可选)**:`allowedTables` 开启后从 SQL 提取表名校验
+5. **多语句防护**:拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许(过程 BEGIN...END 块除外)
+6. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
+7. **SQL 长度上限**:超过 `maxSqlLen`(默认 32768 字节)拒绝,防超大 SQL
+8. **超时**:连接/查询超时可配,防远端卡死
+9. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
+
+> ⚠️ 权限收口后,`8756` 端口的写能力依赖门户网关保护。**务必配置 `authToken`**,避免网络内其他人直连绕过门户执行任意 SQL。
 
 ## Oracle 11g 说明
 

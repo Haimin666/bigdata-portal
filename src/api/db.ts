@@ -65,13 +65,28 @@ export async function listDataSources(): Promise<DbDataSource[]> {
   return data.datasources || []
 }
 
-/** 执行查询 */
-export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
-  return request<DbQueryResult>('/query', {
+/** 执行查询(mysql/oracle;经网关 /api/dbquery/query,写操作需 X-Spark-Token 解锁) */
+export async function queryDb(db: string, sql: string, writeToken?: string): Promise<DbQueryResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
+  const res = await fetch('/api/dbquery/query', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ db, sql })
   })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<DbQueryResult>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as DbQueryResult
 }
 
 /** Spark SQL/PySpark 查询(经网关 /api/spark/query 走 db-proxy 常驻 SparkSession) */
