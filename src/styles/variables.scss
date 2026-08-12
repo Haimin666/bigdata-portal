@@ -57,6 +57,11 @@ html.dark {
   --el-color-primary-dark-2: #00b8cc;
 }
 
+/* ── 暗色组件级覆盖(深空控制台一致)──────────────────────────
+   注意:必须放 index.scss(全局非 scoped)。variables.scss 被
+   additionalData 注入每个组件 style,组件级覆盖放那里会被 scoped 化,
+   只对带对应 data-v 属性的元素生效(曾导致按钮覆盖失效)。 */
+
 $primary: var(--bd-primary);
 $bg: var(--bd-bg);
 $panel: var(--bd-panel);

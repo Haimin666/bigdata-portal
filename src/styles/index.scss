@@ -94,3 +94,54 @@ body::before {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ── 暗色组件级覆盖(深空控制台一致)──────────────────────────
+   注意:放全局 index.scss 而非 variables.scss —— variables.scss 经
+   additionalData 注入每个组件 style,嵌套规则会被 scoped 化,导致
+   只对带对应 data-v 属性的元素生效(曾使按钮覆盖失效)。 */
+html.dark {
+  /* primary 按钮:描边风 —— 透明底+青边+青字,hover 实心青底+深字,与登录页/状态条一致。
+     注意:用 !important 属性直覆盖而非变量 —— 实测变量覆盖在部分组件(带 data-v)上
+     background 不跟随,属性覆盖 100% 生效。 */
+  .el-button--primary {
+    background: transparent !important;
+    border-color: var(--el-color-primary) !important;
+    color: var(--el-color-primary) !important;
+    --el-button-bg-color: transparent;
+    --el-button-border-color: var(--el-color-primary);
+    --el-button-text-color: var(--el-color-primary);
+  }
+  .el-button--primary:hover,
+  .el-button--primary:focus,
+  .el-button--primary.is-active,
+  .el-button--primary:active {
+    background: var(--el-color-primary) !important;
+    border-color: var(--el-color-primary) !important;
+    color: var(--bd-bg) !important;
+    --el-button-hover-bg-color: var(--el-color-primary);
+    --el-button-hover-border-color: var(--el-color-primary);
+    --el-button-hover-text-color: var(--bd-bg);
+    --el-button-active-bg-color: var(--el-color-primary-dark-2);
+    --el-button-active-border-color: var(--el-color-primary-dark-2);
+    --el-button-active-text-color: var(--bd-bg);
+  }
+
+  /* 状态 badge(el-tag light):柔和深底+低饱和彩字,消除荧光感 */
+  .el-tag {
+    --el-tag-bg-color: rgba(0, 229, 255, 0.1);
+    --el-tag-border-color: rgba(0, 229, 255, 0.35);
+    --el-tag-text-color: #00e5ff;
+    --el-tag-success-bg-color: rgba(103, 194, 58, 0.12);
+    --el-tag-success-border-color: rgba(103, 194, 58, 0.35);
+    --el-tag-success-text-color: #7fd35e;
+    --el-tag-danger-bg-color: rgba(245, 108, 108, 0.12);
+    --el-tag-danger-border-color: rgba(245, 108, 108, 0.35);
+    --el-tag-danger-text-color: #f5918c;
+    --el-tag-warning-bg-color: rgba(230, 162, 60, 0.12);
+    --el-tag-warning-border-color: rgba(230, 162, 60, 0.35);
+    --el-tag-warning-text-color: #e6b45e;
+    --el-tag-info-bg-color: rgba(144, 147, 153, 0.12);
+    --el-tag-info-border-color: rgba(144, 147, 153, 0.3);
+    --el-tag-info-text-color: #9aa8b4;
+  }
+}
