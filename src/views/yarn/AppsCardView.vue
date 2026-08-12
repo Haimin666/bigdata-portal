@@ -41,7 +41,7 @@ const paged = computed(() =>
   rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
 )
 
-// 追踪 / 日志 / 详情:弹窗内 iframe 查看
+// 追踪 / 日志 / 详情:弹窗内 iframe 查看(经门户代理,浏览器无需直连内网)
 const frameShow = ref(false)
 const frameUrl = ref('')
 const frameTitle = ref('')
@@ -49,6 +49,14 @@ function open(url: string, title?: string) {
   frameUrl.value = url
   frameTitle.value = title || '查看'
   frameShow.value = true
+}
+/** 追踪 → RM 的 /proxy/{appId}/ 同构代理 */
+function trackingProxyUrl(appId: string): string {
+  return `/yarniframe/proxy/${appId}/`
+}
+/** NM 日志等非 RM 地址 → 单跳动态代理 */
+function dynamicProxyUrl(url: string): string {
+  return `/api/iframe-proxy?url=${encodeURIComponent(url)}`
 }
 
 function onPageChange(p: number) {
@@ -77,14 +85,14 @@ function onSizeChange(s: number) {
             <el-button
               v-if="app.trackingUrl"
               size="small"
-              @click="open(app.trackingUrl, `追踪 - ${app.name}`)"
+              @click="open(trackingProxyUrl(app.id), `追踪 - ${app.name}`)"
             >
               追踪
             </el-button>
-            <el-button v-if="app.amContainerLogs" size="small" @click="open(app.amContainerLogs, `日志 - ${app.name}`)">
+            <el-button v-if="app.amContainerLogs" size="small" @click="open(dynamicProxyUrl(app.amContainerLogs), `日志 - ${app.name}`)">
               日志
             </el-button>
-            <el-button size="small" @click="open(`${resourceManager}/cluster/app/${app.id}`, `资源管理器 - ${app.name}`)">
+            <el-button size="small" @click="open(`/yarniframe/cluster/app/${app.id}`, `资源管理器 - ${app.name}`)">
               详情
             </el-button>
             <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">

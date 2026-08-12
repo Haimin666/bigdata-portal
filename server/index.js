@@ -187,6 +187,77 @@ app.use('/hadoopapi', (req, res, next) => {
   hadoopProxy(req, res, next)
 })
 
+// ── YARN iframe 同构代理(/yarniframe/* → RM)────────────────
+// 追踪UI / 资源管理器嵌入:iframe src 用 /yarniframe/proxy/{appId}/ 或
+// /yarniframe/cluster/app/{appId},后端原样转发到 RM 的 /proxy/、/cluster/ 同路径。
+// 页面内绝对根路径链接(href/src="/xxx")统一重写为 /yarniframe/xxx,子页面与
+// 静态资源才能跟随(单一 query 代理做不到这一点)。
+const yarnRmUrl = config.resourceManagers[0]
+const yarnRmProxy = httpProxy.createProxyServer({ target: yarnRmUrl, changeOrigin: true, secure: false })
+yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
+  delete proxyRes.headers['x-frame-options']
+  const cookies = proxyRes.headers['set-cookie']
+  if (cookies) proxyRes.headers['set-cookie'] = cookies.map(rewriteCookie)
+  if (proxyRes.headers.location) {
+    proxyRes.headers.location = rewriteLocation(proxyRes.headers.location, yarnRmUrl, '/yarniframe')
+  }
+  // 注册了 proxyRes 监听后 http-proxy 不再自动 pipe,需手动处理
+  const type = proxyRes.headers['content-type'] || ''
+  if (!type.includes('text/html')) {
+    proxyRes.pipe(res)
+    return
+  }
+  // HTML 响应:重写绝对根路径链接后交给门户(保持状态码/响应头)
+  const chunks = []
+  proxyRes.on('data', (c) => chunks.push(c))
+  proxyRes.on('end', () => {
+    let html = Buffer.concat(chunks).toString('utf8')
+    html = html.replace(
+      /(href|src)\s*=\s*(["'])\/(?!\/|yarniframe)/g,
+      `$1=$2/yarniframe/`
+    )
+    delete proxyRes.headers['content-length']
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
+    res.end(html)
+  })
+})
+app.use('/yarniframe', (req, res) => {
+  req.url = req.url.replace(/^\/yarniframe/, '')
+  yarnRmProxy.web(req, res, {}, (err) => {
+    res.status(502).json({ ok: false, msg: String(err) })
+  })
+})
+
+// ── YARN iframe 动态代理(/api/iframe-proxy?url=...)──────────
+// 用于非 RM 主机(如 NodeManager 日志 hadoop-dn-0x:8042):iframe src 指向门户,
+// 后端按白名单主机动态转发。页面内资源仍是相对路径时无法跟随,仅适合
+// 主文档即内容(NM 日志页是服务端渲染 HTML,可正常阅读)。
+function isYarnProxyAllowed(host) {
+  return (config.yarnProxyAllowHosts || []).some((s) =>
+    s.startsWith('.') ? host.endsWith(s) : host === s
+  )
+}
+const yarnDynamicProxy = httpProxy.createProxyServer({ changeOrigin: true, secure: false })
+yarnDynamicProxy.on('proxyRes', (proxyRes) => {
+  delete proxyRes.headers['x-frame-options']
+})
+app.get('/api/iframe-proxy', (req, res) => {
+  const target = String(req.query.url || '')
+  let u
+  try {
+    u = new URL(target)
+  } catch {
+    return res.status(400).json({ ok: false, msg: 'bad url' })
+  }
+  if (!isYarnProxyAllowed(u.hostname)) {
+    return res.status(403).json({ ok: false, msg: 'target not allowed' })
+  }
+  req.url = u.pathname + u.search
+  yarnDynamicProxy.web(req, res, { target: u.origin, changeOrigin: true }, (err) => {
+    res.status(502).json({ ok: false, msg: String(err) })
+  })
+})
+
 // ── HDFS 子应用(/apps/hdfs + 绝对路径 /static + WebHDFS API) ─
 app.use(
   '/apps/hdfs',

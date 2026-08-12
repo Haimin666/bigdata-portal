@@ -75,7 +75,7 @@ function onSizeChange(s: number) {
   emit('rows-change', s)
 }
 
-// 追踪UI / 日志 / 资源管理器:弹窗内 iframe 查看
+// 追踪UI / 日志 / 资源管理器:弹窗内 iframe 查看(经门户代理,浏览器无需直连内网)
 const frameShow = ref(false)
 const frameUrl = ref('')
 const frameTitle = ref('')
@@ -83,6 +83,14 @@ function open(url: string, title?: string) {
   frameUrl.value = url
   frameTitle.value = title || '查看'
   frameShow.value = true
+}
+/** 追踪UI → RM 的 /proxy/{appId}/ 同构代理,子页面/静态资源可跟随 */
+function trackingProxyUrl(appId: string): string {
+  return `/yarniframe/proxy/${appId}/`
+}
+/** NM 日志等非 RM 地址 → 单跳动态代理(主文档为服务端渲染 HTML,可读) */
+function dynamicProxyUrl(url: string): string {
+  return `/api/iframe-proxy?url=${encodeURIComponent(url)}`
 }
 </script>
 
@@ -105,14 +113,14 @@ function open(url: string, title?: string) {
               v-if="row.trackingUrl"
               link
               type="primary"
-              @click.stop="open(row.trackingUrl, `追踪UI${row.trackingUI ? ` - ${row.trackingUI}` : ''} - ${row.name}`)"
+              @click.stop="open(trackingProxyUrl(row.id), `追踪UI${row.trackingUI ? ` - ${row.trackingUI}` : ''} - ${row.name}`)"
             >
               追踪UI{{ row.trackingUI ? ` - ${row.trackingUI}` : '' }}
             </el-button>
-            <el-button v-if="row.amContainerLogs" link type="primary" @click.stop="open(row.amContainerLogs, `日志 - ${row.name}`)">
+            <el-button v-if="row.amContainerLogs" link type="primary" @click.stop="open(dynamicProxyUrl(row.amContainerLogs), `日志 - ${row.name}`)">
               日志
             </el-button>
-            <el-button link type="primary" @click.stop="open(`${resourceManager}/cluster/app/${row.id}`, `资源管理器 - ${row.name}`)">
+            <el-button link type="primary" @click.stop="open(`/yarniframe/cluster/app/${row.id}`, `资源管理器 - ${row.name}`)">
               资源管理器
             </el-button>
             <el-button link type="danger" @click.stop="emit('kill', row.id, row.name)">

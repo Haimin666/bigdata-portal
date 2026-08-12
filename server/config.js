@@ -63,6 +63,11 @@ export default {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  // iframe 代理白名单(主机后缀,以 . 开头 = 后缀匹配;用于 NM 日志等动态主机)
+  yarnProxyAllowHosts: pick(fileCfg.yarnProxyAllowHosts, 'YARN_PROXY_ALLOW_HOSTS', '.bigdata.shiqiao.com')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
   hdfsUrl: pick(fileCfg.hdfsUrl, 'HDFS_URL', 'http://hadoop-nn-1.bigdata.shiqiao.com:9870'),
   dsWebUrl: pick(fileCfg.dsWebUrl, 'DS_WEB_URL', 'http://olds.bigdata.shiqiao.com/dolphinscheduler'),
   omdUrl: pick(fileCfg.omdUrl, 'OMD_URL', 'https://omd.corp.shiqiao.com'),
