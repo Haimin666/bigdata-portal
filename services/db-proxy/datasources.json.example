@@ -42,13 +42,14 @@
   },
   "flink": {
     "enabled": false,
-    "gatewayUrl": "http://127.0.0.1:8083",
-    "sessionName": "db-proxy-flink",
-    "executionTarget": "local",
-    "clusterRestUrl": "http://localhost:8082",
+    "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
+    "yarnAppId": "application_xxx",
+    "sessionName": "db-proxy-flink-session",
+    "queue": "default",
     "defaultLimit": 1000,
     "maxLimit": 10000,
-    "queryTimeout": 300
+    "queryTimeout": 300,
+    "allowWrite": false
   },
   "datasources": [
     {

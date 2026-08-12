@@ -101,13 +101,15 @@ if SPARK_ENGINE.enabled:
     log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
              SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
 
-# Flink SQL Gateway 转发(顶层 flink 段,缺省 = 禁用;不内嵌 PyFlink,纯 HTTP 转发)
-from flink_gateway import init_flink  # noqa: E402
+# Flink 引擎(内嵌 PyFlink,连接常驻 YARN Session;缺省 = 禁用)
+from flink_engine import FlinkEngine, _setup_logger as _flink_setup_logger  # noqa: E402
 
+_flink_setup_logger(log)
 FLINK_CFG = CONFIG.get("flink") or {}
-FLINK_GATEWAY = init_flink(FLINK_CFG)
-if FLINK_GATEWAY.enabled:
-    log.info("flink gateway enabled (url=%s)", FLINK_CFG.get("gatewayUrl"))
+FLINK_ENGINE = FlinkEngine(FLINK_CFG, os.path.dirname(os.path.abspath(__file__)))
+if FLINK_CFG.get("enabled"):
+    log.info("flink engine enabled (yarnAppId=%s, allowWrite=%s)",
+             FLINK_CFG.get("yarnAppId"), FLINK_CFG.get("allowWrite"))
 
 # 驱动按需导入(未装对应驱动不阻塞另一个类型)
 try:
@@ -555,7 +557,7 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),
             "spark": SPARK_ENGINE.status(),
-            "flink": FLINK_GATEWAY.status(),
+            "flink": FLINK_ENGINE.status(),
         },
     }
 
@@ -632,7 +634,7 @@ def spark_cancel(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
     return {"code": 0, "data": {"cancelled": cancelled}}
 
 
-# ── Flink SQL Gateway 转发(HTTP 转发到 gateway REST,不做 PyFlink 内嵌)──
+# ── Flink 引擎(PyFlink 内嵌,连接常驻 YARN Session)──
 class FlinkQueryReq(BaseModel):
     sql: str
     limit: Optional[int] = None
@@ -644,18 +646,16 @@ def flink_query(
     req: FlinkQueryReq, x_db_token: Optional[str] = Header(default=None)
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not FLINK_GATEWAY.enabled:
+    if not FLINK_CFG.get("enabled"):
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
     try:
-        result = FLINK_GATEWAY.execute_sql(req.sql, req.timeoutMs, req.limit)
+        result = FLINK_ENGINE.execute_sql(req.sql, req.limit or 0)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)[:1000])
     return {"code": 0, "data": result}
@@ -664,22 +664,22 @@ def flink_query(
 @app.post("/flink/cancel")
 def flink_cancel(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not FLINK_GATEWAY.enabled:
+    if not FLINK_CFG.get("enabled"):
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
-    cancelled = FLINK_GATEWAY.cancel()
+    cancelled = FLINK_ENGINE.cancel()
     return {"code": 0, "data": {"cancelled": cancelled}}
 
 
 @app.get("/flink/status")
 def flink_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not FLINK_GATEWAY.enabled:
+    if not FLINK_CFG.get("enabled"):
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
-    return {"code": 0, "data": FLINK_GATEWAY.status()}
+    return {"code": 0, "data": FLINK_ENGINE.status()}
 
 
 # ── 脚本存储(我的目录:保存 SQL 脚本)────────────────────────────
