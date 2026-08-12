@@ -11,6 +11,22 @@ body {
     sans-serif;
   background: $bg;
   color: $text;
+  position: relative;
+}
+
+/* 深空控制台网格背景(深浅主题由 --bd-grid-line 跟随) */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--bd-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bd-grid-line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, #000 25%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, #000 25%, transparent 78%);
 }
 
 * {

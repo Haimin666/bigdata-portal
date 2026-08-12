@@ -1,34 +1,38 @@
-// ── 全局主题色(亮/暗双主题)────────────────────────────────────
+// ── 全局主题色(亮/暗双主题 · 深空控制台风格)────────────────────
 // 方式:SCSS 变量引用 CSS 变量,挂在 html 根元素。
-//   - :root       亮色(默认)
-//   - html.dark   深色(html 上挂 dark class 即全局切换)
+//   - :root       亮色(默认)  —— 白底控制台
+//   - html.dark   深色(html 上挂 dark class 即全局切换) —— 深空黑 + 电光青
 // 所有组件内 $bg/$panel/$border/$text/$muted/$primary 自动跟随主题,
 // 无需改动各组件样式。Element Plus 深色组件依赖 html.dark 同款约定。
 
+/* ── 亮色(浅色控制台)── */
 :root {
-  --bd-primary: #5e6ad2;
-  --bd-bg: #fafafa;
+  --bd-primary: #00849c;
+  --bd-bg: #eef3f8;
   --bd-panel: #ffffff;
-  --bd-border: #e4e4e7;
-  --bd-text: #18181b;
-  --bd-muted: #71717a;
-  --bd-table-header: #f7f8fa;
-  --bd-table-hover: #f5f6fa;
-  --bd-sidebar: #f0f1f5;
-  --bd-panel-sub: #fafbfc;
+  --bd-border: rgba(11, 74, 104, 0.16);
+  --bd-text: #1b3445;
+  --bd-muted: #5d7a8c;
+  --bd-table-header: #f1f6fa;
+  --bd-table-hover: #e9f2f8;
+  --bd-sidebar: #e6edf4;
+  --bd-panel-sub: #f4f8fc;
+  --bd-grid-line: rgba(11, 74, 104, 0.07);
 }
 
+/* ── 深色(深空控制台)── */
 html.dark {
-  --bd-primary: #7c87e8;
-  --bd-bg: #16181d;
-  --bd-panel: #1e2128;
-  --bd-border: #33363f;
-  --bd-text: #e2e4ea;
-  --bd-muted: #9aa0ab;
-  --bd-table-header: #242730;
-  --bd-table-hover: #2a2e38;
-  --bd-sidebar: #1a1d23;
-  --bd-panel-sub: #171a20;
+  --bd-primary: #00e5ff;
+  --bd-bg: #070b12;
+  --bd-panel: #0c1420;
+  --bd-border: rgba(0, 229, 255, 0.16);
+  --bd-text: #cfe9f2;
+  --bd-muted: #5f7d8c;
+  --bd-table-header: #0a1420;
+  --bd-table-hover: #101b2a;
+  --bd-sidebar: #0a1019;
+  --bd-panel-sub: #0a1019;
+  --bd-grid-line: rgba(0, 229, 255, 0.06);
 }
 
 $primary: var(--bd-primary);
