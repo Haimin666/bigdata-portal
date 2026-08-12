@@ -30,6 +30,9 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
   "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
   "flinkHome": "",                      # 留空自动用 pyflink 自带 1.17.2 运行时
                                         # (覆盖系统遗留的旧 FLINK_HOME,如 /opt/flink-1.10.1)
+  "hiveLib": "",                        # CDH hive lib 目录,留空自动探测
+                                        # /opt/cloudera/parcels/CDH-*/lib/hive/lib
+                                        # (paimon hive catalog 必需)
   "yarnAppId": "application_xxx",          # 常驻 YARN Session 的 application id
   "sessionName": "db-proxy-flink-session",
   "queue": "default",                       # 提交 job 的 YARN 队列(可选)
@@ -45,6 +48,7 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
 }
 """
 
+import glob
 import os
 import re
 import time
@@ -183,6 +187,33 @@ class FlinkEngine:
         if not os.environ.get("HADOOP_CONF_DIR"):
             os.environ["HADOOP_CONF_DIR"] = "/etc/hadoop/conf"
         self._apply_flink_home()
+        self._apply_hive_lib()
+
+    def _apply_hive_lib(self) -> None:
+        """进程内把 CDH Hive Metastore client jar 注入 HADOOP_CLASSPATH。
+
+        paimon 'metastore'='hive' 建 catalog 需要 hive-metastore 等类
+        (NoClassDefFoundError: org/apache/hadoop/hive/metastore/api/...)。
+        pyflink gateway 的 classpath 由 construct_hadoop_classpath() 拼接,
+        第一项就是 HADOOP_CLASSPATH 环境变量 —— 注入 CDH hive lib 目录即可,
+        仅当前进程生效,不动系统/集群配置。
+        """
+        hive_lib = str(self.cfg.get("hiveLib", "")).strip()
+        if not hive_lib:
+            matches = glob.glob("/opt/cloudera/parcels/CDH-*/lib/hive/lib")
+            hive_lib = matches[0] if matches else ""
+        if not hive_lib or not os.path.isdir(hive_lib):
+            if log:
+                log.warning("flink hive lib not found, paimon hive catalog may fail: %s",
+                            self.cfg.get("hiveLib", "(auto)"))
+            return
+        cp = hive_lib.rstrip("/") + "/*"   # Java classpath 通配符,展开目录下全部 jar
+        existing = os.environ.get("HADOOP_CLASSPATH", "").strip()
+        if cp in existing:
+            return
+        os.environ["HADOOP_CLASSPATH"] = cp + (os.pathsep + existing if existing else "")
+        if log:
+            log.info("flink HADOOP_CLASSPATH += %s", cp)
 
     def _apply_flink_home(self) -> None:
         """进程内覆盖 FLINK_HOME/LIB/OPT,强制指向 pyflink 自带 1.17.2 运行时。

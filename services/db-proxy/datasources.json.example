@@ -44,6 +44,7 @@
     "enabled": true,
     "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
     "flinkHome": "",
+    "hiveLib": "",
     "yarnAppId": "application_xxx",
     "sessionName": "db-proxy-flink-session",
     "queue": "default",
