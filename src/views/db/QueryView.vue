@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Document, Plus, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
 import { applyTheme, getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
@@ -121,6 +121,21 @@ const currentFile = ref<ScriptNode | null>(null)
 // 文件内容是否有未保存修改
 const fileDirty = ref(false)
 
+/** 关闭当前文件 tab:解除绑定并清空画布(有未保存修改先确认) */
+async function closeFileTab() {
+  if (fileDirty.value) {
+    try {
+      await ElMessageBox.confirm('文件有未保存的修改,关闭后将丢失。确定关闭?', '关闭确认', { type: 'warning' })
+    } catch {
+      return
+    }
+  }
+  cm?.setValue('')
+  currentFile.value = null
+  fileDirty.value = false
+  cm?.focus()
+}
+
 /** 新建查询:清空编辑器,解除与文件的绑定 */
 function newQuery() {
   cm?.setValue('')
@@ -156,19 +171,34 @@ function onInsert(text: string) {
   c.focus()
 }
 
-/** 保存当前文件(Ctrl/Cmd + S) */
+/** 保存当前文件(Ctrl/Cmd + S):已打开文件直接保存;未打开时输入文件名保存到根目录 */
 async function saveCurrent() {
   const f = currentFile.value
-  if (!f) {
-    ElMessage.info('先在「我的目录」打开一个 SQL 文件')
+  if (f) {
+    try {
+      await saveScriptContent(f.id, cm?.getValue() ?? '')
+      fileDirty.value = false
+      ElMessage.success(`已保存 ${f.name}`)
+    } catch (e) {
+      ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
+    }
     return
   }
+  // 未打开文件 → 命名保存到根目录
   try {
-    await saveScriptContent(f.id, cm?.getValue() ?? '')
+    const { value } = await ElMessageBox.prompt('文件名(默认保存到根目录)', '保存 SQL 文件', {
+      inputValue: 'query.sql',
+      inputValidator: (v) => (v?.trim() ? true : '名称不能为空')
+    })
+    let name = (value || '').trim()
+    if (!name.toLowerCase().endsWith('.sql')) name += '.sql'
+    const node = await createScriptNode(null, name, 'file')
+    await saveScriptContent(node.id, cm?.getValue() ?? '')
+    currentFile.value = node
     fileDirty.value = false
-    ElMessage.success(`已保存 ${f.name}`)
+    ElMessage.success(`已保存到根目录 ${name}`)
   } catch (e) {
-    ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
   }
 }
 
@@ -664,39 +694,6 @@ async function stopQuery() {
   }
 }
 
-/** 执行全部(python 整段执行;SQL 按分号切段逐段执行) */
-async function runAllQuery() {
-  if (!db.value) {
-    ElMessage.warning('请先选择数据库')
-    return
-  }
-  if (!cm) return
-  loading.value = true
-  error.value = ''
-  try {
-    // python 编辑器整段执行
-    if (engine.value === 'pyspark') {
-      const target = cm.getValue().trim()
-      if (!target) {
-        ElMessage.warning('请输入 Python 代码')
-        return
-      }
-      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
-      await execOne(target, 0)
-      activeResult.value = 0
-      return
-    }
-    const segs = getSegments(cm.getValue())
-    if (!segs.length) {
-      ElMessage.warning('没有可执行的 SQL')
-      return
-    }
-    await execSegments(segs)
-  } finally {
-    loading.value = false
-  }
-}
-
 // ── 数据导出(CSV,含 BOM 防 Excel 乱码)──────────────────────
 function exportCsv(idx?: number) {
   const r = idx != null ? results.value[idx] : results.value[0]
@@ -804,12 +801,11 @@ function isNumeric(val: unknown): boolean {
       </el-select>
       <div class="toolbar-spacer" />
       <el-button
-        v-if="currentFile"
         :icon="DocumentChecked"
         class="save-btn"
         :disabled="loading"
         @click="saveCurrent"
-      >保存 {{ currentFile.name }}</el-button>
+      >{{ currentFile ? `保存 ${currentFile.name}` : '保存' }}</el-button>
       <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
       <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
@@ -823,11 +819,9 @@ function isNumeric(val: unknown): boolean {
         <el-divider direction="vertical" />
       </template>
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
-      <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
       <el-button v-if="(engine === 'sparksql' || engine === 'pyspark' || engine === 'flinksql') && loading" type="danger" :icon="VideoPause" @click="stopQuery">
         停止
       </el-button>
-      <el-button :loading="loading" @click="runAllQuery">执行全部</el-button>
       <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
         执行<kbd class="exec-kbd">⌘↵</kbd>
       </el-button>
@@ -843,6 +837,7 @@ function isNumeric(val: unknown): boolean {
         <el-icon class="file-tab-icon"><Document /></el-icon>
         <span class="file-tab-name">{{ currentFile ? currentFile.name : '未命名查询' }}</span>
         <span v-if="fileDirty" class="file-tab-dirty" title="有未保存的修改">●</span>
+        <el-icon v-if="currentFile" class="file-tab-close" title="关闭文件" @click.stop="closeFileTab"><Close /></el-icon>
       </div>
       <div class="file-tab file-tab-add" title="新建查询" @click="newQuery">
         <el-icon><Plus /></el-icon>
@@ -1101,6 +1096,19 @@ function isNumeric(val: unknown): boolean {
 .file-tab-dirty {
   color: #e6a23c;
   font-size: 10px;
+}
+
+.file-tab-close {
+  font-size: 12px;
+  color: $muted;
+  border-radius: 3px;
+  padding: 1px;
+  cursor: pointer;
+
+  &:hover {
+    color: #f56c6c;
+    background: rgba(245, 108, 108, 0.12);
+  }
 }
 
 .file-tab-add {

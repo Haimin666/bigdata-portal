@@ -342,6 +342,14 @@ export async function deleteScriptNode(id: string): Promise<void> {
   })
 }
 
+export async function moveScriptNode(id: string, targetParentId: string | null): Promise<ScriptNode> {
+  return scriptRequest<ScriptNode>('/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, targetParentId })
+  })
+}
+
 export async function saveScriptContent(id: string, content: string): Promise<void> {
   await scriptRequest<never>('/save', {
     method: 'POST',

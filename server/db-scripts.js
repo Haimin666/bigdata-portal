@@ -62,6 +62,16 @@ function collectFileIds(nodes, out) {
   }
 }
 
+/** 判断节点子树内是否包含某 id(用于禁止拖入自身后代) */
+function isDescendant(node, targetId) {
+  if (!node.children) return false
+  for (const c of node.children) {
+    if (c.id === targetId) return true
+    if (isDescendant(c, targetId)) return true
+  }
+  return false
+}
+
 export function dbScriptsRouter() {
   const router = Router()
 
@@ -128,6 +138,44 @@ export function dbScriptsRouter() {
       }
       saveTree(tree)
       res.json({ code: 0, msg: 'deleted' })
+    } catch (e) {
+      res.status(500).json({ code: 500, msg: e.message })
+    }
+  })
+
+  router.post('/move', (req, res) => {
+    try {
+      const { id = '', targetParentId = null } = req.body || {}
+      const tree = loadTree()
+      const found = findNode(tree.my, id)
+      if (!found) return res.status(404).json({ code: 404, msg: '节点不存在' })
+      const [node, parentList] = found
+
+      let target = null
+      if (targetParentId) {
+        const tf = findNode(tree.my, targetParentId)
+        if (!tf || tf[0].type !== 'dir') {
+          return res.status(400).json({ code: 400, msg: '目标必须是目录' })
+        }
+        target = tf[0]
+        // 禁止移动到自身或自己的后代目录
+        if (node.id === target.id || isDescendant(node, target.id)) {
+          return res.status(400).json({ code: 400, msg: '不能移动到自身或其子目录' })
+        }
+      }
+      // 已在该目录下则视为无变化
+      if ((target && parentList === target.children) || (!target && parentList === tree.my)) {
+        return res.json({ code: 0, data: node })
+      }
+      parentList.splice(parentList.indexOf(node), 1)
+      if (target) {
+        target.children = target.children || []
+        target.children.push(node)
+      } else {
+        tree.my.push(node)
+      }
+      saveTree(tree)
+      res.json({ code: 0, data: node })
     } catch (e) {
       res.status(500).json({ code: 500, msg: e.message })
     }

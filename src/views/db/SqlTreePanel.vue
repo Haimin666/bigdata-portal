@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Download, Coin, Grid } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
   renameScriptNode,
   deleteScriptNode,
+  moveScriptNode,
   listTables,
   listFields,
   type ScriptNode,
@@ -166,7 +167,78 @@ function onCopyTable(data: CatNode) {
 // datasources 异步到达后重建表目录树(重新加载根库列表)
 const dbsKey = computed(() => props.dbs.map((d) => d.name).join(','))
 
-onMounted(reloadMy)
+// ── 右键菜单(我的目录节点)──────────────────────────────────
+const ctx = ref<{ show: boolean; x: number; y: number; node: ScriptNode | null }>({
+  show: false,
+  x: 0,
+  y: 0,
+  node: null
+})
+
+function openCtx(e: MouseEvent, node: ScriptNode) {
+  e.preventDefault()
+  e.stopPropagation()
+  // 超出视口右/下边缘时翻转
+  const menuW = 150
+  const menuH = node.type === 'dir' ? 150 : 80
+  const x = Math.min(e.clientX, window.innerWidth - menuW - 8)
+  const y = Math.min(e.clientY, window.innerHeight - menuH - 8)
+  ctx.value = { show: true, x, y, node }
+}
+
+function closeCtx() {
+  ctx.value.show = false
+}
+
+function menuCreate(kind: 'dir' | 'file') {
+  const node = ctx.value.node
+  closeCtx()
+  if (node) void onCreate(node, kind)
+}
+
+function menuRename() {
+  const node = ctx.value.node
+  closeCtx()
+  if (node) void onRename(node)
+}
+
+function menuDelete() {
+  const node = ctx.value.node
+  closeCtx()
+  if (node) void onDelete(node)
+}
+
+// ── 拖拽移动(仅允许拖入目录内)──────────────────────────────
+function allowDrop(_draggingNode: unknown, dropNode: any, type: 'prev' | 'inner' | 'next'): boolean {
+  if (type !== 'inner') return false
+  const target = dropNode.data as ScriptNode
+  return target.type === 'dir'
+}
+
+async function onNodeDrop(draggingNode: any, dropNode: any, type: 'prev' | 'inner' | 'next') {
+  if (type !== 'inner') return
+  const node = draggingNode.data as ScriptNode
+  const target = dropNode.data as ScriptNode
+  try {
+    await moveScriptNode(node.id, target.id)
+    await reloadMy()
+    ElMessage.success(`已移动到「${target.name}」`)
+  } catch (e) {
+    ElMessage.error(`移动失败:${e instanceof Error ? e.message : e}`)
+    await reloadMy() // 回滚展示
+  }
+}
+
+onMounted(() => {
+  void reloadMy()
+  window.addEventListener('click', closeCtx)
+  window.addEventListener('contextmenu', closeCtx)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeCtx)
+  window.removeEventListener('contextmenu', closeCtx)
+})
 </script>
 
 <template>
@@ -192,22 +264,19 @@ onMounted(reloadMy)
           :data="myTree"
           node-key="id"
           default-expand-all
+          draggable
+          :allow-drop="allowDrop"
+          @node-drop="onNodeDrop"
           class="file-tree"
           @node-click="(d: ScriptNode) => onNodeClick(d)"
         >
           <template #default="{ data }">
-            <div class="tree-node">
+            <div class="tree-node" @contextmenu="(e: MouseEvent) => openCtx(e, data as ScriptNode)">
               <el-icon class="node-icon" :class="{ dir: (data as ScriptNode).type === 'dir' }">
                 <Folder v-if="(data as ScriptNode).type === 'dir'" />
                 <Document v-else />
               </el-icon>
               <span class="node-name" :title="(data as ScriptNode).name">{{ (data as ScriptNode).name }}</span>
-              <span class="node-ops" @click.stop>
-                <el-icon v-if="(data as ScriptNode).type === 'dir'" class="op" title="新建子文件" @click="onCreate(data as ScriptNode, 'file')"><Plus /></el-icon>
-                <el-icon v-if="(data as ScriptNode).type === 'dir'" class="op" title="新建子目录" @click="onCreate(data as ScriptNode, 'dir')"><Folder /></el-icon>
-                <el-icon class="op" title="重命名" @click="onRename(data as ScriptNode)"><CaretRight class="rot" /></el-icon>
-                <el-icon class="op danger" title="删除" @click="onDelete(data as ScriptNode)"><Download class="rot45" /></el-icon>
-              </span>
             </div>
           </template>
         </el-tree>
@@ -247,6 +316,23 @@ onMounted(reloadMy)
         </el-tree>
       </div>
     </div>
+  </div>
+
+  <!-- 右键菜单(我的目录) -->
+  <div
+    v-if="ctx.show && ctx.node"
+    class="ctx-menu"
+    :style="{ left: ctx.x + 'px', top: ctx.y + 'px' }"
+    @click.stop
+    @contextmenu.prevent
+  >
+    <template v-if="ctx.node.type === 'dir'">
+      <div class="ctx-item" @click="menuCreate('file')">新建 SQL 文件</div>
+      <div class="ctx-item" @click="menuCreate('dir')">新建目录</div>
+      <div class="ctx-divider" />
+    </template>
+    <div class="ctx-item" @click="menuRename">重命名</div>
+    <div class="ctx-item danger" @click="menuDelete">删除</div>
   </div>
 </template>
 
@@ -402,42 +488,42 @@ onMounted(reloadMy)
   &:hover .copy-btn {
     display: inline-flex;
   }
+}
 
-  .node-ops {
-    display: none;
-    align-items: center;
-    gap: 3px;
-    flex-shrink: 0;
+/* ── 右键菜单 ───────────────────────────────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 3000;
+  min-width: 140px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  font-size: 13px;
+  user-select: none;
+}
 
-    .op {
-      font-size: 15px;
-      color: $muted;
-      cursor: pointer;
-      padding: 3px;
-      border-radius: 4px;
+.ctx-item {
+  padding: 7px 12px;
+  border-radius: 4px;
+  color: $text;
+  cursor: pointer;
+  white-space: nowrap;
 
-      &:hover {
-        color: $primary;
-        background: rgba(94, 106, 210, 0.08);
-      }
-
-      &.danger:hover {
-        color: #f56c6c;
-        background: rgba(245, 108, 108, 0.08);
-      }
-
-      &.rot {
-        transform: rotate(90deg);
-      }
-
-      &.rot45 {
-        transform: rotate(45deg);
-      }
-    }
+  &:hover {
+    background: var(--bd-table-hover);
+    color: $primary;
   }
 
-  &:hover .node-ops {
-    display: inline-flex;
+  &.danger:hover {
+    color: #f56c6c;
   }
+}
+
+.ctx-divider {
+  height: 1px;
+  background: $border;
+  margin: 4px 8px;
 }
 </style>
