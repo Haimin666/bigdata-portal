@@ -118,7 +118,7 @@ async function generate() {
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="conn-tip">
-      <el-icon color="#409eff"><MagicStick /></el-icon>
+      <el-icon color="var(--bd-primary)"><MagicStick /></el-icon>
       <span>勾选多个连接器 → 填参数 → 自动生成 CREATE TABLE,插入编辑器。join 逻辑请自行编写(批模式即席查询 / 流模式提交常驻任务)。</span>
     </div>
 

@@ -33,6 +33,10 @@ type Display =
   | { kind: 'bar'; value: number; max: number; color: string }
   | { kind: 'text'; text: string; numeric: boolean }
 
+function themePrimary(): string {
+  return getComputedStyle(document.documentElement).getPropertyValue('--bd-primary').trim() || '#00b8cc'
+}
+
 const display = computed<Display>(() => {
   const h = props.header.value
   const v = props.item[h]
@@ -46,16 +50,16 @@ const display = computed<Display>(() => {
     return { kind: 'text', text: formatElapsed(Number(v), props.humanize), numeric: false }
   }
   if (h === 'progress') {
-    return { kind: 'bar', value: Math.round(Number(v) * 100), max: 100, color: '#5e6ad2' }
+    return { kind: 'bar', value: Math.round(Number(v) * 100), max: 100, color: themePrimary() }
   }
   if (h === 'queueUsagePercentage' || h === 'clusterUsagePercentage') {
-    return { kind: 'bar', value: Math.round(Number(v)), max: 100, color: '#3b82f6' }
+    return { kind: 'bar', value: Math.round(Number(v)), max: 100, color: themePrimary() }
   }
   if (h === 'allocatedVCores') {
-    return { kind: 'bar', value: Number(v), max: Math.max(Number(v), 64), color: '#3b82f6' }
+    return { kind: 'bar', value: Number(v), max: Math.max(Number(v), 64), color: themePrimary() }
   }
   if (h === 'allocatedMB') {
-    return { kind: 'bar', value: Number(v), max: Math.max(Number(v), 8192), color: '#3b82f6' }
+    return { kind: 'bar', value: Number(v), max: Math.max(Number(v), 8192), color: themePrimary() }
   }
   const text = v === null || v === undefined ? '' : String(v)
   return { kind: 'text', text, numeric: NUMERIC_HEADERS.has(h) }
