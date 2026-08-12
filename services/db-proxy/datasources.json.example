@@ -6,6 +6,8 @@
   "maxLimit": 10000,
   "maxSqlLen": 32768,
   "queryTimeout": 60,
+  "maxConcurrent": 5,
+  "maxQps": 10,
   "connectTimeout": 5,
   "allowedDbs": [
     "sq_ccrs2",

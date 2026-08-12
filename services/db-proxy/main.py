@@ -32,6 +32,8 @@ import os
 import re
 import time
 import uuid
+import collections
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -74,6 +76,13 @@ ALLOWED_TABLES = [
 # 鉴权 + 库/表白名单 + 资源护栏(多语句/行数/长度/超时)
 # Oracle thick 模式:客户端库目录(含 libclntsh.so),连 11g 必配
 ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
+
+# 服务端资源护栏:同时执行上限 + 请求限速(防批量请求刷爆数据库连接/拖垮库)
+MAX_CONCURRENT = int(CONFIG.get("maxConcurrent", 5))
+MAX_QPS = int(CONFIG.get("maxQps", 10))
+_query_semaphore = threading.Semaphore(MAX_CONCURRENT)
+_qps_lock = threading.Lock()
+_qps_window = collections.deque()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -174,9 +183,9 @@ class DataSource:
         )
         # Oracle service_name / MySQL schema(可选,缺省用 name)
         self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
-        # 只读策略(默认 true = 只读,拒绝写操作):
-        # 配 readOnly:false 的库放行 INSERT/UPDATE/DELETE 等(预留可写能力)
-        self.read_only: bool = bool(cfg.get("readOnly", True))
+        # 只读策略(默认 false = 写操作放行,权限收口到门户网关密码解锁):
+        # 配 readOnly:true 的数据源强制只读(纵深保护,如只读账号/敏感库),拒绝一切非查询 SQL
+        self.read_only: bool = bool(cfg.get("readOnly", False))
         # 行数限制语法模式:mysql / fetch(12c+) / rownum(11g)
         # 可选覆盖;不配则 Oracle 连接后自动探测版本(11g→rownum,12c+→fetch)
         self.row_limit: str = str(cfg.get("rowLimit", "")).strip().lower()
@@ -367,6 +376,28 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     clean_sql = sql.strip().rstrip(";").strip()
     # 查询类(可追加行数限制)vs 写语句
     is_select = bool(READ_ONLY_SQL_RE.match(clean_sql))
+    # WITH 前缀的 CTE-DML(WITH cte AS (...) INSERT/UPDATE/DELETE ...)不是只读,防绕过只读保护。
+    # 判定用「去注释后」的 SQL:/* */ 或 -- 注释前缀不应掩盖 WITH 前缀
+    no_comments = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", clean_sql).strip()
+    # 与网关 isSparkWriteSql 对齐:可执行注释(/*! /*M!)与 SELECT 走私(INTO OUTFILE/DUMPFILE、
+    # LOAD_FILE())一律视为非查询(仅用于类型判定/只读保护,不影响执行)
+    if re.search(r"\*[Mm]?!", clean_sql) or re.search(
+        r"\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(", clean_sql, re.IGNORECASE
+    ):
+        is_select = False
+    if is_select and re.match(r"^\s*WITH\b", no_comments, re.IGNORECASE):
+        if re.search(
+            r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE)\b",
+            no_comments,
+            re.IGNORECASE,
+        ):
+            is_select = False
+    # 数据源级只读:显式 readOnly:true 的库拒绝一切非查询 SQL(纵深保护)
+    if ds.read_only and not is_select:
+        raise HTTPException(
+            status_code=403,
+            detail=f"datasource '{ds.name}' is read-only (readOnly:true), write SQL not allowed",
+        )
     limit = enforce_limit(clean_sql)
 
     start = time.time()
@@ -447,31 +478,53 @@ def query(
     req: QueryReq, x_db_token: Optional[str] = Header(default=None)
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    # SQL 长度上限(防超大 SQL)
-    if len(req.sql) > MAX_SQL_LEN:
+    # 并发上限:超过同时执行数直接拒绝(防打爆数据库连接)
+    if not _query_semaphore.acquire(blocking=False):
         raise HTTPException(
-            status_code=400,
-            detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
+            status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
         )
-    check_db_allowed(req.db)
-    ds = get_datasource(req.db)
-    # 权限管控已收口到门户网关(密码解锁);此处仅保留资源护栏:
-    # 1) 多语句防护(防注入走私) 2) 表级白名单(如配置) 3) 行数/长度/超时
-    if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
-        pass  # 过程块内多分号属正常语法,放行
-    else:
-        check_single_statement(req.sql)
-    check_tables_allowed(req.sql)
-    result = fetch(req.sql, req.db)
-    # 审计日志:时间/库/SQL/行数/耗时
-    log.info(
-        "query db=%s rows=%d cost=%dms sql=%s",
-        req.db,
-        len(result["rows"]),
-        result["costMs"],
-        req.sql[:200],
-    )
-    return {"code": 0, "data": result}
+    try:
+        _check_qps()
+        # SQL 长度上限(防超大 SQL)
+        if len(req.sql) > MAX_SQL_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
+            )
+        check_db_allowed(req.db)
+        ds = get_datasource(req.db)
+        # 权限管控已收口到门户网关(密码解锁);此处仅保留资源护栏:
+        # 1) 多语句防护(防注入走私) 2) 表级白名单(如配置) 3) 行数/长度/超时
+        if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
+            pass  # 过程块内多分号属正常语法,放行
+        else:
+            check_single_statement(req.sql)
+        check_tables_allowed(req.sql)
+        result = fetch(req.sql, req.db)
+        # 审计日志:时间/库/SQL/行数/耗时
+        log.info(
+            "query db=%s rows=%d cost=%dms sql=%s",
+            req.db,
+            len(result["rows"]),
+            result["costMs"],
+            req.sql[:200],
+        )
+        return {"code": 0, "data": result}
+    finally:
+        _query_semaphore.release()
+
+
+def _check_qps() -> None:
+    """滑动窗口限速:1 秒窗口内超过 MAX_QPS 拒绝。"""
+    now = time.time()
+    with _qps_lock:
+        _qps_window.append(now)
+        while _qps_window and now - _qps_window[0] > 1.0:
+            _qps_window.popleft()
+        if len(_qps_window) > MAX_QPS:
+            raise HTTPException(
+                status_code=429, detail=f"too many requests (max {MAX_QPS} qps)"
+            )
 
 
 @app.get("/acl")
@@ -487,6 +540,8 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,
             "maxSqlLen": MAX_SQL_LEN,
+            "maxConcurrent": MAX_CONCURRENT,
+            "maxQps": MAX_QPS,
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),
