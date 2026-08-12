@@ -107,5 +107,8 @@ export default {
   dsDepsRefreshInterval: pickInt(fileCfg.dsDepsRefreshInterval, 'DS_DEPS_REFRESH_INTERVAL', 60 * 60 * 1000),
   // 前端模块显隐:白名单(菜单 name 列表,如 ["yarn","hdfs","dbQuery"])。
   // 缺省(空/未配置)表示全部模块展示;配置后仅展示名单内模块。
-  enabledModules: Array.isArray(fileCfg.enabledModules) ? fileCfg.enabledModules.map(String) : []
+  enabledModules: Array.isArray(fileCfg.enabledModules) ? fileCfg.enabledModules.map(String) : [],
+  // 认证(用户管理):默认开启;首次启动无用户时引导创建管理员
+  authEnabled: pick(fileCfg.auth?.enabled, 'AUTH_ENABLED', true),
+  authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12)
 }

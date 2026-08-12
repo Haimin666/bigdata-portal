@@ -3,10 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus, type MenuItem } from '@/config/menu'
 import { getEnabledModules } from '@/api/db'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 defineOptions({ name: 'SideBar' })
+
+import { useAuthStore } from '@/store/auth'
 
 const route = useRoute()
 
@@ -28,22 +30,40 @@ const icons: Record<string, Component> = {
   DataLine,
   Cpu,
   Coin,
-  Notebook
+  Notebook,
+  User: UserFilled
 }
 
 // 当前激活菜单(直接按路由路径)
 const activePath = computed(() => route.path)
 
-// 菜单项:服务端 enabledModules 白名单过滤(空 = 全部展示)
+// 菜单项:优先当前用户可访问模块(用户体系),回退服务端 enabledModules 白名单(空 = 全部展示)。
+// 认证关闭时走 enabledModules(兼容旧部署);admin 额外展示「用户管理」。
+const auth = useAuthStore()
 const enabled = ref<string[] | null>(null)
 const filteredMenus = computed<MenuItem[]>(() => {
-  const allow = enabled.value
-  if (!allow || allow.length === 0) return menus
-  return menus.filter((m) => allow.includes(m.name))
+  let allow = enabled.value
+  if (auth.me?.username) allow = auth.modules // 用户体系优先
+  let list = menus
+  if (allow && allow.length > 0) list = menus.filter((m) => allow.includes(m.name))
+  if (auth.isAdmin) {
+    const extra: MenuItem = {
+      path: '/users',
+      title: '用户管理',
+      name: 'userManage',
+      icon: 'User',
+      kind: 'native'
+    }
+    list = [...list, extra]
+  }
+  return list
 })
 
 onMounted(async () => {
-  enabled.value = await getEnabledModules()
+  if (!auth.loaded) await auth.fetchMe()
+  if (!auth.me?.username) {
+    enabled.value = await getEnabledModules()
+  }
 })
 </script>
 

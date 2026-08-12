@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { Close, Refresh, FullScreen, Sunny, Moon } from '@element-plus/icons-vue'
+import { Close, Refresh, FullScreen, Sunny, Moon, UserFilled, SwitchButton } from '@element-plus/icons-vue'
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import type { MenuItem } from '@/config/menu'
 import { getTheme, toggleTheme } from '@/utils/theme'
+import { useAuthStore } from '@/store/auth'
 
 defineOptions({ name: 'SubappTabs' })
 
@@ -31,6 +34,20 @@ const isDark = computed(() => getTheme() === 'dark')
 function onToggleTheme() {
   toggleTheme()
 }
+
+// ── 用户区(认证开启时显示;点击用户名弹菜单)──
+const auth = useAuthStore()
+const router = useRouter()
+
+async function onLogout() {
+  await auth.logout()
+  ElMessage.success('已退出登录')
+  router.replace('/login')
+}
+
+function goUserManage() {
+  router.push('/users')
+}
 </script>
 
 <template>
@@ -54,6 +71,20 @@ function onToggleTheme() {
       </el-icon>
       <el-icon class="action-icon" title="刷新" @click="emit('refresh')"><Refresh /></el-icon>
       <el-icon class="action-icon" title="全屏" @click="emit('toggleFullscreen')"><FullScreen /></el-icon>
+      <el-dropdown v-if="auth.me?.username" trigger="click" class="user-drop">
+        <span class="user-badge">
+          <el-icon><UserFilled /></el-icon>
+          <span class="user-name">{{ auth.me.username }}</span>
+        </span>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item v-if="auth.isAdmin" @click="goUserManage">用户管理</el-dropdown-item>
+            <el-dropdown-item divided @click="onLogout">
+              <el-icon><SwitchButton /></el-icon>退出登录
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
   </div>
 </template>
@@ -124,5 +155,27 @@ function onToggleTheme() {
   &:hover {
     color: $primary;
   }
+}
+
+.user-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: $text;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+
+  &:hover {
+    color: $primary;
+  }
+}
+
+.user-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

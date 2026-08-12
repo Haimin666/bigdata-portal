@@ -35,6 +35,35 @@ app.use((req, res, next) => {
   express.json()(req, res, next)
 })
 
+// ── 认证与用户管理 ─────────────────────────────────────────────
+// 自建账号(用户名+密码,scrypt),会话 = HttpOnly cookie + data/sessions.json。
+// 阶段一只保护门户壳:门户 API 与子应用代理路径;子应用内部账号体系不打通。
+import { setupAuth } from './auth.js'
+
+const auth = setupAuth(app, config)
+
+// 受保护路径:未登录一律 401(除 /api/auth/* 与静态资源/SPA 页面,由前端路由守卫拦截)。
+// 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
+const PROTECTED_PREFIXES = [
+  '/api/db', '/api/spark', '/api/flink', '/api/users',
+  '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
+  '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
+  '/webhdfs', '/dolphinscheduler', '/static'
+]
+app.use((req, res, next) => {
+  if (!auth.enabled) return next()
+  if (!PROTECTED_PREFIXES.some((p) => req.path.startsWith(p))) return next()
+  const user = auth.currentUser(req)
+  if (!user) {
+    if (auth.users.isEmpty()) {
+      return res.status(503).json({ code: 503, msg: '系统未初始化,请先创建管理员' })
+    }
+    return res.status(401).json({ code: 401, msg: '未登录或会话已过期' })
+  }
+  req.user = user
+  next()
+})
+
 // ── 通用工具 ───────────────────────────────────────────────────
 
 // Set-Cookie 重写:同源代理后种到门户域。
