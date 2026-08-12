@@ -49,6 +49,11 @@ function rewriteLocation(location, targetUrl, prefix) {
   return location
 }
 
+// 正则转义(用于把 host 拼进 new RegExp)
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 // 代理响应处理:去 frame 限制、cookie/location 重写
 function onProxyRes(targetUrl, prefix) {
   return (proxyRes) => {
@@ -211,15 +216,34 @@ yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
     proxyRes.pipe(res)
     return
   }
-  // HTML 响应:重写绝对根路径链接后交给门户(保持状态码/响应头)
+  // HTML 响应:重写链接后交给门户(保持状态码/响应头)
   const chunks = []
   proxyRes.on('data', (c) => chunks.push(c))
   proxyRes.on('end', () => {
     let html = Buffer.concat(chunks).toString('utf8')
+    // 绝对根路径链接 → /yarniframe/xxx
     html = html.replace(
-      /(href|src)\s*=\s*(["'])\/(?!\/|yarniframe)/g,
+      /(href|src)\s*=\s*(["'])\/(?!\/|yarniframe|api\/iframe-proxy)/g,
       `$1=$2/yarniframe/`
     )
+    // 完整 URL(host 命中任一 RM)→ /yarniframe/xxx
+    // RM 页面 css 常为 http://RM:8088/static/... 或 //RM:8088/static/...
+    const rmHosts = config.resourceManagers
+      .map((u) => {
+        try {
+          return new URL(u).host
+        } catch {
+          return ''
+        }
+      })
+      .filter(Boolean)
+    if (rmHosts.length) {
+      const fullUrlRe = new RegExp(
+        '(href|src)\\s*=\\s*(["\'])(?:https?:)?\\/\\/(' + rmHosts.map(escapeRegExp).join('|') + ')((?:\\/[^"\']*)?)(["\'])',
+        'g'
+      )
+      html = html.replace(fullUrlRe, (m, attr, q, _host, rest, q2) => `${attr}=${q}/yarniframe${rest || '/'}${q2}`)
+    }
     delete proxyRes.headers['content-length']
     res.writeHead(proxyRes.statusCode, proxyRes.headers)
     res.end(html)
@@ -272,6 +296,20 @@ yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
       html = html.replace(
         /(href|src)\s*=\s*(["'])\/(?!api\/iframe-proxy)((?:[^"'])*)(["'])/g,
         (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + '/' + path)}${q2}`
+      )
+      // 完整 URL(含主机)→ 继续走动态代理(NM 日志页 css 常为 http://host:8042/static/... 或 //host/...)
+      html = html.replace(
+        /(href|src)\s*=\s*(["'])((?:https?:)?\/\/[^\/"']+)((?:\/[^"']*)?)(["'])/g,
+        (all, attr, q, schemeHost, rest, q2) => {
+          try {
+            const u = new URL(schemeHost.startsWith('//') ? 'http:' + schemeHost : schemeHost)
+            if (!isYarnProxyAllowed(u.hostname)) return all
+          } catch {
+            return all
+          }
+          const full = schemeHost.startsWith('//') ? 'http:' + schemeHost + rest : schemeHost + rest
+          return `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(full)}${q2}`
+        }
       )
     }
     delete proxyRes.headers['content-length']
