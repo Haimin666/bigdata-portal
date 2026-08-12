@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Refresh, Sunny, Moon, DocumentChecked, Document, Plus, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -118,6 +118,16 @@ async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<
 
 // 当前打开的文件(我的目录):保存时写回
 const currentFile = ref<ScriptNode | null>(null)
+// 文件内容是否有未保存修改
+const fileDirty = ref(false)
+
+/** 新建查询:清空编辑器,解除与文件的绑定 */
+function newQuery() {
+  cm?.setValue('')
+  currentFile.value = null
+  fileDirty.value = false
+  cm?.focus()
+}
 
 /** 打开文件:加载 SQL/Python 内容到编辑器(.py 自动切 PySpark 引擎) */
 async function onOpenFile(node: ScriptNode) {
@@ -125,6 +135,7 @@ async function onOpenFile(node: ScriptNode) {
     const { content } = await getScriptContent(node.id)
     cm?.setValue(content || '')
     currentFile.value = node
+    fileDirty.value = false
     // .py 文件自动切到 PySpark 引擎(python 编辑器)
     if (node.name.toLowerCase().endsWith('.py')) {
       engine.value = 'pyspark'
@@ -154,6 +165,7 @@ async function saveCurrent() {
   }
   try {
     await saveScriptContent(f.id, cm?.getValue() ?? '')
+    fileDirty.value = false
     ElMessage.success(`已保存 ${f.name}`)
   } catch (e) {
     ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
@@ -262,6 +274,10 @@ async function initEditor() {
   // 等 DOM 稳定后强制 refresh 重算布局。
   await nextTick()
   cm.refresh()
+  // 文件内容变更 → 未保存标记(仅打开文件时跟踪)
+  cm.on('change', () => {
+    if (currentFile.value) fileDirty.value = true
+  })
   // ── 补全触发:输入字母/下划线后 250ms 弹出(避免每键弹闪);浮层打开时 Tab 选词 ──
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
     if (change.origin !== '+input') return
@@ -277,8 +293,7 @@ async function initEditor() {
   })
   // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
-    'Ctrl-Enter': () => {
-      void runQuery()
+    'Ctrl-Enter': () => {      void runQuery()
     },
     'Cmd-Enter': () => {
       void runQuery()
@@ -516,6 +531,19 @@ interface QueryResultItem {
 const results = ref<QueryResultItem[]>([])
 // 当前激活的结果序号(多条时 tab 切换)
 const activeResult = ref(0)
+// 结果表格翻页(默认 15 条/页)
+const pageSize = ref(15)
+const pageCurrent = ref(1)
+const pagedRows = computed(() => {
+  const r = results.value[activeResult.value]
+  if (!r) return []
+  const start = (pageCurrent.value - 1) * pageSize.value
+  return r.rows.slice(start, start + pageSize.value)
+})
+function selectResult(idx: number) {
+  activeResult.value = idx
+  pageCurrent.value = 1
+}
 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
 const flinkMode = ref<'batch' | 'stream'>('batch')
@@ -809,6 +837,19 @@ function isNumeric(val: unknown): boolean {
       </el-button>
     </div>
 
+    <!-- SQL 文件 tab 栏 -->
+    <div class="file-tabs">
+      <div class="file-tab active">
+        <el-icon class="file-tab-icon"><Document /></el-icon>
+        <span class="file-tab-name">{{ currentFile ? currentFile.name : '未命名查询' }}</span>
+        <span v-if="fileDirty" class="file-tab-dirty" title="有未保存的修改">●</span>
+      </div>
+      <div class="file-tab file-tab-add" title="新建查询" @click="newQuery">
+        <el-icon><Plus /></el-icon>
+      </div>
+      <span class="file-tabs-spacer" />
+    </div>
+
     <!-- SQL 画布(CodeMirror) -->
     <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
       <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
@@ -837,7 +878,7 @@ function isNumeric(val: unknown): boolean {
           :key="idx"
           class="result-tab"
           :class="{ active: idx === activeResult }"
-          @click="activeResult = idx"
+          @click="selectResult(idx)"
         >
           <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
           <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
@@ -850,7 +891,7 @@ function isNumeric(val: unknown): boolean {
         <template v-if="results[activeResult]">
           <el-alert v-if="results[activeResult].error" type="error" :title="results[activeResult].error" show-icon :closable="false" class="err-alert" />
           <div v-else v-loading="loading" class="result-table-wrap">
-            <el-table :data="results[activeResult].rows.slice(0, 200)" border size="small" class="result-table">
+            <el-table :data="pagedRows" border size="small" class="result-table">
               <el-table-column type="index" label="#" width="55" align="center" />
               <el-table-column
                 v-for="c in results[activeResult].columns"
@@ -893,6 +934,17 @@ function isNumeric(val: unknown): boolean {
               <span class="footer-muted">· {{ results[activeResult].costMs }}ms</span>
             </template>
           </div>
+          <!-- 翻页(默认 15 条/页) -->
+          <el-pagination
+            v-if="results[activeResult].rows.length > pageSize"
+            v-model:current-page="pageCurrent"
+            v-model:page-size="pageSize"
+            class="result-pagination"
+            :page-sizes="[15, 50, 100, 200]"
+            :total="results[activeResult].rows.length"
+            layout="total, sizes, prev, pager, next"
+            small
+          />
         </template>
       </div>
     </div>
@@ -979,15 +1031,16 @@ function isNumeric(val: unknown): boolean {
 
 /* 拖拽条 */
 .db-resizer {
-  width: 5px;
+  width: 4px;
   cursor: col-resize;
   flex-shrink: 0;
   border-radius: 3px;
+  background: $border;
   transition: background 0.15s;
 
   &:hover {
     background: $primary;
-    opacity: 0.4;
+    opacity: 0.6;
   }
 }
 
@@ -1000,28 +1053,96 @@ function isNumeric(val: unknown): boolean {
 }
 
 .save-btn {
-  max-width: 220px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ── SQL 文件 tab 栏 ───────────────────────────────────── */
+.file-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.file-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: $muted;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &.active {
+    background: var(--bd-table-hover);
+    color: $text;
+    font-weight: 600;
+  }
+
+  &:hover {
+    color: $primary;
+  }
+}
+
+.file-tab-icon {
+  font-size: 13px;
+  color: $primary;
+}
+
+.file-tab-dirty {
+  color: #e6a23c;
+  font-size: 10px;
+}
+
+.file-tab-add {
+  padding: 3px 6px;
+  color: $muted;
+
+  &:hover {
+    color: $primary;
+  }
+}
+
+.file-tabs-spacer {
+  flex: 1;
 }
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
-  padding: 10px 12px;
+  padding: 4px 6px;
   flex-shrink: 0;
+
+  /* 按钮瘦身 */
+  :deep(.el-button) {
+    padding: 5px 8px;
+  }
+
+  :deep(.el-select__wrapper) {
+    min-height: 28px;
+    padding: 0 8px;
+  }
 }
 
 .engine-select {
-  width: 120px;
+  width: 96px;
 }
 
 .db-select {
-  width: 260px;
+  width: 200px;
 }
 
 .toolbar-spacer {
@@ -1233,7 +1354,7 @@ function isNumeric(val: unknown): boolean {
 
 /* 拖拽分割条 */
 .sql-dragbar {
-  height: 6px;
+  height: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1241,11 +1362,14 @@ function isNumeric(val: unknown): boolean {
   color: $muted;
   flex-shrink: 0;
   user-select: none;
+  background: $panel;
+  border-top: 1px solid $border;
+  border-bottom: 1px solid $border;
+  border-radius: 3px;
 
   &:hover {
     color: $primary;
-    background: rgba(94, 106, 210, 0.06);
-    border-radius: 3px;
+    background: var(--bd-table-hover);
   }
 }
 

@@ -301,7 +301,7 @@ onMounted(reloadMy)
   .toolbar-title {
     font-size: 14px;
     font-weight: 600;
-    color: #606266;
+    color: $text;
   }
 
   .cat-db {
@@ -330,12 +330,12 @@ onMounted(reloadMy)
     border-radius: 4px;
 
     &:hover {
-      background: #eef1f6;
+      background: var(--bd-table-hover);
     }
   }
 
   :deep(.el-tree-node__expand-icon) {
-    color: #909399;
+    color: $muted;
   }
 }
 
@@ -359,7 +359,7 @@ onMounted(reloadMy)
       color: #5e6ad2;
 
       &.field {
-        color: #909399;
+        color: $muted;
         transform: rotate(90deg);
       }
     }
@@ -367,7 +367,7 @@ onMounted(reloadMy)
 
   .node-name {
     font-size: 14px;
-    color: #333;
+    color: $text;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -411,7 +411,7 @@ onMounted(reloadMy)
 
     .op {
       font-size: 15px;
-      color: #909399;
+      color: $muted;
       cursor: pointer;
       padding: 3px;
       border-radius: 4px;
