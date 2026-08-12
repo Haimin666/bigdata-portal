@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
+import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsCardView' })
@@ -40,8 +41,14 @@ const paged = computed(() =>
   rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
 )
 
-function open(url: string) {
-  window.open(url, '_blank')
+// 追踪 / 日志 / 详情:弹窗内 iframe 查看
+const frameShow = ref(false)
+const frameUrl = ref('')
+const frameTitle = ref('')
+function open(url: string, title?: string) {
+  frameUrl.value = url
+  frameTitle.value = title || '查看'
+  frameShow.value = true
 }
 
 function onPageChange(p: number) {
@@ -70,14 +77,14 @@ function onSizeChange(s: number) {
             <el-button
               v-if="app.trackingUrl"
               size="small"
-              @click="open(app.trackingUrl)"
+              @click="open(app.trackingUrl, `追踪 - ${app.name}`)"
             >
               追踪
             </el-button>
-            <el-button v-if="app.amContainerLogs" size="small" @click="open(app.amContainerLogs)">
+            <el-button v-if="app.amContainerLogs" size="small" @click="open(app.amContainerLogs, `日志 - ${app.name}`)">
               日志
             </el-button>
-            <el-button size="small" @click="open(`${resourceManager}/cluster/app/${app.id}`)">
+            <el-button size="small" @click="open(`${resourceManager}/cluster/app/${app.id}`, `资源管理器 - ${app.name}`)">
               详情
             </el-button>
             <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
@@ -98,6 +105,9 @@ function onSizeChange(s: number) {
       @current-change="onPageChange"
       @size-change="onSizeChange"
     />
+
+    <!-- 追踪 / 日志 / 详情 iframe 弹窗 -->
+    <UrlFrameDialog v-model="frameShow" :url="frameUrl" :title="frameTitle" />
   </div>
 </template>
 

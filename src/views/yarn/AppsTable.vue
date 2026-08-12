@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
+import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsTable' })
@@ -74,8 +75,14 @@ function onSizeChange(s: number) {
   emit('rows-change', s)
 }
 
-function open(url: string) {
-  window.open(url, '_blank')
+// 追踪UI / 日志 / 资源管理器:弹窗内 iframe 查看
+const frameShow = ref(false)
+const frameUrl = ref('')
+const frameTitle = ref('')
+function open(url: string, title?: string) {
+  frameUrl.value = url
+  frameTitle.value = title || '查看'
+  frameShow.value = true
 }
 </script>
 
@@ -98,14 +105,14 @@ function open(url: string) {
               v-if="row.trackingUrl"
               link
               type="primary"
-              @click.stop="open(row.trackingUrl)"
+              @click.stop="open(row.trackingUrl, `追踪UI${row.trackingUI ? ` - ${row.trackingUI}` : ''} - ${row.name}`)"
             >
               追踪UI{{ row.trackingUI ? ` - ${row.trackingUI}` : '' }}
             </el-button>
-            <el-button v-if="row.amContainerLogs" link type="primary" @click.stop="open(row.amContainerLogs)">
+            <el-button v-if="row.amContainerLogs" link type="primary" @click.stop="open(row.amContainerLogs, `日志 - ${row.name}`)">
               日志
             </el-button>
-            <el-button link type="primary" @click.stop="open(`${resourceManager}/cluster/app/${row.id}`)">
+            <el-button link type="primary" @click.stop="open(`${resourceManager}/cluster/app/${row.id}`, `资源管理器 - ${row.name}`)">
               资源管理器
             </el-button>
             <el-button link type="danger" @click.stop="emit('kill', row.id, row.name)">
@@ -141,6 +148,9 @@ function open(url: string) {
       @current-change="onPageChange"
       @size-change="onSizeChange"
     />
+
+    <!-- 追踪UI / 日志 / 资源管理器 iframe 弹窗 -->
+    <UrlFrameDialog v-model="frameShow" :url="frameUrl" :title="frameTitle" />
   </div>
 </template>
 
