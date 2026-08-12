@@ -12,6 +12,15 @@
   --bd-panel: #ffffff;
   --bd-border: rgba(11, 74, 104, 0.16);
   --bd-text: #1b3445;
+
+  /* Element Plus 主色对齐(青,替代默认蓝) */
+  --el-color-primary: #00849c;
+  --el-color-primary-light-3: #33a2b5;
+  --el-color-primary-light-5: #66b9c7;
+  --el-color-primary-light-7: #99d0da;
+  --el-color-primary-light-8: #b3dce3;
+  --el-color-primary-light-9: #cce8ed;
+  --el-color-primary-dark-2: #006a7d;
   --bd-muted: #5d7a8c;
   --bd-table-header: #f1f6fa;
   --bd-table-hover: #e9f2f8;
@@ -33,6 +42,15 @@ html.dark {
   --bd-sidebar: #0a1019;
   --bd-panel-sub: #0a1019;
   --bd-grid-line: rgba(0, 229, 255, 0.06);
+
+  /* Element Plus 主色对齐(电光青,替代默认蓝) */
+  --el-color-primary: #00e5ff;
+  --el-color-primary-light-3: #33eaff;
+  --el-color-primary-light-5: #66efff;
+  --el-color-primary-light-7: #99f5ff;
+  --el-color-primary-light-8: #b3f8ff;
+  --el-color-primary-light-9: #ccfbff;
+  --el-color-primary-dark-2: #00b8cc;
 }
 
 $primary: var(--bd-primary);
