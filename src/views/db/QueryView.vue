@@ -116,41 +116,106 @@ async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<
   return querySpark(sql, sparkToken.value || undefined, kind)
 }
 
-// 当前打开的文件(我的目录):保存时写回
-const currentFile = ref<ScriptNode | null>(null)
-// 文件内容是否有未保存修改
-const fileDirty = ref(false)
+// ── 多文件 tab(最多 10 个)──────────────────────────────────
+const MAX_TABS = 10
+interface EditorTab {
+  id: string
+  file: ScriptNode | null // 绑定的文件;null = 未命名查询
+  name: string
+  content: string // 内容快照(切换 tab 时写回/读取)
+  dirty: boolean
+}
+let tabSeq = 0
+function newTab(name: string, content: string): EditorTab {
+  return { id: `tab-${++tabSeq}`, file: null, name, content, dirty: false }
+}
+const tabs = ref<EditorTab[]>([])
+const activeTabId = ref('')
+const activeTab = computed(() => tabs.value.find((t) => t.id === activeTabId.value) ?? null)
+// 初始一个未命名 tab
+tabs.value.push(newTab('未命名查询', ''))
+activeTabId.value = tabs.value[0].id
 
-/** 关闭当前文件 tab:解除绑定并清空画布(有未保存修改先确认) */
-async function closeFileTab() {
-  if (fileDirty.value) {
+/** 把当前编辑器内容写回当前 tab(切换/关闭前调用) */
+function flushActiveContent() {
+  const t = activeTab.value
+  if (t) t.content = cm?.getValue() ?? ''
+}
+
+/** 切换 tab:写回当前内容 → 加载目标内容 */
+function switchTab(id: string) {
+  if (id === activeTabId.value) return
+  flushActiveContent()
+  activeTabId.value = id
+  const next = tabs.value.find((t) => t.id === id)
+  if (next) {
+    cm?.setValue(next.content)
+    if (next.file?.name.toLowerCase().endsWith('.py')) engine.value = 'pyspark'
+  }
+  cm?.focus()
+}
+
+/** 关闭 tab:有未保存修改先确认;关闭后激活相邻 tab,全关则新建一个未命名 tab */
+async function closeTab(id: string) {
+  const tab = tabs.value.find((t) => t.id === id)
+  if (!tab) return
+  if (tab.dirty) {
     try {
-      await ElMessageBox.confirm('文件有未保存的修改,关闭后将丢失。确定关闭?', '关闭确认', { type: 'warning' })
+      await ElMessageBox.confirm(`「${tab.name}」有未保存的修改,关闭后将丢失。确定关闭?`, '关闭确认', { type: 'warning' })
     } catch {
       return
     }
   }
-  cm?.setValue('')
-  currentFile.value = null
-  fileDirty.value = false
+  const idx = tabs.value.indexOf(tab)
+  flushActiveContent()
+  tabs.value.splice(idx, 1)
+  if (activeTabId.value === id) {
+    if (tabs.value.length === 0) {
+      const nt = newTab('未命名查询', '')
+      tabs.value.push(nt)
+      activeTabId.value = nt.id
+      cm?.setValue('')
+    } else {
+      const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
+      activeTabId.value = next.id
+      cm?.setValue(next.content)
+    }
+  }
   cm?.focus()
 }
 
-/** 新建查询:清空编辑器,解除与文件的绑定 */
+/** 新建查询:追加一个未命名 tab(最多 MAX_TABS 个) */
 function newQuery() {
+  if (tabs.value.length >= MAX_TABS) {
+    ElMessage.warning(`最多同时打开 ${MAX_TABS} 个 tab`)
+    return
+  }
+  flushActiveContent()
+  const nt = newTab('未命名查询', '')
+  tabs.value.push(nt)
+  activeTabId.value = nt.id
   cm?.setValue('')
-  currentFile.value = null
-  fileDirty.value = false
   cm?.focus()
 }
 
-/** 打开文件:加载 SQL/Python 内容到编辑器(.py 自动切 PySpark 引擎) */
+/** 打开文件:已打开则切到对应 tab;否则新开 tab(最多 MAX_TABS 个) */
 async function onOpenFile(node: ScriptNode) {
+  const existing = tabs.value.find((t) => t.file?.id === node.id)
+  if (existing) {
+    switchTab(existing.id)
+    return
+  }
+  if (tabs.value.length >= MAX_TABS) {
+    ElMessage.warning(`最多同时打开 ${MAX_TABS} 个文件,请先关闭部分 tab`)
+    return
+  }
   try {
     const { content } = await getScriptContent(node.id)
+    flushActiveContent()
+    const tab: EditorTab = { id: `file-${node.id}`, file: node, name: node.name, content, dirty: false }
+    tabs.value.push(tab)
+    activeTabId.value = tab.id
     cm?.setValue(content || '')
-    currentFile.value = node
-    fileDirty.value = false
     // .py 文件自动切到 PySpark 引擎(python 编辑器)
     if (node.name.toLowerCase().endsWith('.py')) {
       engine.value = 'pyspark'
@@ -171,20 +236,21 @@ function onInsert(text: string) {
   c.focus()
 }
 
-/** 保存当前文件(Ctrl/Cmd + S):已打开文件直接保存;未打开时输入文件名保存到根目录 */
-async function saveCurrent() {
-  const f = currentFile.value
-  if (f) {
+/** 保存当前活跃 tab(Ctrl/Cmd + S):绑定文件直接保存;未命名时输入文件名保存到根目录 */
+async function saveActive() {
+  const tab = activeTab.value
+  if (!tab) return
+  if (tab.file) {
     try {
-      await saveScriptContent(f.id, cm?.getValue() ?? '')
-      fileDirty.value = false
-      ElMessage.success(`已保存 ${f.name}`)
+      await saveScriptContent(tab.file.id, cm?.getValue() ?? '')
+      tab.dirty = false
+      ElMessage.success(`已保存 ${tab.name}`)
     } catch (e) {
       ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
     }
     return
   }
-  // 未打开文件 → 命名保存到根目录
+  // 未命名 tab → 命名保存到根目录
   try {
     const { value } = await ElMessageBox.prompt('文件名(默认保存到根目录)', '保存 SQL 文件', {
       inputValue: 'query.sql',
@@ -194,8 +260,9 @@ async function saveCurrent() {
     if (!name.toLowerCase().endsWith('.sql')) name += '.sql'
     const node = await createScriptNode(null, name, 'file')
     await saveScriptContent(node.id, cm?.getValue() ?? '')
-    currentFile.value = node
-    fileDirty.value = false
+    tab.file = node
+    tab.name = name
+    tab.dirty = false
     ElMessage.success(`已保存到根目录 ${name}`)
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
@@ -304,9 +371,10 @@ async function initEditor() {
   // 等 DOM 稳定后强制 refresh 重算布局。
   await nextTick()
   cm.refresh()
-  // 文件内容变更 → 未保存标记(仅打开文件时跟踪)
+  // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)
   cm.on('change', () => {
-    if (currentFile.value) fileDirty.value = true
+    const t = activeTab.value
+    if (t) t.dirty = true
   })
   // ── 补全触发:输入字母/下划线后 250ms 弹出(避免每键弹闪);浮层打开时 Tab 选词 ──
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
@@ -329,10 +397,10 @@ async function initEditor() {
       void runQuery()
     },
     'Ctrl-S': () => {
-      void saveCurrent()
+      void saveActive()
     },
     'Cmd-S': () => {
-      void saveCurrent()
+      void saveActive()
     },
     'Ctrl-Space': (c: CodeMirror.Editor) => {
       c.showHint({
@@ -804,8 +872,8 @@ function isNumeric(val: unknown): boolean {
         :icon="DocumentChecked"
         class="save-btn"
         :disabled="loading"
-        @click="saveCurrent"
-      >{{ currentFile ? `保存 ${currentFile.name}` : '保存' }}</el-button>
+        @click="saveActive"
+      >{{ activeTab && activeTab.file ? `保存 ${activeTab.name}` : '保存' }}</el-button>
       <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
       <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
@@ -831,13 +899,20 @@ function isNumeric(val: unknown): boolean {
       </el-button>
     </div>
 
-    <!-- SQL 文件 tab 栏 -->
+    <!-- SQL 文件 tab 栏(最多 10 个) -->
     <div class="file-tabs">
-      <div class="file-tab active">
+      <div
+        v-for="t in tabs"
+        :key="t.id"
+        class="file-tab"
+        :class="{ active: t.id === activeTabId }"
+        :title="t.name"
+        @click="switchTab(t.id)"
+      >
         <el-icon class="file-tab-icon"><Document /></el-icon>
-        <span class="file-tab-name">{{ currentFile ? currentFile.name : '未命名查询' }}</span>
-        <span v-if="fileDirty" class="file-tab-dirty" title="有未保存的修改">●</span>
-        <el-icon v-if="currentFile" class="file-tab-close" title="关闭文件" @click.stop="closeFileTab"><Close /></el-icon>
+        <span class="file-tab-name">{{ t.name }}</span>
+        <span v-if="t.dirty" class="file-tab-dirty" title="有未保存的修改">●</span>
+        <el-icon class="file-tab-close" title="关闭" @click.stop="closeTab(t.id)"><Close /></el-icon>
       </div>
       <div class="file-tab file-tab-add" title="新建查询" @click="newQuery">
         <el-icon><Plus /></el-icon>
