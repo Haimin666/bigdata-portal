@@ -11,6 +11,13 @@ export interface MenuItem {
 }
 
 export const menus: MenuItem[] = [
+  {
+    path: '/users',
+    title: '用户管理',
+    name: 'userManage',
+    icon: 'User',
+    kind: 'native'
+  },
   { path: '/yarn', title: 'YARN 应用', name: 'yarn', icon: 'Monitor', kind: 'native' },
   {
     path: '/ds-task',

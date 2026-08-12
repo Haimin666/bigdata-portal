@@ -46,16 +46,8 @@ const filteredMenus = computed<MenuItem[]>(() => {
   if (auth.me?.username) allow = auth.modules // 用户体系优先
   let list = menus
   if (allow && allow.length > 0) list = menus.filter((m) => allow.includes(m.name))
-  if (auth.isAdmin) {
-    const extra: MenuItem = {
-      path: '/users',
-      title: '用户管理',
-      name: 'userManage',
-      icon: 'User',
-      kind: 'native'
-    }
-    list = [...list, extra]
-  }
+  // 用户管理仅管理员可见(静态菜单,此处按角色过滤)
+  if (!auth.isAdmin) list = list.filter((m) => m.name !== 'userManage')
   return list
 })
 

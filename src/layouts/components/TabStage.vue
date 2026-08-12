@@ -8,6 +8,7 @@ import YarnView from '@/views/yarn/YarnView.vue'
 import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
 import HdfsView from '@/views/hdfs/HdfsView.vue'
 import DbQueryView from '@/views/db/QueryView.vue'
+import UserManageView from '@/views/admin/UserManageView.vue'
 
 defineOptions({ name: 'TabStage' })
 
@@ -29,7 +30,8 @@ const nativeComponents: Record<string, Component> = {
   yarn: YarnView,
   dsTask: DsTaskMonitor,
   hdfs: HdfsView,
-  dbQuery: DbQueryView
+  dbQuery: DbQueryView,
+  userManage: UserManageView
 }
 
 const activePath = computed(() => route.path)
