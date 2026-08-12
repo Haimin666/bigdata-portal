@@ -51,7 +51,7 @@
     "queryTimeout": 300,
     "allowWrite": true,
     "pipelineJars": [
-      "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
+      "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8-20240507.002037-81.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-kafka-1.17.2.jar"
     ],
