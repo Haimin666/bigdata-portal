@@ -52,6 +52,10 @@
     "maxLimit": 10000,
     "queryTimeout": 300,
     "allowWrite": true,
+    "catalogs": [
+      "CREATE CATALOG paimon_hive_store WITH ('type'='paimon', 'metastore'='hive', 'uri'='thrift://hadoop-nn-1.bigdata.shiqiao.com:9083,thrift://hadoop-nn-2.bigdata.shiqiao.com:9083', 'warehouse'='hdfs://lbc/user/hive/paimon/')"
+    ],
+    "defaultCatalog": "paimon_hive_store",
     "pipelineJars": [
       "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8-20240507.002037-81.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",

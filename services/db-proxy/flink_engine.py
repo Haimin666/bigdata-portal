@@ -311,7 +311,44 @@ class FlinkEngine:
             builder.in_streaming_mode()
         else:
             builder.in_batch_mode()
-        return TableEnvironment.create(builder.build())
+        env = TableEnvironment.create(builder.build())
+        self._register_default_catalogs(env)
+        return env
+
+    def _register_default_catalogs(self, t_env) -> None:
+        """自动注册 datasources.json flink.catalogs 里的 catalog,重启不丢。
+
+        根因:CREATE CATALOG 注册在 TableEnvironment 内存态,db-proxy 重启后
+        全部丢失,导致 `USE CATALOG xxx` 报 "does not exist"。
+        配置示例(flink 段):
+          "catalogs": [
+            "CREATE CATALOG paimon_hive_store WITH ('type'='paimon', 'metastore'='hive', 'uri'='...', 'warehouse'='hdfs://...')"
+          ],
+          "defaultCatalog": "paimon_hive_store"
+        """
+        ddl_list = self.cfg.get("catalogs") or []
+        if isinstance(ddl_list, str):
+            ddl_list = [ddl_list]
+        for ddl in ddl_list:
+            ddl = str(ddl).strip()
+            if not ddl:
+                continue
+            try:
+                t_env.execute_sql(ddl)
+                if log:
+                    log.info("flink auto catalog ok: %.100s", ddl)
+            except Exception as e:
+                if log:
+                    log.warning("flink auto catalog failed: %.100s :: %s", ddl, e)
+        default_catalog = str(self.cfg.get("defaultCatalog", "")).strip()
+        if default_catalog:
+            try:
+                t_env.use_catalog(default_catalog)
+                if log:
+                    log.info("flink default catalog set: %s", default_catalog)
+            except Exception as e:
+                if log:
+                    log.warning("flink use default catalog failed: %s :: %s", default_catalog, e)
 
     def _t_env(self, mode: str):
         return self._t_env_stream if mode == "stream" else self._t_env_batch
