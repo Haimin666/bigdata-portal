@@ -267,7 +267,8 @@ class FlinkPreJobManager:
                 raise KeyError("prejob not found: %s" % job_id)
             self._refresh(r)
             self._save_jobs(jobs)
-            return self._public(r, detail=True)
+            # 不回传 sql(可能含连接串),仅列表字段
+            return self._public(r, detail=False)
 
     def logs(self, job_id: str, tail: int = 200) -> Dict[str, Any]:
         with self._lock:

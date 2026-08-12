@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -28,6 +28,7 @@ import { applyTheme, getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkJobsDialog from './FlinkJobsDialog.vue'
+import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
@@ -647,6 +648,7 @@ function selectResult(idx: number) {
 const flinkMode = ref<'batch' | 'stream'>('batch')
 const showFlinkConn = ref(false)
 const showFlinkJobs = ref(false)
+const showFlinkPreJob = ref(false)
 
 /** 连接器弹窗生成 DDL → 插入编辑器(多段用空行分隔) */
 function onInsertFlinkDdl(ddls: string[]) {
@@ -660,6 +662,28 @@ function onInsertFlinkDdl(ddls: string[]) {
   ElMessage.success(`已插入 ${ddls.length} 条 CREATE TABLE`)
 }
 
+/** Flink 执行:所有 flink 任务都要解锁(与 Spark 共用同一密码/token);
+ *  未解锁先弹密码框;token 过期(网关 403)自动重新解锁后重试一次 */
+async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (!sparkToken.value) {
+    const tk = await openSparkAuth()
+    if (!tk) throw new Error('已取消:Flink 任务未解锁')
+  }
+  try {
+    return await queryFlink(sql, flinkMode.value, sparkToken.value || undefined)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/解锁|token|401|403/i.test(msg)) {
+      sparkToken.value = ''
+      sessionStorage.removeItem(SPARK_TOKEN_KEY)
+      const tk2 = await openSparkAuth()
+      if (!tk2) throw new Error('已取消:Flink 任务未解锁')
+      return queryFlink(sql, flinkMode.value, tk2)
+    }
+    throw e
+  }
+}
+
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
@@ -671,7 +695,7 @@ async function execOne(sql: string, index: number): Promise<void> {
   }
   try {
     let r
-    if (isFlink) r = await queryFlink(sql, flinkMode.value)
+    if (isFlink) r = await execFlink(sql)
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
@@ -884,6 +908,7 @@ function isNumeric(val: unknown): boolean {
         </el-radio-group>
         <el-button size="small" :icon="MagicStick" @click="showFlinkConn = true">连接器</el-button>
         <el-button size="small" :icon="VideoPause" @click="showFlinkJobs = true">流任务</el-button>
+        <el-button size="small" :icon="Promotion" @click="showFlinkPreJob = true">PreJob</el-button>
         <el-divider direction="vertical" />
       </template>
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
@@ -1070,6 +1095,9 @@ function isNumeric(val: unknown): boolean {
 
   <!-- Flink 流式任务管理弹窗 -->
   <FlinkJobsDialog v-model="showFlinkJobs" />
+
+  <!-- Flink PreJob 提交/管理弹窗 -->
+  <FlinkPreJobDialog v-model="showFlinkPreJob" />
 </template>
 
 <style scoped lang="scss">

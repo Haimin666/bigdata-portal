@@ -116,18 +116,38 @@ export async function cancelSpark(): Promise<{ cancelled: boolean }> {
   return body.data as { cancelled: boolean }
 }
 
-/** FlinkSQL 查询(经网关 /api/flink/query 走 db-proxy → Flink SQL Gateway) */
-export async function queryFlink(sql: string, mode: 'batch' | 'stream' = 'batch'): Promise<DbQueryResult> {
-  return request<DbQueryResult>('/flink/query', {
+/** Flink 专用请求:走网关 /api/flink/*(不经 /api/db 透传,网关统一鉴权) */
+async function flinkRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api/flink${path}`, init)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<T>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as T
+}
+
+/** FlinkSQL 查询(经网关 /api/flink/query;所有 flink 任务需 X-Spark-Token 解锁,与 Spark 共用密码) */
+export async function queryFlink(sql: string, mode: 'batch' | 'stream' = 'batch', writeToken?: string): Promise<DbQueryResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
+  return flinkRequest<DbQueryResult>('/query', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ sql, mode })
   })
 }
 
 /** Flink 连接器定义列表(密码已脱敏) */
 export async function flinkConnectors(): Promise<FlinkConnector[]> {
-  const res = await request<{ connectors: FlinkConnector[] }>('/flink/connectors')
+  const res = await flinkRequest<{ connectors: FlinkConnector[] }>('/connectors')
   return res.connectors
 }
 
@@ -137,7 +157,7 @@ export async function flinkProbeSchema(connector: string, params: Record<string,
   primaryKeys: string[]
   source: string
 }> {
-  return request('/flink/connectors/' + connector + '/probe', {
+  return flinkRequest('/connectors/' + connector + '/probe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ params })
@@ -146,7 +166,7 @@ export async function flinkProbeSchema(connector: string, params: Record<string,
 
 /** 生成 CREATE TABLE DDL */
 export async function flinkGenerateDdl(tableName: string, connector: string, params: Record<string, string>, fields: FlinkField[]): Promise<{ ddl: string }> {
-  return request('/flink/ddl/generate', {
+  return flinkRequest('/ddl/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tableName, connector, params, fields })
@@ -155,18 +175,75 @@ export async function flinkGenerateDdl(tableName: string, connector: string, par
 
 /** Flink 流式任务列表 */
 export async function flinkJobs(): Promise<FlinkJob[]> {
-  const res = await request<{ jobs: FlinkJob[] }>('/flink/jobs')
+  const res = await flinkRequest<{ jobs: FlinkJob[] }>('/jobs')
   return res.jobs
 }
 
 /** Flink 流式任务状态 */
 export async function flinkJobStatus(jobId: string): Promise<FlinkJob> {
-  return request<FlinkJob>('/flink/jobs/' + jobId)
+  return flinkRequest<FlinkJob>('/jobs/' + jobId)
 }
 
 /** 停止 Flink 流式任务 */
 export async function flinkJobStop(jobId: string): Promise<{ stopped: boolean }> {
-  return request('/flink/jobs/' + jobId + '/stop', { method: 'POST' })
+  return flinkRequest('/jobs/' + jobId + '/stop', { method: 'POST' })
+}
+
+/** Flink 引擎状态 */
+export async function flinkStatus(): Promise<Record<string, unknown>> {
+  return flinkRequest('/status')
+}
+
+// ── Flink PreJob(yarn-per-job 独立作业)──────────────────
+export interface FlinkPreJob {
+  jobId: string
+  name: string
+  appId: string
+  status: string
+  finalStatus: string
+  trackingUrl: string
+  queue: string
+  submittedAt: string
+  updatedAt: string
+  error: string
+  sql?: string
+}
+
+/** 提交 Flink PreJob(需解锁;会真实向 YARN 提交独立作业) */
+export async function flinkPrejobSubmit(name: string, sql: string, writeToken?: string, queue?: string): Promise<FlinkPreJob> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
+  return flinkRequest<FlinkPreJob>('/prejob/jobs', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name, sql, ...(queue ? { queue } : {}) })
+  })
+}
+
+/** PreJob 作业列表 */
+export async function flinkPrejobJobs(): Promise<FlinkPreJob[]> {
+  const res = await flinkRequest<{ jobs: FlinkPreJob[] }>('/prejob/jobs')
+  return res.jobs
+}
+
+/** PreJob 作业详情 */
+export async function flinkPrejobStatus(jobId: string): Promise<FlinkPreJob> {
+  return flinkRequest<FlinkPreJob>('/prejob/jobs/' + jobId)
+}
+
+/** PreJob 作业日志(尾部) */
+export async function flinkPrejobLogs(jobId: string, tail = 200): Promise<{ appId: string; logs: string; error: string }> {
+  return flinkRequest('/prejob/jobs/' + jobId + '/logs?tail=' + tail)
+}
+
+/** 停止 PreJob 作业 */
+export async function flinkPrejobCancel(jobId: string): Promise<{ cancelled: boolean }> {
+  return flinkRequest('/prejob/jobs/' + jobId + '/cancel', { method: 'POST' })
+}
+
+/** PreJob 配置快照 */
+export async function flinkPrejobConfig(): Promise<Record<string, unknown>> {
+  return flinkRequest('/prejob/config')
 }
 
 export interface FlinkConnector {

@@ -9,6 +9,12 @@ import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
 import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, cancel as sparkCancel } from './spark-gateway.js'
+import {
+  query as flinkQuery, cancel as flinkCancel, status as flinkStatus,
+  connectors as flinkConnectors, probeSchema as flinkProbeSchema, generateDdl as flinkGenerateDdl,
+  jobs as flinkJobs, jobStatus as flinkJobStatus, jobStop as flinkJobStop,
+  prejobSubmit, prejobJobs, prejobStatus, prejobLogs, prejobCancel, prejobConfig
+} from './flink-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
@@ -541,9 +547,10 @@ if (config.dbProxyUrl) {
   app.use('/api/db', (req, res, next) => {
     // 敏感路径不走透传:
     //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
+    //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
     //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
     //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-    if (/^\/spark\//.test(req.path) || req.path.startsWith('/scripts')) {
+    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || req.path.startsWith('/scripts')) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
@@ -721,6 +728,132 @@ if (config.dbProxyUrl) {
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
   app.post('/api/spark/cancel', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+}
+
+// ── Flink SQL 执行(交互 + PreJob)─────────────────────────────
+// 与 Spark 共用同一密码与 token 体系(/api/spark/auth 签发 X-Spark-Token,12h 有效)。
+// 安全策略:所有 flink 类型任务(交互查询/流式任务/PreJob 提交)一律要求解锁,
+// 防止未授权用户向 YARN 提交作业/占用集群资源;元数据类接口(连接器/DDL 生成/
+// 任务列表/日志)为只读,不强制。
+if (config.dbProxyUrl) {
+  app.post('/api/flink/query', async (req, res) => {
+    const tk = req.get('X-Spark-Token')
+    if (!tk || !sparkTokenValid(tk)) {
+      return res.status(403).json({ code: 403, msg: 'Flink 任务需要解锁,请先输入密码(与 Spark 同一密码)' })
+    }
+    try {
+      const data = await flinkQuery(String(req.body?.sql || ''), {
+        mode: req.body?.mode === 'stream' ? 'stream' : 'batch',
+        writeUnlocked: true,
+        timeoutMs: Number(req.body?.timeoutMs) || 120000
+      })
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[flink/query]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'flink 查询失败,请查看服务端日志' })
+    }
+  })
+
+  app.post('/api/flink/cancel', async (req, res) => {
+    try {
+      const data = await flinkCancel()
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[flink/cancel]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'flink 停止失败,请查看服务端日志' })
+    }
+  })
+
+  app.get('/api/flink/status', async (req, res) => {
+    try {
+      const data = await flinkStatus()
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[flink/status]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'flink 状态获取失败' })
+    }
+  })
+
+  // 连接器 / DDL 生成(只读,不执行任务)
+  app.get('/api/flink/connectors', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkConnectors() }) }
+    catch (e) { console.error('[flink/connectors]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 连接器加载失败' }) }
+  })
+  app.post('/api/flink/connectors/:name/probe', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkProbeSchema(req.params.name, req.body?.params || {}) }) }
+    catch (e) { console.error('[flink/probe]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 探测失败' }) }
+  })
+  app.post('/api/flink/ddl/generate', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkGenerateDdl(req.body || {}) }) }
+    catch (e) { console.error('[flink/ddl]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink DDL 生成失败' }) }
+  })
+
+  // 交互引擎流式任务(只读列表/详情;停止无需解锁,同 spark cancel 语义)
+  app.get('/api/flink/jobs', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkJobs() }) }
+    catch (e) { console.error('[flink/jobs]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 任务列表获取失败' }) }
+  })
+  app.get('/api/flink/jobs/:id', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkJobStatus(req.params.id) }) }
+    catch (e) { console.error('[flink/jobs/:id]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 任务详情获取失败' }) }
+  })
+  app.post('/api/flink/jobs/:id/stop', async (req, res) => {
+    try { res.json({ code: 0, data: await flinkJobStop(req.params.id) }) }
+    catch (e) { console.error('[flink/jobs/:id/stop]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 任务停止失败' }) }
+  })
+
+  // PreJob 提交(真实占用 YARN 资源,一律要求解锁)
+  app.post('/api/flink/prejob/jobs', async (req, res) => {
+    const tk = req.get('X-Spark-Token')
+    if (!tk || !sparkTokenValid(tk)) {
+      return res.status(403).json({ code: 403, msg: 'Flink PreJob 提交需要解锁,请先输入密码(与 Spark 同一密码)' })
+    }
+    try {
+      const data = await prejobSubmit({
+        name: String(req.body?.name || ''),
+        sql: String(req.body?.sql || ''),
+        ...(req.body?.queue ? { queue: String(req.body.queue) } : {})
+      })
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[flink/prejob/submit]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'flink PreJob 提交失败,请查看服务端日志' })
+    }
+  })
+  app.get('/api/flink/prejob/jobs', async (req, res) => {
+    try { res.json({ code: 0, data: await prejobJobs() }) }
+    catch (e) { console.error('[flink/prejob/jobs]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 列表获取失败' }) }
+  })
+  app.get('/api/flink/prejob/jobs/:id', async (req, res) => {
+    try { res.json({ code: 0, data: await prejobStatus(req.params.id) }) }
+    catch (e) { console.error('[flink/prejob/status]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 详情获取失败' }) }
+  })
+  app.get('/api/flink/prejob/jobs/:id/logs', async (req, res) => {
+    try { res.json({ code: 0, data: await prejobLogs(req.params.id, Number(req.query.tail) || 200) }) }
+    catch (e) { console.error('[flink/prejob/logs]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 日志获取失败' }) }
+  })
+  app.post('/api/flink/prejob/jobs/:id/cancel', async (req, res) => {
+    const tk = req.get('X-Spark-Token')
+    if (!tk || !sparkTokenValid(tk)) {
+      return res.status(403).json({ code: 403, msg: 'Flink PreJob 停止需要解锁,请先输入密码(与 Spark 同一密码)' })
+    }
+    try { res.json({ code: 0, data: await prejobCancel(req.params.id) }) }
+    catch (e) { console.error('[flink/prejob/cancel]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 停止失败' }) }
+  })
+  app.get('/api/flink/prejob/config', async (req, res) => {
+    try { res.json({ code: 0, data: await prejobConfig() }) }
+    catch (e) { console.error('[flink/prejob/config]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 配置获取失败' }) }
+  })
+} else {
+  app.post('/api/flink/query', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+  app.get('/api/flink/status', (req, res) =>
+    res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
+  )
+  app.post('/api/flink/prejob/jobs', (req, res) =>
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
   )
 }
