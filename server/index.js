@@ -54,6 +54,13 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+// URL 路径的目录部分(以 / 结尾):/cluster/app/app_1 → /cluster/app/; /proxy/app_1/ → /proxy/app_1/
+function dirOf(path) {
+  const i = path.lastIndexOf('/')
+  if (i <= 0) return '/'
+  return path.slice(0, i + 1)
+}
+
 // 代理响应处理:去 frame 限制、cookie/location 重写
 function onProxyRes(targetUrl, prefix) {
   return (proxyRes) => {
@@ -204,7 +211,7 @@ const yarnRmProxy = httpProxy.createProxyServer({
   secure: false,
   selfHandleResponse: true // 库不再自动 pipe,全部由下方 proxyRes 手动转发,避免双写
 })
-yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
+yarnRmProxy.on('proxyRes', (proxyRes, req, res) => {
   delete proxyRes.headers['x-frame-options']
   const cookies = proxyRes.headers['set-cookie']
   if (cookies) proxyRes.headers['set-cookie'] = cookies.map(rewriteCookie)
@@ -216,11 +223,17 @@ yarnRmProxy.on('proxyRes', (proxyRes, _req, res) => {
     proxyRes.pipe(res)
     return
   }
-  // HTML 响应:重写链接后交给门户(保持状态码/响应头)
+  // HTML 响应:注入 <base> + 重写链接后交给门户(保持状态码/响应头)
   const chunks = []
   proxyRes.on('data', (c) => chunks.push(c))
   proxyRes.on('end', () => {
     let html = Buffer.concat(chunks).toString('utf8')
+    // <base> 注入:让页面内相对路径资源(如 static/yarn.css)解析到门户代理前缀,
+    // 与原生页面基于当前目录解析的行为一致(base 只影响相对路径,不影响绝对路径)
+    if (!/<base\s/i.test(html)) {
+      const base = '/yarniframe' + dirOf(req.url)
+      html = html.replace(/<head([^>]*)>/i, (m) => `${m}<base href="${base}">`)
+    }
     // 绝对根路径链接 → /yarniframe/xxx
     html = html.replace(
       /(href|src)\s*=\s*(["'])\/(?!\/|yarniframe|api\/iframe-proxy)/g,
