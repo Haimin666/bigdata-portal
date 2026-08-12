@@ -772,18 +772,30 @@ function getSegments(text: string): string[] {
     .filter((s) => s && !/^\s*(--|\/\*)/.test(s))
 }
 
-/** 执行目标 SQL 段列表(逐条执行,支持多条) */
+/** 批量执行互斥:同一次「执行」点击为一个批次;批内多条按 FIFO 逐条串行。
+ *  每人同时最多提交一批 —— 执行中再次点击执行会被拒绝(loading 互斥)。
+ *  batchCancelled:停止按钮置位,中断本批剩余段 */
+let batchCancelled = false
+
+/** 执行目标 SQL 段列表(逐条 FIFO 串行执行) */
 async function execSegments(segs: string[]) {
   results.value = segs.map((sql) => ({ sql, columns: [], rows: [], costMs: 0, truncated: false }))
   for (let i = 0; i < segs.length; i++) {
+    if (batchCancelled) break
     await execOne(segs[i], i)
   }
   // 默认展示最后一个 tab(最新执行的结果)
-  activeResult.value = segs.length - 1
+  activeResult.value = batchCancelled ? Math.max(0, segs.length - 1) : segs.length - 1
 }
 
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
 async function runQuery() {
+  // 每人同时最多提交一批:上一批未结束则拒绝新批(FIFO 排队由批内逐条完成)
+  if (loading.value) {
+    ElMessage.warning('上一批 SQL 仍在执行,请等待完成后再提交')
+    return
+  }
+  batchCancelled = false
   if (!db.value) {
     ElMessage.warning('请先选择数据库')
     return
@@ -821,18 +833,20 @@ async function runQuery() {
   }
 }
 
-/** 停止当前查询(引擎执行中可用,避免长时间查询卡死) */
+/** 停止当前查询:中断本批剩余段(前端不再发后续 SQL),并尝试取消引擎 job */
 async function stopQuery() {
+  batchCancelled = true
   try {
     if (engine.value === 'flinksql') {
       await cancelFlink()
-    } else {
+    } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
       await cancelSpark()
     }
+    // mysql/oracle:无引擎 job 可取消,置位后批循环自行停止
     // 停止日志轮询,立即释放 loading 状态
     stopSparkLogPolling()
     loading.value = false
-    ElMessage.info('已请求停止,正在取消当前 job...')
+    ElMessage.info('已请求停止,当前批剩余 SQL 不再执行')
   } catch (e) {
     ElMessage.error(`停止失败:${e instanceof Error ? e.message : e}`)
   }
