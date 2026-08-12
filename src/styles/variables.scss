@@ -21,6 +21,10 @@
   --el-color-primary-light-8: #b3dce3;
   --el-color-primary-light-9: #cce8ed;
   --el-color-primary-dark-2: #006a7d;
+
+  /* Element Plus 字体统一为深空控制台等宽系 */
+  --el-font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono',
+    'PingFang SC', 'Microsoft YaHei', monospace;
   --bd-muted: #5d7a8c;
   --bd-table-header: #f1f6fa;
   --bd-table-hover: #e9f2f8;

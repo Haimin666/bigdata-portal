@@ -7,11 +7,20 @@ body,
 }
 
 body {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
-    sans-serif;
+  /* 深空控制台:全局等宽字体(与状态条/侧边栏/登录页统一),中文回退系统字体 */
+  font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
+    'Microsoft YaHei', monospace;
   background: $bg;
   color: $text;
   position: relative;
+}
+
+/* 表单控件继承全局等宽字体(覆盖 Chrome UA 默认 Arial,Element Plus 组件未显式设字体) */
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
 }
 
 /* 深空控制台网格背景(深浅主题由 --bd-grid-line 跟随) */
