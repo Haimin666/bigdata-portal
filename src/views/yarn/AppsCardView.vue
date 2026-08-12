@@ -41,7 +41,7 @@ const paged = computed(() =>
   rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
 )
 
-// 追踪 / 日志 / 详情:弹窗内 iframe 查看(经门户代理,浏览器无需直连内网)
+// 追踪 / 日志 / 详情:追踪 iframe 弹窗查看(经门户代理),日志/详情新窗口打开原生地址
 const frameShow = ref(false)
 const frameUrl = ref('')
 const frameTitle = ref('')
@@ -54,9 +54,9 @@ function open(url: string, title?: string) {
 function trackingProxyUrl(appId: string): string {
   return `/yarniframe/proxy/${appId}/`
 }
-/** NM 日志等非 RM 地址 → 单跳动态代理 */
-function dynamicProxyUrl(url: string): string {
-  return `/api/iframe-proxy?url=${encodeURIComponent(url)}`
+/** 日志 / 详情 → 新窗口打开原生地址 */
+function openNative(url: string): void {
+  window.open(url, '_blank')
 }
 
 function onPageChange(p: number) {
@@ -89,10 +89,10 @@ function onSizeChange(s: number) {
             >
               追踪
             </el-button>
-            <el-button v-if="app.amContainerLogs" size="small" @click="open(dynamicProxyUrl(app.amContainerLogs), `日志 - ${app.name}`)">
+            <el-button v-if="app.amContainerLogs" size="small" @click="openNative(app.amContainerLogs)">
               日志
             </el-button>
-            <el-button size="small" @click="open(`/yarniframe/cluster/app/${app.id}`, `资源管理器 - ${app.name}`)">
+            <el-button size="small" @click="openNative(props.resourceManager + '/cluster/app/' + app.id)">
               详情
             </el-button>
             <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
