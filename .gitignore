@@ -26,6 +26,8 @@ data/
 *.png
 # 原型演示目录(不入库)
 demo-proto/
+# flink 测试脚本目录(含真实连接串,不入库)
+flink-demo/
 services/db-proxy/datasources.json
 mysql_online_conns.json
 tmp/

@@ -61,6 +61,18 @@
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-kafka-1.17.2.jar"
     ],
+    "prejob": {
+      "enabled": true,
+      "flinkHome": "/opt/streamx/flink/flink-1.17.2",
+      "pythonBin": "/root/whm/py38/bin/python3.8",
+      "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
+      "hadoopConfDir": "/etc/hadoop/conf",
+      "queue": "default",
+      "yarnRmUrl": "http://hadoop-nn-1.bigdata.shiqiao.com:8088",
+      "jobsDir": "flink-prejobs",
+      "maxConcurrent": 5,
+      "submitTimeout": 120
+    },
     "connectors": {
       "mysql_cdc": {
         "label": "MySQL(CDC)",

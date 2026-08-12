@@ -175,3 +175,71 @@ SQL 与 PySpark 代码共用同一 session,支持临时视图跨请求保留。
 | `POST /spark/query` | body `{kind: "sql"\|"pyspark", sql/code, writeUnlocked, timeoutMs}` |
 | `GET /spark/logs?offset=N` | 增量读取 driver 日志 |
 | `GET /spark/status` | session 状态 / appId / 配置快照 |
+
+## Flink 引擎(双通道:交互式 + PreJob)
+
+db-proxy 内嵌 PyFlink 1.17.2,**双通道架构**:
+
+| 通道 | 模式 | 特点 |
+|---|---|---|
+| **交互式** | 常驻 YARN Session,共享一个会话 | 秒回,脚本式多语句,流批双模式,适合探索调试 |
+| **PreJob** | `flink run -t yarn-per-job -d` 独立作业 | 正式管道,与交互会话完全隔离,可查状态/日志/停止 |
+
+### 配置(datasources.json `flink` 段)
+
+```json
+"flink": {
+  "enabled": true,
+  "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
+  "flinkHome": "",
+  "hiveLib": "",
+  "yarnAppId": "application_xxx",
+  "queue": "default",
+  "defaultLimit": 1000,
+  "maxLimit": 10000,
+  "queryTimeout": 300,
+  "allowWrite": true,
+  "catalogs": ["CREATE CATALOG paimon_hive_store WITH (...)"],
+  "defaultCatalog": "paimon_hive_store",
+  "pipelineJars": ["file:///opt/streamx/flink/flink-1.17.2/lib/xxx.jar"],
+  "prejob": {
+    "enabled": true,
+    "flinkHome": "/opt/streamx/flink/flink-1.17.2",
+    "pythonBin": "/root/whm/py38/bin/python3.8",
+    "javaHome": "/root/whm/jdk/jdk-11.0.32+9",
+    "hadoopConfDir": "/etc/hadoop/conf",
+    "queue": "default",
+    "yarnRmUrl": "http://hadoop-nn-1.bigdata.shiqiao.com:8088",
+    "jobsDir": "flink-prejobs",
+    "maxConcurrent": 5,
+    "submitTimeout": 120
+  }
+}
+```
+
+### 交互式通道接口
+
+| 端点 | 说明 |
+|---|---|
+| `POST /flink/query` | body `{sql, limit?, mode: batch\|stream, timeoutMs}`;脚本式多语句,最后一条查询结果返回 |
+| `POST /flink/cancel` | 取消当前正在执行的查询(超时/手动) |
+| `GET /flink/status` | session 状态 / yarnAppId / allowWrite |
+| `GET /flink/connectors` | 连接器注册表(前端 DDL 生成用) |
+| `POST /flink/ddl/generate` | 按连接器模板生成建表 DDL |
+| `GET /flink/jobs` | 交互引擎内提交的流式任务列表(内存态) |
+| `POST /flink/jobs/{id}/stop` | 停止交互引擎的流式任务 |
+
+### PreJob 通道接口(独立作业)
+
+| 端点 | 说明 |
+|---|---|
+| `POST /flink/prejob/jobs` | body `{name, sql, queue?}`;SQL 包装成 pyflink 脚本,`yarn-per-job` 提交,返回 `{jobId, appId}` |
+| `GET /flink/prejob/jobs` | 作业列表(状态经 YARN REST 刷新,持久化到 `flink-prejobs/prejobs.json`) |
+| `GET /flink/prejob/jobs/{id}` | 作业详情(状态/队列/trackingUrl/错误诊断) |
+| `GET /flink/prejob/jobs/{id}/logs` | 尾部日志(`yarn logs -applicationId`) |
+| `POST /flink/prejob/jobs/{id}/cancel` | 停止作业(`yarn application -kill`) |
+| `GET /flink/prejob/config` | prejob 配置快照(无敏感信息) |
+
+> PreJob 生成脚本是纯 SQL(无 Python UDF)时 executor 不需要 python 环境,
+> yarn-per-job 的 JobGraph 全 Java;提交脚本落在 `flink-prejobs/main_<jobId>.py`,
+> 本地持久化,不对外暴露。
