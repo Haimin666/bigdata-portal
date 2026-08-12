@@ -26,6 +26,8 @@ import 'codemirror/addon/display/autorefresh.js'
 import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, type DbDataSource, type ScriptNode } from '@/api/db'
 import { applyTheme, getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
+import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
+import FlinkJobsDialog from './FlinkJobsDialog.vue'
 
 defineOptions({ name: 'DbQueryView' })
 
@@ -507,11 +509,30 @@ interface QueryResultItem {
   costMs: number
   truncated: boolean
   error?: string
+  jobId?: string
+  mode?: string
 }
 
 const results = ref<QueryResultItem[]>([])
 // 当前激活的结果序号(多条时 tab 切换)
 const activeResult = ref(0)
+
+// ── Flink 流批模式与弹窗 ────────────────────────────────────
+const flinkMode = ref<'batch' | 'stream'>('batch')
+const showFlinkConn = ref(false)
+const showFlinkJobs = ref(false)
+
+/** 连接器弹窗生成 DDL → 插入编辑器(多段用空行分隔) */
+function onInsertFlinkDdl(ddls: string[]) {
+  const c = cm
+  if (!c || !ddls.length) return
+  const text = ddls.join('\n\n')
+  const cur = c.getCursor()
+  c.replaceRange(text, cur)
+  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
+  c.focus()
+  ElMessage.success(`已插入 ${ddls.length} 条 CREATE TABLE`)
+}
 
 /** 执行单条 SQL 并记录结果 */
 async function execOne(sql: string, index: number): Promise<void> {
@@ -524,7 +545,7 @@ async function execOne(sql: string, index: number): Promise<void> {
   }
   try {
     let r
-    if (isFlink) r = await queryFlink(sql)
+    if (isFlink) r = await queryFlink(sql, flinkMode.value)
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await queryDb(db.value, sql)
     results.value[index] = { sql, ...r }
@@ -764,6 +785,15 @@ function isNumeric(val: unknown): boolean {
       <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
       <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
+      <template v-if="engine === 'flinksql'">
+        <el-radio-group v-model="flinkMode" size="small" class="flink-mode">
+          <el-radio-button value="batch">批</el-radio-button>
+          <el-radio-button value="stream">流</el-radio-button>
+        </el-radio-group>
+        <el-button size="small" :icon="MagicStick" @click="showFlinkConn = true">连接器</el-button>
+        <el-button size="small" :icon="VideoPause" @click="showFlinkJobs = true">流任务</el-button>
+        <el-divider direction="vertical" />
+      </template>
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
       <el-button :icon="Refresh" @click="runQuery">刷新</el-button>
       <el-button v-if="(engine === 'sparksql' || engine === 'pyspark' || engine === 'flinksql') && loading" type="danger" :icon="VideoPause" @click="stopQuery">
@@ -851,6 +881,12 @@ function isNumeric(val: unknown): boolean {
           <!-- 底部状态条:行数/耗时 -->
           <div class="result-footer">
             <span v-if="results[activeResult].error">执行失败</span>
+            <template v-else-if="results[activeResult].jobId">
+              <span class="footer-job">流式任务已提交</span>
+              <el-tag size="small" type="primary">{{ results[activeResult].jobId }}</el-tag>
+              <el-button size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
+              <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
+            </template>
             <template v-else>
               <span>{{ results[activeResult].rows.length }} 行</span>
               <template v-if="results[activeResult].truncated"><span class="footer-muted">(已截断)</span></template>
@@ -906,6 +942,12 @@ function isNumeric(val: unknown): boolean {
       <el-button type="primary" :loading="sparkAuthLoading" @click="submitSparkAuth">验证</el-button>
     </template>
   </el-dialog>
+
+  <!-- Flink 连接器批量建表弹窗 -->
+  <FlinkConnectorDialog v-model="showFlinkConn" @insert="onInsertFlinkDdl" />
+
+  <!-- Flink 流式任务管理弹窗 -->
+  <FlinkJobsDialog v-model="showFlinkJobs" />
 </template>
 
 <style scoped lang="scss">
@@ -1355,6 +1397,15 @@ function isNumeric(val: unknown): boolean {
 
 .footer-muted {
   color: $muted;
+}
+
+.footer-job {
+  font-weight: 600;
+  color: $primary;
+}
+
+.flink-mode {
+  margin-right: 4px;
 }
 
 .result-pagination {

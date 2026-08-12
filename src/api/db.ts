@@ -117,12 +117,80 @@ export async function cancelSpark(): Promise<{ cancelled: boolean }> {
 }
 
 /** FlinkSQL 查询(经网关 /api/flink/query 走 db-proxy → Flink SQL Gateway) */
-export async function queryFlink(sql: string): Promise<DbQueryResult> {
+export async function queryFlink(sql: string, mode: 'batch' | 'stream' = 'batch'): Promise<DbQueryResult> {
   return request<DbQueryResult>('/flink/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql })
+    body: JSON.stringify({ sql, mode })
   })
+}
+
+/** Flink 连接器定义列表(密码已脱敏) */
+export async function flinkConnectors(): Promise<FlinkConnector[]> {
+  const res = await request<{ connectors: FlinkConnector[] }>('/flink/connectors')
+  return res.connectors
+}
+
+/** Flink 连接器字段探测(仅 mysql-cdc) */
+export async function flinkProbeSchema(connector: string, params: Record<string, string>): Promise<{
+  fields: FlinkField[]
+  primaryKeys: string[]
+  source: string
+}> {
+  return request('/flink/connectors/' + connector + '/probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ params })
+  })
+}
+
+/** 生成 CREATE TABLE DDL */
+export async function flinkGenerateDdl(tableName: string, connector: string, params: Record<string, string>, fields: FlinkField[]): Promise<{ ddl: string }> {
+  return request('/flink/ddl/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tableName, connector, params, fields })
+  })
+}
+
+/** Flink 流式任务列表 */
+export async function flinkJobs(): Promise<FlinkJob[]> {
+  const res = await request<{ jobs: FlinkJob[] }>('/flink/jobs')
+  return res.jobs
+}
+
+/** Flink 流式任务状态 */
+export async function flinkJobStatus(jobId: string): Promise<FlinkJob> {
+  return request<FlinkJob>('/flink/jobs/' + jobId)
+}
+
+/** 停止 Flink 流式任务 */
+export async function flinkJobStop(jobId: string): Promise<{ stopped: boolean }> {
+  return request('/flink/jobs/' + jobId + '/stop', { method: 'POST' })
+}
+
+export interface FlinkConnector {
+  name: string
+  label: string
+  type: string
+  defaults: Record<string, string>
+  dynamicFields: { key: string; label: string; placeholder?: string }[]
+  probe: boolean
+}
+
+export interface FlinkField {
+  name: string
+  type: string
+  primaryKey?: boolean
+  comment?: string
+}
+
+export interface FlinkJob {
+  jobId: string
+  sql: string
+  status: string
+  submittedAt: string
+  mode: string
 }
 
 /** 停止当前执行的 Flink 查询 */

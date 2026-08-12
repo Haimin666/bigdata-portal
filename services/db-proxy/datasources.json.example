@@ -54,7 +54,49 @@
       "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar",
       "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-kafka-1.17.2.jar"
-    ]
+    ],
+    "connectors": {
+      "mysql_cdc": {
+        "label": "MySQL(CDC)",
+        "type": "mysql-cdc",
+        "defaults": {
+          "hostname": "10.26.2.23",
+          "port": "3343",
+          "username": "bigdata_cdc",
+          "password": "xxx",
+          "scan.startup.mode": "initial"
+        },
+        "dynamicFields": [
+          {"key": "database-name", "label": "库名", "placeholder": "如 finance_order_trade"},
+          {"key": "table-name", "label": "表名", "placeholder": "支持正则,如 t_.*"}
+        ],
+        "probe": {"type": "mysql"},
+        "primaryKey": true
+      },
+      "kafka": {
+        "label": "Kafka",
+        "type": "kafka",
+        "defaults": {
+          "properties.bootstrap.servers": "kafka-01:9092,kafka-02:9092",
+          "properties.group.id": "flusr_xxx",
+          "scan.startup.mode": "earliest-offset",
+          "format": "json"
+        },
+        "dynamicFields": [
+          {"key": "topic", "label": "Topic", "placeholder": "如 bigdata-tupu-neo4j"}
+        ]
+      },
+      "hbase": {
+        "label": "HBase(维表)",
+        "type": "hbase-2.2",
+        "defaults": {
+          "zookeeper.quorum": "olap-worker-01:2181,olap-worker-02:2181,olap-worker-03:2181"
+        },
+        "dynamicFields": [
+          {"key": "table-name", "label": "HBase 表名", "placeholder": "如 lion_dw:dim_cmmlion_sys_dictionary_bak"}
+        ]
+      }
+    }
   },
   "datasources": [
     {

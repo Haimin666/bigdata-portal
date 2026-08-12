@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """PyFlink 引擎(内嵌常驻,连接 YARN Session)。
 
-与 spark_engine.py 同构:db-proxy 进程内常驻一个 TableEnvironment,
+与 spark_engine.py 同构:db-proxy 进程内常驻 TableEnvironment,
 连接已部署的 Flink YARN Session(execution.target=yarn-session),
 SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡顿。
+
+支持**流批双模式**:
+- 批模式(batch):即席查询,结果秒回,适合查 Paimon/CDC 快照
+- 流模式(stream):流式任务,INSERT INTO sink 提交后后台常驻运行,
+  可查状态/停止,适合流-流 join、CDC→Kafka/Paimon 管道
 
 支持脚本式执行(与 Flink SQL Client 一致):
   SET 'key' = 'value';
@@ -33,7 +38,8 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
   "pipelineJars": [                         # connector jar,file:// 或绝对路径
     "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
     "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar"
-  ]
+  ],
+  "connectors": { ... }                     # 连接器注册表,见 flink_connectors.py
 }
 """
 
@@ -136,7 +142,9 @@ class FlinkEngine:
         self.base_dir = base_dir
         self._lock = threading.Lock()          # 串行:同一时刻只执行一个请求
         self._init_lock = threading.Lock()
-        self._t_env = None
+        self._t_env_batch = None               # 批环境(即席查询)
+        self._t_env_stream = None              # 流环境(流式任务)
+        self._jobs: Dict[str, Dict[str, Any]] = {}   # jobId -> 任务信息
         self._session_state = "disabled"       # disabled|starting|idle|error
         self._last_error: Optional[str] = None
         self._current_job_client = None        # 当前执行中的 JobClient(可取消)
@@ -173,40 +181,15 @@ class FlinkEngine:
         if not os.environ.get("HADOOP_CONF_DIR"):
             os.environ["HADOOP_CONF_DIR"] = "/etc/hadoop/conf"
 
-    def _ensure_initialized(self) -> None:
-        """首次使用时创建 TableEnvironment(懒加载)。
-
-        JAVA_HOME 必须在 import pyflink 之前生效,因此在锁内先设环境再 import。
-        """
-        with self._init_lock:
-            if self._t_env is not None:
-                return
-            self._apply_java()
-            self._session_state = "starting"
-            t0 = time.time()
-            try:
-                self._t_env = self._build_env()
-                self._session_state = "idle"
-                self._audit(
-                    "flink session created in %.1fs (yarnAppId=%s)"
-                    % (time.time() - t0, self.cfg.get("yarnAppId", ""))
-                )
-            except Exception as e:
-                self._session_state = "error"
-                self._last_error = "%s: %s" % (type(e).__name__, e)
-                raise
-
-    def _build_env(self):
+    def _build_base_config(self):
+        """构造连接 YARN Session 的公共 Configuration。"""
         from pyflink.common import Configuration
-        from pyflink.table import EnvironmentSettings, TableEnvironment
 
         config = Configuration()
-        # 连接已部署的 YARN Session
         config.set_string("execution.target", "yarn-session")
         yarn_app_id = str(self.cfg.get("yarnAppId", "")).strip()
         if yarn_app_id:
             config.set_string("yarn.application.id", yarn_app_id)
-        # 队列(可选)
         queue = str(self.cfg.get("queue", "")).strip()
         if queue:
             config.set_string("yarn.application.queue", queue)
@@ -226,25 +209,61 @@ class FlinkEngine:
             config.set_string("pipeline.jars", ";".join(jar_list))
             if log:
                 log.info("flink pipeline.jars=%d", len(jar_list))
+        return config
 
-        settings = (
-            EnvironmentSettings.new_instance()
-            .in_batch_mode()  # 查询引擎用 batch,结果秒回
-            .with_configuration(config)
-            .build()
-        )
-        return TableEnvironment.create(settings)
+    def _ensure_initialized(self, mode: str = "batch") -> None:
+        """按模式懒加载 TableEnvironment。mode=batch|stream。"""
+        key = "batch" if mode != "stream" else "stream"
+        with self._init_lock:
+            t_env = self._t_env_batch if key == "batch" else self._t_env_stream
+            if t_env is not None:
+                return
+            self._apply_java()
+            self._session_state = "starting"
+            t0 = time.time()
+            try:
+                env = self._build_env(key)
+                if key == "batch":
+                    self._t_env_batch = env
+                else:
+                    self._t_env_stream = env
+                self._session_state = "idle"
+                self._audit(
+                    "flink %s session created in %.1fs (yarnAppId=%s)"
+                    % (key, time.time() - t0, self.cfg.get("yarnAppId", ""))
+                )
+            except Exception as e:
+                self._session_state = "error"
+                self._last_error = "%s: %s" % (type(e).__name__, e)
+                raise
 
-    # ── 查询 ──────────────────────────────────────────────
-    def execute_script(self, script: str, limit: int = 0) -> Dict[str, Any]:
+    def _build_env(self, mode: str):
+        from pyflink.table import EnvironmentSettings, TableEnvironment
+
+        config = self._build_base_config()
+        builder = EnvironmentSettings.new_instance().with_configuration(config)
+        if mode == "stream":
+            builder.in_streaming_mode()
+        else:
+            builder.in_batch_mode()
+        return TableEnvironment.create(builder.build())
+
+    def _t_env(self, mode: str):
+        return self._t_env_stream if mode == "stream" else self._t_env_batch
+
+    # ── 查询/脚本执行 ─────────────────────────────────────
+    def execute_script(self, script: str, limit: int = 0, mode: str = "batch") -> Dict[str, Any]:
         """执行 Flink SQL 脚本(多条语句,`;` 分隔)。
 
         - SET 'k' = 'v'            → 会话配置
         - USE [CATALOG] `x`        → 切换 catalog / database
         - CREATE CATALOG / TABLE   → DDL(受 allowWrite 控制)
         - SELECT / SHOW / DESC     → 查询,最后一条的结果返回
+
+        mode=batch:即席查询,结果返回;mode=stream:流式执行,
+        若含 INSERT INTO 则提交为常驻任务(返回 jobId)。
         """
-        self._ensure_initialized()
+        self._ensure_initialized(mode)
         with self._lock:
             statements = split_flink_sql(script)
             if not statements:
@@ -264,9 +283,18 @@ class FlinkEngine:
             t0 = time.time()
             self._cancel_flag.clear()
             last_result: Optional[Dict[str, Any]] = None
+            submitted_job_id: Optional[str] = None
             try:
                 for stmt in statements:
-                    last_result = self._exec_one(stmt, limit)
+                    res = self._exec_one(stmt, limit, mode)
+                    if res is None:
+                        continue
+                    # 流模式下 INSERT INTO 提交任务 → 返回 job 标记
+                    if isinstance(res, dict) and res.get("_jobSubmitted"):
+                        submitted_job_id = res["_jobSubmitted"]
+                        last_result = res
+                    else:
+                        last_result = res
                 cost_ms = int((time.time() - t0) * 1000)
                 if last_result is None:
                     last_result = {
@@ -278,16 +306,23 @@ class FlinkEngine:
                     }
                 else:
                     last_result["costMs"] = cost_ms
-                self._audit("execute_script ok in %dms (%d stmts) :: %.120s" % (cost_ms, len(statements), _clean_sql(script)))
+                if submitted_job_id:
+                    last_result["jobId"] = submitted_job_id
+                    last_result["mode"] = "stream"
+                self._audit(
+                    "execute_script[%s] ok in %dms (%d stmts) :: %.120s"
+                    % (mode, cost_ms, len(statements), _clean_sql(script))
+                )
                 return last_result
             except Exception as e:
-                self._audit("execute_script failed :: %.120s :: %s" % (_clean_sql(script), e))
+                self._audit("execute_script[%s] failed :: %.120s :: %s" % (mode, _clean_sql(script), e))
                 raise
             finally:
                 self._current_job_client = None
 
-    def _exec_one(self, stmt: str, limit: int) -> Optional[Dict[str, Any]]:
+    def _exec_one(self, stmt: str, limit: int, mode: str) -> Optional[Dict[str, Any]]:
         """执行单条语句。查询类返回结果 dict;SET/USE/DDL 返回 None。"""
+        t_env = self._t_env(mode)
         stmt_s = stmt.strip()
 
         # SET 'key' = 'value'
@@ -295,7 +330,7 @@ class FlinkEngine:
         if m:
             key = m.group(1)
             value = m.group(2).strip().strip("'")
-            self._t_env.get_config().set(key, value)
+            t_env.get_config().set(key, value)
             if log:
                 log.info("flink SET %s = %s", key, value)
             return None
@@ -303,38 +338,68 @@ class FlinkEngine:
         # USE CATALOG `x`
         m = re.match(r"^USE\s+CATALOG\s+`?([\w-]+)`?\s*$", stmt_s, re.IGNORECASE)
         if m:
-            self._t_env.use_catalog(m.group(1))
+            t_env.use_catalog(m.group(1))
             return None
 
         # USE `db`
         m = re.match(r"^USE\s+`?([\w-]+)`?\s*$", stmt_s, re.IGNORECASE)
         if m:
-            self._t_env.use_database(m.group(1))
+            t_env.use_database(m.group(1))
             return None
 
         # 查询类
         is_query = bool(re.match(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b", stmt_s, re.IGNORECASE))
 
         if is_query:
-            result = self._t_env.execute_sql(stmt_s)
+            result = t_env.execute_sql(stmt_s)
             try:
                 self._current_job_client = result.get_job_client()
             except Exception:
                 self._current_job_client = None
             columns = _extract_columns_schema(result)
-            rows, truncated = self._collect_rows(result, limit)
+            rows, truncated = self._collect_rows(result, limit, mode)
             return {"columns": columns, "rows": rows, "truncated": truncated}
-        else:
-            # DDL / DML(CREATE / DROP / INSERT ...)
-            result = self._t_env.execute_sql(stmt_s)
+
+        # DML:INSERT INTO ...(流模式下提交常驻任务)
+        is_dml_insert = bool(re.match(r"^\s*INSERT\s+INTO\b", stmt_s, re.IGNORECASE))
+        if is_dml_insert:
+            result = t_env.execute_sql(stmt_s)
+            job_client = None
             try:
-                self._current_job_client = result.get_job_client()
+                job_client = result.get_job_client()
             except Exception:
-                self._current_job_client = None
+                pass
+            if job_client is not None:
+                try:
+                    job_id = str(job_client.get_job_id())
+                except Exception:
+                    job_id = "job-" + str(int(time.time() * 1000))
+                self._jobs[job_id] = {
+                    "jobId": job_id,
+                    "sql": _clean_sql(stmt_s)[:200],
+                    "status": "SUBMITTED",
+                    "mode": mode,
+                    "submittedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "job_client": job_client,
+                }
+                self._current_job_client = job_client
+                self._audit("flink stream job submitted: %s :: %.120s" % (job_id, stmt_s))
+                return {"_jobSubmitted": job_id, "columns": [], "rows": [], "truncated": False}
             return None
 
-    def _collect_rows(self, result, limit: int) -> Tuple[List[List[Any]], bool]:
-        """收集结果行,带超时与取消(防 CDC/kafka 流式源无限阻塞)。"""
+        # 其他 DDL(CREATE / DROP / USE ...)
+        result = t_env.execute_sql(stmt_s)
+        try:
+            self._current_job_client = result.get_job_client()
+        except Exception:
+            self._current_job_client = None
+        return None
+
+    def _collect_rows(self, result, limit: int, mode: str) -> Tuple[List[List[Any]], bool]:
+        """收集结果行,带超时与取消(防 CDC/kafka 流式源无限阻塞)。
+
+        流模式下 SELECT 通常也是无限流,超时后 cancel 并返回已收行。
+        """
         collected: List[List[Any]] = []
         stop = threading.Event()
         job_client = None
@@ -368,15 +433,85 @@ class FlinkEngine:
                     job_client.cancel()
                 except Exception:
                     pass
-            # 等 collect 线程退出
             t.join(5)
         if len(collected) >= limit:
             truncated = True
         return collected, truncated
 
-    def execute_sql(self, sql: str, limit: int = 0) -> Dict[str, Any]:
+    # ── 流式任务管理 ──────────────────────────────────────
+    def submit_stream_job(self, script: str) -> Dict[str, Any]:
+        """提交流式任务(脚本执行,INSERT INTO 提交后台常驻)。"""
+        result = self.execute_script(script, mode="stream")
+        job_id = result.get("jobId")
+        if job_id:
+            self._refresh_job_status(job_id)
+        return result
+
+    def list_jobs(self) -> List[Dict[str, Any]]:
+        for job_id in list(self._jobs.keys()):
+            self._refresh_job_status(job_id)
+        jobs = []
+        for job_id, j in self._jobs.items():
+            jobs.append({
+                "jobId": job_id,
+                "sql": j.get("sql", ""),
+                "status": j.get("status", "UNKNOWN"),
+                "submittedAt": j.get("submittedAt", ""),
+                "mode": j.get("mode", "stream"),
+            })
+        # 状态非终态的排前面
+        terminal = {"FINISHED", "FAILED", "CANCELED"}
+        jobs.sort(key=lambda x: (x["status"] in terminal, x["submittedAt"]), reverse=False)
+        return jobs
+
+    def job_status(self, job_id: str) -> Dict[str, Any]:
+        self._refresh_job_status(job_id)
+        j = self._jobs.get(job_id)
+        if not j:
+            raise KeyError("job not found: %s" % job_id)
+        return {
+            "jobId": job_id,
+            "sql": j.get("sql", ""),
+            "status": j.get("status", "UNKNOWN"),
+            "submittedAt": j.get("submittedAt", ""),
+            "mode": j.get("mode", "stream"),
+        }
+
+    def stop_job(self, job_id: str) -> bool:
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j:
+                raise KeyError("job not found: %s" % job_id)
+            jc = j.get("job_client")
+            if jc is None:
+                return False
+            try:
+                jc.cancel()
+                j["status"] = "CANCELLING"
+                self._audit("flink stream job cancel requested: %s" % job_id)
+                return True
+            except Exception as e:
+                if log:
+                    log.info("flink cancel failed: %s", e)
+                return False
+
+    def _refresh_job_status(self, job_id: str) -> None:
+        j = self._jobs.get(job_id)
+        if not j:
+            return
+        jc = j.get("job_client")
+        if jc is None:
+            return
+        try:
+            status = str(jc.get_job_status())
+            j["status"] = status
+        except Exception:
+            pass
+
+    # ── 兼容 ──────────────────────────────────────────────
+    def execute_sql(self, sql: str, limit: int = 0, mode: str = "batch") -> Dict[str, Any]:
         """兼容单条 SQL(内部走脚本解析)。"""
-        return self.execute_script(sql, limit)
+        return self.execute_script(sql, limit, mode=mode)
 
     def cancel(self) -> bool:
         """取消当前正在执行的 job(超时/手动停止)。"""
@@ -398,6 +533,9 @@ class FlinkEngine:
             "yarnAppId": self.cfg.get("yarnAppId", ""),
             "sessionState": self._session_state,
             "allowWrite": self._allow_write,
+            "batchEnv": self._t_env_batch is not None,
+            "streamEnv": self._t_env_stream is not None,
+            "activeJobs": len(self._jobs),
             "lastError": self._last_error,
         }
 

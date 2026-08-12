@@ -103,10 +103,13 @@ if SPARK_ENGINE.enabled:
 
 # Flink 引擎(内嵌 PyFlink,连接常驻 YARN Session;缺省 = 禁用)
 from flink_engine import FlinkEngine, _setup_logger as _flink_setup_logger  # noqa: E402
+from flink_connectors import FlinkConnectors, _setup_logger as _flink_conn_setup_logger  # noqa: E402
 
 _flink_setup_logger(log)
+_flink_conn_setup_logger(log)
 FLINK_CFG = CONFIG.get("flink") or {}
 FLINK_ENGINE = FlinkEngine(FLINK_CFG, os.path.dirname(os.path.abspath(__file__)))
+FLINK_CONNECTORS = FlinkConnectors(FLINK_CFG, os.path.dirname(os.path.abspath(__file__)))
 if FLINK_CFG.get("enabled"):
     log.info("flink engine enabled (yarnAppId=%s, allowWrite=%s)",
              FLINK_CFG.get("yarnAppId"), FLINK_CFG.get("allowWrite"))
@@ -639,6 +642,14 @@ class FlinkQueryReq(BaseModel):
     sql: str
     limit: Optional[int] = None
     timeoutMs: int = 600000
+    mode: str = "batch"  # batch=即席查询(秒回) / stream=流式任务(后台常驻)
+
+
+class FlinkDdlReq(BaseModel):
+    tableName: str
+    connector: str
+    params: Dict[str, Any] = {}
+    fields: List[Dict[str, Any]] = []
 
 
 @app.post("/flink/query")
@@ -650,8 +661,9 @@ def flink_query(
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
+    mode = req.mode if req.mode in ("batch", "stream") else "batch"
     try:
-        result = FLINK_ENGINE.execute_sql(req.sql, req.limit or 0)
+        result = FLINK_ENGINE.execute_script(req.sql, req.limit or 0, mode=mode)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
@@ -680,6 +692,95 @@ def flink_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
     return {"code": 0, "data": FLINK_ENGINE.status()}
+
+
+# ── Flink 连接器与 DDL 生成 ───────────────────────────────
+@app.get("/flink/connectors")
+def flink_connectors(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    return {"code": 0, "data": {"connectors": FLINK_CONNECTORS.list_connectors()}}
+
+
+class FlinkProbeReq(BaseModel):
+    params: Dict[str, Any] = {}
+
+
+@app.post("/flink/connectors/{conn_name}/probe")
+def flink_connector_probe(
+    conn_name: str, req: FlinkProbeReq, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    try:
+        result = FLINK_CONNECTORS.probe_schema(conn_name, req.params)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except NotImplementedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)[:1000])
+    return {"code": 0, "data": result}
+
+
+@app.post("/flink/ddl/generate")
+def flink_ddl_generate(req: FlinkDdlReq, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    try:
+        ddl = FLINK_CONNECTORS.generate_ddl(req.tableName, req.connector, req.params, req.fields)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 0, "data": {"ddl": ddl}}
+
+
+# ── Flink 流式任务管理 ────────────────────────────────────
+@app.get("/flink/jobs")
+def flink_jobs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    return {"code": 0, "data": {"jobs": FLINK_ENGINE.list_jobs()}}
+
+
+@app.get("/flink/jobs/{job_id}")
+def flink_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    try:
+        return {"code": 0, "data": FLINK_ENGINE.job_status(job_id)}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/flink/jobs/{job_id}/stop")
+def flink_job_stop(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    try:
+        stopped = FLINK_ENGINE.stop_job(job_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"code": 0, "data": {"stopped": stopped}}
 
 
 # ── 脚本存储(我的目录:保存 SQL 脚本)────────────────────────────
