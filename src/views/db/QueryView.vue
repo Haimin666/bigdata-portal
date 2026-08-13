@@ -495,7 +495,6 @@ onUnmounted(() => {
 })
 
 // ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
-const showSparkLogs = ref(false)
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 let sparkLogTimer: number | null = null
@@ -519,7 +518,7 @@ async function pollSparkLogs() {
 
 function startSparkLogPolling() {
   stopSparkLogPolling()
-  showSparkLogs.value = true
+  activePane.value = 0 // 查询时固定切到第一个 tab(日志)
   void pollSparkLogs()
   sparkLogTimer = window.setInterval(() => void pollSparkLogs(), 3000)
 }
@@ -538,9 +537,12 @@ function clearSparkLogs() {
 
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
 const logEmptyHint = computed(() => {
-  if (loading.value) return '(等待 Spark 输出…)'
-  const cur = results.value[activeResult.value]
-  if (cur?.error) return '(查询失败,详见上方错误信息;下方为引擎日志)'
+  if (engine.value !== 'sparksql' && engine.value !== 'pyspark' && engine.value !== 'flinksql') {
+    return '(该引擎不产生引擎日志)'
+  }
+  if (loading.value) return '(等待引擎输出…)'
+  const cur = activePane.value > 0 ? results.value[activePane.value - 1] : null
+  if (cur?.error) return '(查询失败,详见结果 tab 错误信息;下方为引擎日志)'
   return '(查询成功,无引擎日志输出)'
 })
 
@@ -674,19 +676,20 @@ interface QueryResultItem {
 }
 
 const results = ref<QueryResultItem[]>([])
-// 当前激活的结果序号(多条时 tab 切换)
-const activeResult = ref(0)
+// 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
+const activePane = ref(0)
+const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
 // 结果表格翻页(默认 15 条/页)
 const pageSize = ref(15)
 const pageCurrent = ref(1)
 const pagedRows = computed(() => {
-  const r = results.value[activeResult.value]
+  const r = currentResult.value
   if (!r) return []
   const start = (pageCurrent.value - 1) * pageSize.value
   return r.rows.slice(start, start + pageSize.value)
 })
-function selectResult(idx: number) {
-  activeResult.value = idx
+function selectPane(pane: number) {
+  activePane.value = pane
   pageCurrent.value = 1
 }
 
@@ -800,8 +803,8 @@ async function execSegments(segs: string[]) {
     if (batchCancelled) break
     await execOne(segs[i], i)
   }
-  // 默认展示最后一个 tab(最新执行的结果)
-  activeResult.value = batchCancelled ? Math.max(0, segs.length - 1) : segs.length - 1
+  // 默认展示最后一个 tab(最新执行的结果;日志 tab 恒为第一个)
+  activePane.value = results.value.length
 }
 
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
@@ -828,7 +831,7 @@ async function runQuery() {
     try {
       results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
       await execOne(target, 0)
-      activeResult.value = 0
+      activePane.value = 1
     } finally {
       loading.value = false
     }
@@ -1055,16 +1058,23 @@ function isNumeric(val: unknown): boolean {
     <!-- 错误提示 -->
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
 
-    <!-- 结果区(上方 tab + 下方内容,默认选中最后一个) -->
+    <!-- 结果区(第一个 tab 固定日志 + 结果 tab 依次;查询中切日志,成功切最新结果) -->
     <div v-if="results.length" class="results-wrap">
       <!-- 上方横向 tab 栏 -->
       <div class="result-tabs">
+        <!-- 第一个 tab 固定:日志(只保留最近一次查询的日志) -->
+        <div class="result-tab log-tab" :class="{ active: activePane === 0 }" @click="selectPane(0)">
+          <el-icon class="tab-log-icon"><DocumentChecked /></el-icon>
+          <span class="tab-name">日志</span>
+          <span v-if="sparkLogText" class="tab-dot" title="有日志输出" />
+        </div>
+        <!-- 结果 tab(每个查询一个,依次折叠) -->
         <div
           v-for="(r, idx) in results"
           :key="idx"
           class="result-tab"
-          :class="{ active: idx === activeResult }"
-          @click="selectResult(idx)"
+          :class="{ active: activePane === idx + 1 }"
+          @click="selectPane(idx + 1)"
         >
           <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
           <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
@@ -1072,15 +1082,27 @@ function isNumeric(val: unknown): boolean {
           </span>
         </div>
       </div>
-      <!-- 下方当前结果内容 -->
+      <!-- 下方当前面板内容 -->
       <div class="result-content">
-        <template v-if="results[activeResult]">
-          <el-alert v-if="results[activeResult].error" type="error" :title="results[activeResult].error" show-icon :closable="false" class="err-alert" />
+        <!-- 日志面板(第一个 tab) -->
+        <template v-if="activePane === 0">
+          <div class="spark-logs-head">
+            <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
+            <span class="spark-logs-actions">
+              <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
+              <el-button text size="small" @click="clearSparkLogs">清空</el-button>
+            </span>
+          </div>
+          <pre class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
+        </template>
+        <!-- 结果内容 -->
+        <template v-else-if="currentResult">
+          <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
           <div v-else v-loading="loading" class="result-table-wrap">
             <el-table :data="pagedRows" border size="small" class="result-table">
               <el-table-column type="index" label="#" width="55" align="center" />
               <el-table-column
-                v-for="c in results[activeResult].columns"
+                v-for="c in currentResult.columns"
                 :key="c"
                 :prop="c"
                 :label="c"
@@ -1107,45 +1129,32 @@ function isNumeric(val: unknown): boolean {
           </div>
           <!-- 底部状态条:行数/耗时 -->
           <div class="result-footer">
-            <span v-if="results[activeResult].error">执行失败</span>
-            <template v-else-if="results[activeResult].jobId">
+            <span v-if="currentResult.error">执行失败</span>
+            <template v-else-if="currentResult.jobId">
               <span class="footer-job">流式任务已提交</span>
-              <el-tag size="small" type="primary">{{ results[activeResult].jobId }}</el-tag>
+              <el-tag size="small" type="primary">{{ currentResult.jobId }}</el-tag>
               <el-button size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
               <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
             </template>
             <template v-else>
-              <span>{{ results[activeResult].rows.length }} 行</span>
-              <template v-if="results[activeResult].truncated"><span class="footer-muted">(已截断)</span></template>
-              <span class="footer-muted">· {{ results[activeResult].costMs }}ms</span>
+              <span>{{ currentResult.rows.length }} 行</span>
+              <template v-if="currentResult.truncated"><span class="footer-muted">(已截断)</span></template>
+              <span class="footer-muted">· {{ currentResult.costMs }}ms</span>
             </template>
           </div>
           <!-- 翻页(默认 15 条/页) -->
           <el-pagination
-            v-if="results[activeResult].rows.length > pageSize"
+            v-if="currentResult.rows.length > pageSize"
             v-model:current-page="pageCurrent"
             v-model:page-size="pageSize"
             class="result-pagination"
             :page-sizes="[15, 50, 100, 200]"
-            :total="results[activeResult].rows.length"
+            :total="currentResult.rows.length"
             layout="total, sizes, prev, pager, next"
             small
           />
         </template>
       </div>
-    </div>
-
-    <!-- Spark driver 日志透传(仅 spark 引擎执行时展示) -->
-    <div v-if="showSparkLogs" class="spark-logs-wrap">
-      <div class="spark-logs-head">
-        <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> Spark 引擎日志</span>
-        <span class="spark-logs-actions">
-          <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
-          <el-button text size="small" @click="clearSparkLogs">清空</el-button>
-          <el-button text size="small" @click="showSparkLogs = false; stopSparkLogPolling()">收起</el-button>
-        </span>
-      </div>
-      <pre class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
     </div>
 
     <!-- 空状态 -->
@@ -1661,6 +1670,29 @@ function isNumeric(val: unknown): boolean {
   &:hover {
     color: $primary;
   }
+}
+
+/* 日志 tab(第一个固定 tab) */
+.log-tab {
+  gap: 4px;
+
+  .tab-log-icon {
+    font-size: 13px;
+    color: $muted;
+  }
+
+  &.active .tab-log-icon {
+    color: $primary;
+  }
+}
+
+/* 日志 tab 有内容时的圆点 */
+.tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: $primary;
+  flex-shrink: 0;
 }
 
 .result-content {
