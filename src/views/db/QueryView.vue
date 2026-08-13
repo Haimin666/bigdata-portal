@@ -736,6 +736,7 @@ async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record
 /** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
  *  token 过期(网关 403)自动重新解锁后重试一次 */
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+  if (!db.value) throw new Error('请先选择数据库')
   if (isSparkWriteSql(sql) && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写操作未解锁')

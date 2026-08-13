@@ -1026,6 +1026,11 @@ app.post('/api/dbquery/query', async (req, res) => {
     return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
   }
   const sql = String(req.body?.sql || '')
+  const dbName = String(req.body?.db || '').trim()
+  if (!dbName) {
+    // 空 db 直接清晰报错,避免转发后得到 db-proxy 隐晦的 "database '' not in ALLOWED_DBS"
+    return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
   if (isSparkWriteSql(sql)) {
     const tk = req.get('X-Spark-Token')
     if (!tk || !sparkTokenValid(tk)) {
@@ -1038,7 +1043,7 @@ app.post('/api/dbquery/query', async (req, res) => {
     const r = await fetch(config.dbProxyUrl + '/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-      body: JSON.stringify({ db: String(req.body?.db || ''), sql, timeoutMs }),
+      body: JSON.stringify({ db: dbName, sql, timeoutMs }),
       signal: AbortSignal.timeout(timeoutMs)
     })
     const body = await r.json().catch(() => ({}))
