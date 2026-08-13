@@ -407,10 +407,11 @@ yarnDynamicProxy.on('proxyRes', (proxyRes, req, res) => {
   proxyRes.on('end', () => {
     let html = Buffer.concat(chunks).toString('utf8')
     // 绝对根路径链接 → 继续走动态代理: /xxx?y=1 → /api/iframe-proxy?url=<enc(origin)/xxx?y=1>
+    // 注意:正则在 \/(?!...) 处已消费前导斜杠,path 不含 /,需补上(否则生成 :8042node 端口非法 → bad url)
     if (origin) {
       html = html.replace(
         /(href|src)\s*=\s*(["'])\/(?!api\/iframe-proxy)((?:[^"'])*)(["'])/g,
-        (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + path)}${q2}`
+        (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + '/' + path)}${q2}`
       )
       // 完整 URL(含主机)→ 继续走动态代理(NM 日志页 css 常为 http://host:8042/static/... 或 //host/...)
       html = html.replace(
