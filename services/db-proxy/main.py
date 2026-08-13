@@ -319,10 +319,19 @@ def check_read_only_sql(sql: str) -> bool:
     return bool(READ_ONLY_SQL_RE.match(sql))
 
 
+def _strip_sql_literals(sql: str) -> str:
+    """剥离注释与字符串字面量,用于语句/表名检查(避免字符串里的 FROM/JOIN/分号被误判)。"""
+    s = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql)
+    s = re.sub(r"'[^']*'", "''", s)
+    s = re.sub(r'"[^"]*"', '""', s)
+    return s
+
+
 def check_single_statement(sql: str) -> None:
     """多语句注入防护:拒绝包含多个分号分隔语句的 SQL。
-    允许末尾一个结尾分号(如 'SELECT 1;'),其余分号视为多语句。"""
-    s = sql.strip()
+    允许末尾一个结尾分号(如 'SELECT 1;'),其余分号视为多语句。
+    先剥离字符串/注释,避免 'SELECT \'a;b\'' 被误判。"""
+    s = _strip_sql_literals(sql).strip()
     # 去掉末尾分号后,若仍含分号 → 多语句
     body = s.rstrip(";").rstrip()
     if ";" in body:
@@ -336,6 +345,8 @@ def check_tables_allowed(sql: str) -> None:
     """表级白名单:从 SQL 提取表名,不在白名单拒绝。"""
     if not ALLOWED_TABLES:
         return
+    # 提取用剥离字符串/注释后的 SQL,避免 'from xxx' 字符串被误提取
+    clean = _strip_sql_literals(sql)
     names: List[str] = []
     seen = set()
 
@@ -346,13 +357,13 @@ def check_tables_allowed(sql: str) -> None:
         seen.add(n)
         names.append(n)
 
-    for m in TABLE_RE.finditer(sql):
+    for m in TABLE_RE.finditer(clean):
         # 反引号双段 `db`.`tbl` → 拼完整名;单段/普通名取对应组
         if m.group(1) and m.group(2):
             _add(f"{m.group(1)}.{m.group(2)}")
         else:
             _add(m.group(3) or m.group(4))
-    for m in BACKTICK_TABLE_RE.finditer(sql):
+    for m in BACKTICK_TABLE_RE.finditer(clean):
         if m.group(1) and m.group(2):
             _add(f"{m.group(1)}.{m.group(2)}")
         elif m.group(3) and m.group(4):

@@ -498,11 +498,14 @@ onUnmounted(() => {
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 let sparkLogTimer: number | null = null
+let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
 
 /** 拉取 spark 日志增量并追加 */
 async function pollSparkLogs() {
+  const seq = sparkLogSeq
   try {
     const data = await sparkLogs(sparkLogOffsets.value)
+    if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
     if (data.content) {
       sparkLogText.value += data.content
       // 只保留最近 500 行(引擎日志 tail 500 条)
@@ -530,6 +533,7 @@ function stopSparkLogPolling() {
 }
 
 function clearSparkLogs() {
+  sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
   sparkLogText.value = ''
   sparkLogOffsets.value = { jvm: 0, audit: 0 }
 }
