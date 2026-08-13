@@ -72,3 +72,15 @@ export function fetchGraph(): Promise<DleapGraph> {
 export function publishPreview(): Promise<{ message: string; workflow: unknown }> {
   return req('/publish/preview', { method: 'POST' })
 }
+
+export interface ShellRunResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+  timedOut: boolean
+  costMs: number
+}
+
+export function runShell(id: string): Promise<ShellRunResult> {
+  return req('/run/shell', { method: 'POST', body: JSON.stringify({ id }) })
+}

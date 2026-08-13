@@ -63,7 +63,7 @@
               type="success"
               :icon="VideoPlay"
               :loading="runLoading"
-              :disabled="form.type !== 'sql' || !form.db"
+              :disabled="form.type !== 'sql' && form.type !== 'shell'"
               @click="onRun"
             >试跑</el-button>
           </div>
@@ -94,6 +94,16 @@
           <!-- 试跑结果 -->
           <div v-if="runResult || runError" class="run-result">
             <el-alert v-if="runError" type="error" :title="runError" show-icon :closable="false" />
+            <template v-else-if="runResult && runResult.kind === 'shell'">
+              <div class="run-meta">
+                退出码: <el-tag size="small" :type="runResult.exitCode === 0 ? 'success' : 'danger'">{{ runResult.exitCode }}</el-tag>
+                · {{ runResult.costMs }}ms
+                <template v-if="runResult.timedOut"><el-tag size="small" type="warning">执行超时(30s)</el-tag></template>
+              </div>
+              <pre class="shell-out" v-if="runResult.stdout">{{ runResult.stdout }}</pre>
+              <pre class="shell-err" v-if="runResult.stderr">{{ runResult.stderr }}</pre>
+              <div v-if="!runResult.stdout && !runResult.stderr" class="run-meta">(无输出)</div>
+            </template>
             <template v-else-if="runResult">
               <div class="run-meta">{{ runResult.rows.length }} 行 · {{ runResult.costMs }}ms<template v-if="runResult.truncated">(已截断)</template></div>
               <el-table :data="runResult.rows" border size="small" max-height="260" class="run-table">
@@ -147,6 +157,7 @@ import {
   setNodeDeps,
   fetchGraph,
   publishPreview,
+  runShell,
   type DleapNode,
   type DleapNodeDetail,
   type DleapNodeType,
@@ -176,7 +187,10 @@ const pubVisible = ref(false)
 const pubMsg = ref('')
 const pubJson = ref('')
 const datasources = ref<DbDataSource[]>([])
-const runResult = ref<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean } | null>(null)
+type RunResult =
+  | { kind: 'sql'; columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
+  | { kind: 'shell'; stdout: string; stderr: string; exitCode: number; timedOut: boolean; costMs: number }
+const runResult = ref<RunResult | null>(null)
 const runLoading = ref(false)
 const runError = ref('')
 const g6El = ref<HTMLDivElement>()
@@ -317,17 +331,24 @@ async function onDelete(id: string) {
   }
 }
 
-/** 试跑:SQL 节点经 /api/dbquery/query 只读执行(写拦截/错误透传由门户网关负责) */
+/** 试跑:SQL 经 /api/dbquery/query 只读执行;Shell 在门户服务器执行(30s 超时) */
 async function onRun() {
   if (!current.value) return
-  if (!form.value.db) return ElMessage.warning('请先选择数据源')
-  if (form.value.type !== 'sql') return ElMessage.warning('仅 SQL 节点支持试跑')
-  if (!form.value.content.trim()) return ElMessage.warning('SQL 内容为空')
+  if (!form.value.content.trim()) return ElMessage.warning('内容为空')
   runLoading.value = true
   runError.value = ''
   runResult.value = null
   try {
-    runResult.value = await queryDb(form.value.db, form.value.content)
+    if (form.value.type === 'shell') {
+      const r = await runShell(current.value.id)
+      runResult.value = { kind: 'shell', ...r }
+    } else if (form.value.type === 'sql') {
+      if (!form.value.db) throw new Error('请先选择数据源')
+      const r = await queryDb(form.value.db, form.value.content)
+      runResult.value = { kind: 'sql', ...r }
+    } else {
+      throw new Error('Spark 节点执行开发中,暂支持 SQL/Shell')
+    }
   } catch (e) {
     runError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -697,6 +718,30 @@ onBeforeUnmount(() => {
 
 .run-table {
   width: 100%;
+}
+
+.shell-out,
+.shell-err {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid var(--bd-border, #c9cdd6);
+}
+
+.shell-out {
+  color: var(--bd-text, #1c2b36);
+  background: var(--bd-panel, #fff);
+}
+
+.shell-err {
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.06);
 }
 
 .g6-canvas {

@@ -6,10 +6,12 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { exec } from 'node:child_process'
 import config from './config.js'
 
 const DLEAP_DIR = path.join(path.dirname(import.meta.dirname), 'data', 'dleap')
 const NODES_FILE = path.join(DLEAP_DIR, 'nodes.json')
+const RUN_DIR = path.join(DLEAP_DIR, 'run')
 
 const NODE_TYPES = ['sql', 'shell', 'spark']
 
@@ -201,6 +203,37 @@ export function dataleapRouter() {
         topoOrder: order,
         cycles: cycles.map((c) => c.map((id) => findNode(nodes, id)?.name || id))
       }
+    })
+  })
+
+  // Shell 节点执行(试水):在门户服务器上运行脚本内容
+  // 安全约束:需登录(/api/dataleap 已在保护前缀);30s 超时自动 kill;输出截断 64KB
+  router.post('/run/shell', (req, res) => {
+    const n = findNode(loadNodes(), req.body?.id)
+    if (!n) return res.status(404).json({ code: 404, msg: '节点不存在' })
+    if (n.type !== 'shell') return res.status(400).json({ code: 400, msg: '仅 Shell 节点可执行' })
+    const script = String(n.content || '').trim()
+    if (!script) return res.status(400).json({ code: 400, msg: '脚本内容为空' })
+    fs.mkdirSync(RUN_DIR, { recursive: true })
+    const t0 = Date.now()
+    exec(script, {
+      timeout: 30000,
+      maxBuffer: 64 * 1024,
+      shell: '/bin/sh',
+      cwd: RUN_DIR,
+      env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
+    }, (err, stdout, stderr) => {
+      const killed = !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL')
+      res.json({
+        code: 0,
+        data: {
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+          exitCode: typeof err?.code === 'number' ? err.code : 0,
+          timedOut: killed,
+          costMs: Date.now() - t0
+        }
+      })
     })
   })
 
