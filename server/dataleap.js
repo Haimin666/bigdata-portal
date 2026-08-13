@@ -237,6 +237,90 @@ export function dataleapRouter() {
     })
   })
 
+  // ── 依赖调度:按拓扑执行全部节点(本地串行,不接 DS)────────────
+  function execShell(script) {
+    return new Promise((resolve) => {
+      fs.mkdirSync(RUN_DIR, { recursive: true })
+      const t0 = Date.now()
+      exec(String(script || ''), {
+        timeout: 30000,
+        maxBuffer: 64 * 1024,
+        shell: '/bin/sh',
+        cwd: RUN_DIR,
+        env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
+      }, (err, stdout, stderr) => {
+        resolve({
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+          exitCode: typeof err?.code === 'number' ? err.code : 0,
+          timedOut: !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL'),
+          costMs: Date.now() - t0
+        })
+      })
+    })
+  }
+
+  async function proxyDbQuery(db, sql) {
+    if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
+    const r = await fetch(config.dbProxyUrl + '/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
+      body: JSON.stringify({ db, sql, timeoutMs: 60000 }),
+      signal: AbortSignal.timeout(65000)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+    return body.data || {}
+  }
+
+  async function proxySpark(sql) {
+    if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
+    const r = await fetch(config.dbProxyUrl + '/spark/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
+      body: JSON.stringify({ kind: 'sql', sql, writeUnlocked: false, timeoutMs: 60000 }),
+      signal: AbortSignal.timeout(65000)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+    return body.data || {}
+  }
+
+  // 按拓扑执行全部节点(串行;SQL/Spark 只读,Shell 本地执行;失败记录不中断后续)
+  router.post('/run/all', async (req, res) => {
+    const nodes = loadNodes()
+    if (!nodes.length) return res.json({ code: 0, data: { results: [], message: '无节点' } })
+    const { order, cycles } = topoSort(nodes)
+    if (cycles.length) {
+      return res.status(400).json({ code: 400, msg: `存在依赖环,无法执行: ${cycles.map((c) => c.join(' → ')).join('; ')}` })
+    }
+    const results = []
+    for (const id of order) {
+      const n = findNode(nodes, id)
+      if (!n) continue
+      const t0 = Date.now()
+      try {
+        if (n.type === 'shell') {
+          const r = await execShell(n.content)
+          results.push({ id, name: n.name, type: n.type, ok: r.exitCode === 0, stdout: r.stdout, stderr: r.stderr, costMs: r.costMs })
+        } else if (n.type === 'sql') {
+          if (!n.db) throw new Error('未配置数据源')
+          const r = await proxyDbQuery(n.db, n.content)
+          results.push({ id, name: n.name, type: n.type, ok: true, rows: (r.rows || []).length, costMs: r.costMs })
+        } else if (n.type === 'spark') {
+          const r = await proxySpark(n.content)
+          results.push({ id, name: n.name, type: n.type, ok: true, rows: (r.rows || []).length, costMs: r.costMs })
+        } else {
+          results.push({ id, name: n.name, type: n.type, ok: false, error: '未知类型' })
+        }
+      } catch (e) {
+        results.push({ id, name: n.name, type: n.type, ok: false, error: e instanceof Error ? e.message : String(e), costMs: Date.now() - t0 })
+      }
+    }
+    const okCount = results.filter((r) => r.ok).length
+    res.json({ code: 0, data: { results, message: `${okCount}/${results.length} 个节点执行成功` } })
+  })
+
   // 发布预览:按依赖拓扑生成 DS 工作流序列化(mock,不触发真实操作)
   // 一个文件 = 一个 DS 任务节点;依赖 = DS 任务连线;返回可预览的 JSON/文本
   router.post('/publish/preview', (req, res) => {

@@ -8,6 +8,7 @@
       <el-button size="small" :icon="FolderOpened" @click="openIngest">数据接入</el-button>
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Promotion" :loading="pubLoading" @click="onPublish">发布预览</el-button>
+      <el-button size="small" type="danger" plain :icon="VideoPlay" :loading="runAllLoading" @click="onRunAll">按拓扑执行全部</el-button>
       <el-tag v-if="graph.cycles.length" type="danger" size="small">检测到 {{ graph.cycles.length }} 个依赖环</el-tag>
       <span v-else-if="graph.topoOrder.length" class="topo-hint">拓扑序:{{ topoHint }}</span>
     </div>
@@ -64,7 +65,7 @@
               type="success"
               :icon="VideoPlay"
               :loading="runLoading"
-              :disabled="form.type !== 'sql' && form.type !== 'shell'"
+              :disabled="form.type !== 'sql' && form.type !== 'shell' && form.type !== 'spark'"
               @click="onRun"
             >试跑</el-button>
           </div>
@@ -166,6 +167,34 @@
       </div>
     </el-dialog>
 
+    <!-- 按拓扑执行结果 -->
+    <el-dialog v-model="runAllVisible" title="执行结果(按依赖拓扑串行)" width="720px">
+      <el-table :data="runAllResult" border size="small" max-height="420">
+        <el-table-column type="index" label="#" width="45" align="center" />
+        <el-table-column label="节点" prop="name" min-width="140" show-overflow-tooltip />
+        <el-table-column label="类型" width="80" align="center">
+          <template #default="{ row }"><el-tag size="small" effect="plain">{{ row.type }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="状态" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.ok ? 'success' : 'danger'">{{ row.ok ? '成功' : '失败' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="输出/行数" min-width="140">
+          <template #default="{ row }">
+            <span v-if="row.rows != null">{{ row.rows }} 行</span>
+            <span v-else-if="row.stdout" class="cell-out">{{ row.stdout.slice(0, 120) }}</span>
+            <span v-else-if="row.stderr" class="cell-err">{{ row.stderr.slice(0, 120) }}</span>
+            <span v-else-if="row.error" class="cell-err">{{ row.error.slice(0, 120) }}</span>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="耗时" width="80" align="right">
+          <template #default="{ row }"><span v-if="row.costMs != null">{{ row.costMs }}ms</span></template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
+
     <!-- 发布预览结果 -->
     <el-dialog v-model="pubVisible" title="发布预览(序列化,mock 不触发真实操作)" width="720px">
       <el-alert v-if="pubMsg" type="success" :title="pubMsg" show-icon :closable="false" style="margin-bottom: 10px" />
@@ -178,7 +207,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid } from '@element-plus/icons-vue'
-import { queryDb, listDataSources, listTables, type DbDataSource } from '@/api/db'
+import { queryDb, listDataSources, listTables, querySpark, type DbDataSource } from '@/api/db'
 import G6 from '@antv/g6'
 import {
   listNodes,
@@ -190,6 +219,8 @@ import {
   fetchGraph,
   publishPreview,
   runShell,
+  runAll,
+  type RunAllItem,
   type DleapNode,
   type DleapNodeDetail,
   type DleapNodeType,
@@ -218,6 +249,9 @@ const form = ref<{ name: string; type: DleapNodeType; project: string; cron: str
 const pubVisible = ref(false)
 const pubMsg = ref('')
 const pubJson = ref('')
+const runAllVisible = ref(false)
+const runAllLoading = ref(false)
+const runAllResult = ref<RunAllItem[]>([])
 const datasources = ref<DbDataSource[]>([])
 type RunResult =
   | { kind: 'sql'; columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
@@ -387,8 +421,12 @@ async function onRun() {
       if (!form.value.db) throw new Error('请先选择数据源')
       const r = await queryDb(form.value.db, form.value.content)
       runResult.value = { kind: 'sql', ...r }
+    } else if (form.value.type === 'spark') {
+      // Spark 节点:经门户 /api/spark/query 执行 SQL(只读 SELECT 无需解锁;写操作需解锁走现有交互)
+      const r = await querySpark(form.value.content)
+      runResult.value = { kind: 'sql', ...r }
     } else {
-      throw new Error('Spark 节点执行开发中,暂支持 SQL/Shell')
+      throw new Error('未知节点类型')
     }
   } catch (e) {
     runError.value = e instanceof Error ? e.message : String(e)
@@ -440,6 +478,27 @@ async function onPickTable(t: string) {
     await reload()
   } catch (e) {
     ElMessage.error(`生成失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
+/** 按依赖拓扑执行全部节点(串行;真实执行,由用户触发) */
+async function onRunAll() {
+  if (!nodes.value.length) return ElMessage.warning('暂无节点')
+  try {
+    await ElMessageBox.confirm('将按依赖拓扑顺序串行执行全部节点(SQL/Spark 只读查询,Shell 本地运行)。确认执行?', '按拓扑执行全部', { type: 'warning' })
+  } catch {
+    return
+  }
+  runAllLoading.value = true
+  try {
+    const d = await runAll()
+    runAllResult.value = d.results || []
+    ElMessage.success(d.message || '执行完成')
+    runAllVisible.value = true
+  } catch (e) {
+    ElMessage.error(`执行失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    runAllLoading.value = false
   }
 }
 
@@ -881,6 +940,14 @@ onBeforeUnmount(() => {
     opacity: 0;
     color: var(--bd-primary, #00849c);
   }
+}
+
+.cell-out {
+  color: var(--bd-text, #1c2b36);
+}
+
+.cell-err {
+  color: #f56c6c;
 }
 
 .pub-json {

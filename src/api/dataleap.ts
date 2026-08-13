@@ -84,3 +84,19 @@ export interface ShellRunResult {
 export function runShell(id: string): Promise<ShellRunResult> {
   return req('/run/shell', { method: 'POST', body: JSON.stringify({ id }) })
 }
+
+export interface RunAllItem {
+  id: string
+  name: string
+  type: string
+  ok: boolean
+  stdout?: string
+  stderr?: string
+  rows?: number
+  error?: string
+  costMs?: number
+}
+
+export function runAll(): Promise<{ results: RunAllItem[]; message: string }> {
+  return req('/run/all', { method: 'POST' })
+}
