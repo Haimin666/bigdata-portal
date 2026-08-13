@@ -3,7 +3,7 @@
  *  - Jobs / Job 详情(拓扑) / Task Managers / Job Manager / Configuration
  *  - 数据源:RM 的 /proxy/{appId}/... → Flink REST API
  */
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -20,6 +20,7 @@ const tab = ref<'jobs' | 'jobDetail' | 'tm' | 'jm' | 'config'>('jobs')
 const loading = ref(false)
 const errMsg = ref('')
 const lastTs = ref('')
+const fs = ref(false)
 
 // ── overview + jobs ──
 const overview = ref<any>(null)
@@ -43,8 +44,19 @@ let timer: number | undefined
 
 async function getJson(path: string): Promise<any> {
   const r = await fetch(BASE(path), { signal: AbortSignal.timeout(20000) })
-  if (!r.ok) throw new Error(`HTTP ${r.status}: ${path}`)
-  return r.json()
+  const text = await r.text()
+  if (!r.ok) {
+    const hint =
+      r.status === 404
+        ? '应用已结束或 RM proxy 暂不可用(REST 仅对运行中应用有效)'
+        : `HTTP ${r.status}`
+    throw new Error(`${hint}: ${path}`)
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`响应不是 JSON(可能返回了 HTML 页面): ${path} — ${text.slice(0, 80)}`)
+  }
 }
 async function getText(path: string, maxBytes?: number): Promise<string> {
   const q = maxBytes ? `${path.includes('?') ? '&' : '?'}maxBytes=${maxBytes}` : ''
@@ -158,7 +170,8 @@ function switchTab(t: any) {
   if (t === 'config' && !configs.value.length) loadConfig()
 }
 
-/** 拓扑分层(BFS):plan.nodes → layers */
+/** 拓扑分层(BFS):plan.nodes → layers(computed 缓存,避免模板多次重算) */
+const topoLayers = computed(() => planLayers())
 function planLayers(): { nodes: any[]; edges: any[] }[] {
   const p = jobDetail.value?.plan
   if (!p) return []
@@ -214,13 +227,23 @@ onUnmounted(() => {
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="`Flink UI - ${appName}`"
     width="1080px"
     top="4vh"
     class="flink-ui-dialog"
+    :fullscreen="fs"
     destroy-on-close
     @update:model-value="emit('update:modelValue', $event)"
   >
+    <template #header>
+      <div class="fud-dlg-head">
+        <span class="fud-dlg-title">Flink UI - {{ appName }}</span>
+        <div class="fud-dlg-actions">
+          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
+            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
+          </el-button>
+        </div>
+      </div>
+    </template>
     <div class="fud-topbar">
       <div class="tabs">
         <button :class="['fud-tab', { active: tab === 'jobs' }]" @click="switchTab('jobs')">Jobs</button>
@@ -250,7 +273,7 @@ onUnmounted(() => {
       </div>
       <div class="fud-panel">
         <div class="head"><span class="t">JOBS</span><span class="spacer"></span><span class="m">/jobs/overview</span></div>
-        <el-table :data="jobs" size="small" height="46vh" @row-click="openJob">
+        <el-table :data="jobs" size="small" :height="fs ? 'calc(100vh - 250px)' : '46vh'" @row-click="openJob">
           <el-table-column label="Job ID" width="130">
             <template #default="{ row }"><span class="mono-id">{{ row.jid.slice(0, 10) }}…</span></template>
           </el-table-column>
@@ -291,26 +314,28 @@ onUnmounted(() => {
       </div>
       <div class="fud-panel">
         <div class="head"><span class="t">拓扑</span><span class="spacer"></span><span class="m">StreamGraph · 点击 Job 行进入</span></div>
-        <div class="fud-topo" v-if="planLayers().length">
-          <div v-for="(l, li) in planLayers()" :key="li" class="fud-layer">
-            <template v-for="(n, ni) in l.nodes" :key="n.id">
-              <div v-if="ni" class="fud-arrow">→</div>
-              <div class="fud-node">
-                <div class="t">{{ n.operator || 'operator' }}</div>
-                <div class="n" :title="n.description">{{ n.description }}</div>
-                <div class="sub">并行度 {{ n.parallelism }}</div>
-              </div>
-            </template>
-          </div>
-          <div v-for="n in planLayers().slice(1).length" :key="'c' + n" class="fud-edge-line">
-            <span></span>
-          </div>
+        <div class="fud-topo" v-if="topoLayers.length">
+          <template v-for="(l, li) in topoLayers" :key="li">
+            <div class="fud-layer">
+              <template v-for="(n, ni) in l.nodes" :key="n.id">
+                <div v-if="ni" class="fud-arrow">→</div>
+                <div class="fud-node">
+                  <div class="t">{{ n.operator || 'operator' }}</div>
+                  <div class="n" :title="n.description">{{ n.description }}</div>
+                  <div class="sub">并行度 {{ n.parallelism }}</div>
+                </div>
+              </template>
+            </div>
+            <div v-if="li < topoLayers.length - 1" class="fud-edge-line">
+              <span class="fud-edge-arrow" />
+            </div>
+          </template>
         </div>
         <div v-else class="fud-empty">无拓扑数据(plan 为空)</div>
       </div>
       <div class="fud-panel" v-if="jobDetail">
         <div class="head"><span class="t">VERTICES</span><span class="spacer"></span><span class="m">/jobs/:jid</span></div>
-        <el-table :data="jobDetail.vertices || []" size="small" height="26vh">
+        <el-table :data="jobDetail.vertices || []" size="small" :height="fs ? 'calc(100vh - 460px)' : '26vh'">
           <el-table-column label="名称" prop="name" min-width="180" show-overflow-tooltip />
           <el-table-column label="并行度" prop="parallelism" width="90" />
           <el-table-column label="状态" width="120">
@@ -387,6 +412,12 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .flink-ui-dialog :deep(.el-dialog__body) { padding: 8px 16px 16px; }
+.fud-dlg-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-right: 12px;
+  .fud-dlg-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; color: $text; }
+  .fud-dlg-actions { display: flex; align-items: center; }
+}
 .fud-topbar {
   display: flex; align-items: center; gap: 12px;
   border-bottom: 1px solid var(--bd-border);
@@ -447,6 +478,18 @@ onUnmounted(() => {
 }
 .fud-topo { padding: 16px 18px; }
 .fud-layer { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fud-edge-line {
+  display: flex; justify-content: center; align-items: center;
+  height: 24px; position: relative;
+  &::before {
+    content: ''; width: 2px; height: 100%;
+    background: color-mix(in srgb, var(--bd-primary) 50%, transparent);
+  }
+  .fud-edge-arrow {
+    position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+    border: 5px solid transparent; border-top-color: var(--bd-primary);
+  }
+}
 .fud-arrow { color: var(--bd-primary); font-weight: 700; }
 .fud-node {
   min-width: 180px; max-width: 280px; text-align: center;

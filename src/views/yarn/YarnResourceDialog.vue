@@ -39,6 +39,7 @@ const logFull = ref(false)
 
 /* ── 视图状态:app(资源页) / logs(日志) ── */
 const view = ref<'app' | 'logs'>('app')
+const fs = ref(false)
 const curContainer = ref('')
 const curNode = ref('')
 
@@ -190,13 +191,23 @@ const statusColor = (c: string): StatusColor =>
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="`资源管理 ${appName || appId}`"
     width="88%"
     top="3vh"
     destroy-on-close
     class="yarn-res-dialog"
+    :fullscreen="fs"
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
   >
+    <template #header>
+      <div class="yrd-dlg-head">
+        <span class="yrd-dlg-title">资源管理 {{ appName || appId }}</span>
+        <div class="yrd-dlg-actions">
+          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
+            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
+          </el-button>
+        </div>
+      </div>
+    </template>
     <!-- 顶栏:面包屑 + 回到资源页 -->
     <div class="yrd-topbar">
       <span class="yrd-crumb">
@@ -278,6 +289,12 @@ const statusColor = (c: string): StatusColor =>
 </template>
 
 <style scoped lang="scss">
+.yrd-dlg-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-right: 12px;
+  .yrd-dlg-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; color: $text; }
+  .yrd-dlg-actions { display: flex; align-items: center; }
+}
 .yrd-topbar {
   display: flex;
   align-items: center;
@@ -307,6 +324,7 @@ const statusColor = (c: string): StatusColor =>
   &-disabled { opacity: 0.35; cursor: not-allowed; }
 }
 .yrd-body { min-height: 40vh; max-height: 74vh; overflow: auto; }
+.yarn-res-dialog.is-fullscreen .yrd-body { max-height: calc(100vh - 180px); }
 .yrd-err { margin-bottom: 12px; }
 .yrd-panel {
   background: $panel;

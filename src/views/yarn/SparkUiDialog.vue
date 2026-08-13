@@ -22,6 +22,7 @@ const loading = ref(false)
 const errMsg = ref('')
 const lastTs = ref('')
 const autoRefresh = ref(true)
+const fs = ref(false)
 
 const appInfo = ref<any>(null)
 const jobs = ref<any[]>([])
@@ -34,8 +35,21 @@ let timer: number | undefined
 
 async function getJson(path: string): Promise<any> {
   const r = await fetch(BASE(path), { signal: AbortSignal.timeout(20000) })
-  if (!r.ok) throw new Error(`HTTP ${r.status}: ${path}`)
-  return r.json()
+  const text = await r.text()
+  if (!r.ok) {
+    // 404 常见:应用已结束,RM /proxy/{appId} 只代理运行中应用;或 AM 尚未注册
+    const hint =
+      r.status === 404
+        ? '应用已结束或 RM proxy 暂不可用(REST 仅对运行中应用有效)'
+        : `HTTP ${r.status}`
+    throw new Error(`${hint}: ${path}`)
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    // 偶发:RM 返回 HTML(404 页/登录页)而非 JSON,给可读提示而非 "Unexpected token '<'"
+    throw new Error(`响应不是 JSON(可能返回了 HTML 页面): ${path} — ${text.slice(0, 80)}`)
+  }
 }
 
 async function refreshAll() {
@@ -56,7 +70,8 @@ async function refreshAll() {
     env.value = en || null
     lastTs.value = new Date().toLocaleTimeString()
   } catch (err: any) {
-    errMsg.value = String(err.message || err)
+    // 保留上一次成功数据,仅提示刷新失败(避免 404 时整窗空白)
+    errMsg.value = `刷新失败:${String(err.message || err)}`
   } finally {
     loading.value = false
   }
@@ -135,13 +150,23 @@ onUnmounted(() => {
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="`Spark UI - ${appName}`"
     width="1080px"
     top="4vh"
     class="spark-ui-dialog"
+    :fullscreen="fs"
     destroy-on-close
     @update:model-value="emit('update:modelValue', $event)"
   >
+    <template #header>
+      <div class="sud-dlg-head">
+        <span class="sud-dlg-title">Spark UI - {{ appName }}</span>
+        <div class="sud-dlg-actions">
+          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
+            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
+          </el-button>
+        </div>
+      </div>
+    </template>
     <div class="sud-topbar">
       <div class="tabs">
         <button :class="['sud-tab', { active: tab === 'jobs' }]" @click="tab = 'jobs'">Jobs</button>
@@ -177,7 +202,7 @@ onUnmounted(() => {
       <!-- ── Jobs ── -->
       <div v-show="tab === 'jobs'" class="sud-panel">
         <div class="head"><span class="t">JOBS</span><span class="spacer"></span><span class="m">/api/v1/applications/:id/jobs</span></div>
-        <el-table :data="jobs" size="small" height="52vh">
+        <el-table :data="jobs" size="small" :height="fs ? 'calc(100vh - 260px)' : '52vh'">
           <el-table-column label="Job ID" prop="jobId" width="80" />
           <el-table-column label="描述" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
@@ -215,7 +240,7 @@ onUnmounted(() => {
       <!-- ── Stages ── -->
       <div v-show="tab === 'stages'" class="sud-panel">
         <div class="head"><span class="t">STAGES</span><span class="spacer"></span><span class="m">/api/v1/applications/:id/stages · {{ stages.length }} 条</span></div>
-        <el-table :data="stages" size="small" height="52vh">
+        <el-table :data="stages" size="small" :height="fs ? 'calc(100vh - 260px)' : '52vh'">
           <el-table-column label="Stage" width="90">
             <template #default="{ row }"><span class="mono-id">{{ row.stageId }} / {{ row.attemptId }}</span></template>
           </el-table-column>
@@ -242,7 +267,7 @@ onUnmounted(() => {
       <!-- ── Executors ── -->
       <div v-show="tab === 'executors'" class="sud-panel">
         <div class="head"><span class="t">EXECUTORS</span><span class="spacer"></span><span class="m">/api/v1/applications/:id/executors · {{ executors.length }} 个</span></div>
-        <el-table :data="executors" size="small" height="52vh">
+        <el-table :data="executors" size="small" :height="fs ? 'calc(100vh - 260px)' : '52vh'">
           <el-table-column label="ID" prop="id" width="80" />
           <el-table-column label="地址" prop="hostPort" min-width="180" show-overflow-tooltip />
           <el-table-column label="状态" width="100">
@@ -282,6 +307,12 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .spark-ui-dialog :deep(.el-dialog__body) { padding: 8px 16px 16px; }
+.sud-dlg-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-right: 12px;
+  .sud-dlg-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; color: $text; }
+  .sud-dlg-actions { display: flex; align-items: center; }
+}
 .sud-topbar {
   display: flex; align-items: center; gap: 12px;
   border-bottom: 1px solid var(--bd-border); margin-bottom: 10px;
