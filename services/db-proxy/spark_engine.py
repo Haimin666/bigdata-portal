@@ -59,9 +59,13 @@ def _strip_comments(sql: str) -> str:
 
 _FILE_NOT_FOUND_MARKS = (
     "FileNotFoundException",
+    "SparkFileNotFoundException",
     "File does not exist",
+    "path does not exist",
+    "NoSuchFileException",
     "readCurrentFileNotFoundError",
     "It is possible the underlying files have been updated",
+    "Could not locate",
 )
 
 
@@ -426,28 +430,32 @@ class SparkEngine:
                 # Spark 仍按旧文件列表读取 → SparkFileNotFoundException。
                 # 自动 REFRESH 涉及的表并重试一次,规避"REFRESH TABLE"手动操作。
                 msg = str(e)
-                if _is_file_not_found(msg) and not self._cancel_flag.is_set():
-                    try:
-                        refreshed = self._refresh_tables(code)
-                        self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
-                        df = self._spark.sql(code)
-                        rows = df.limit(limit + 1).collect()
-                        self._raise_if_cancelled()
-                        truncated = len(rows) > limit
-                        rows = rows[:limit]
-                        columns = df.columns
-                        data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
-                        cost_ms = int((time.time() - start) * 1000)
-                        self._audit("sql retry OK rows=%d cost=%dms" % (len(rows), cost_ms))
-                        return {
-                            "columns": columns,
-                            "rows": data,
-                            "costMs": cost_ms,
-                            "truncated": truncated,
-                        }
-                    except Exception as e2:
-                        self._audit("sql retry FAILED after refresh: %s" % e2)
-                        raise RuntimeError(_format_spark_error(e2))
+                if _is_file_not_found(msg):
+                    # 超时/手动取消置位时不重试(避免超时后继续执行慢查询)
+                    if self._cancel_flag.is_set():
+                        self._audit("file-not-found detected but skipped (cancel_flag set)")
+                    else:
+                        try:
+                            refreshed = self._refresh_tables(code)
+                            self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
+                            df = self._spark.sql(code)
+                            rows = df.limit(limit + 1).collect()
+                            self._raise_if_cancelled()
+                            truncated = len(rows) > limit
+                            rows = rows[:limit]
+                            columns = df.columns
+                            data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
+                            cost_ms = int((time.time() - start) * 1000)
+                            self._audit("sql retry OK rows=%d cost=%dms" % (len(rows), cost_ms))
+                            return {
+                                "columns": columns,
+                                "rows": data,
+                                "costMs": cost_ms,
+                                "truncated": truncated,
+                            }
+                        except Exception as e2:
+                            self._audit("sql retry FAILED after refresh: %s" % e2)
+                            raise RuntimeError(_format_spark_error(e2))
                 if self._cancel_flag.is_set():
                     self._audit("sql CANCELLED (manual or timeout) after %dms" % (int((time.time() - start) * 1000)))
                     raise RuntimeError("查询已停止(用户取消或超时)")
