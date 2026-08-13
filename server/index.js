@@ -51,7 +51,7 @@ const auth = setupAuth(app, config)
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
-  '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
+  '/api/ds-deps', '/api/scripts', '/api/config', '/api/login', '/api/dataleap',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
 ]
@@ -1098,9 +1098,11 @@ app.get('/api/config', (req, res) =>
 // ── 工作流依赖采集与级联重跑(/api/ds-deps)───────────────────
 import { initDsDeps, dsDepsRouter } from './ds-deps.js'
 import { dbScriptsRouter } from './db-scripts.js'
+import { dataleapRouter } from './dataleap.js'
 initDsDeps() // 启动加载缓存 + 初始化采集 + 定时刷新
 app.use('/api/ds-deps', dsDepsRouter())
 app.use('/api/scripts', dbScriptsRouter())
+app.use('/api/dataleap', dataleapRouter())
 
 // ── SPA fallback(仅非 API 的 GET 路由) ────────────────────────
 app.get('*', (req, res, next) => {

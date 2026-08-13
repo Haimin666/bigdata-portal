@@ -9,6 +9,7 @@ import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
 import HdfsView from '@/views/hdfs/HdfsView.vue'
 import DbQueryView from '@/views/db/QueryView.vue'
 import UserManageView from '@/views/admin/UserManageView.vue'
+import DataLeapView from '@/views/dataleap/DataLeapView.vue'
 
 defineOptions({ name: 'TabStage' })
 
@@ -31,7 +32,8 @@ const nativeComponents: Record<string, Component> = {
   dsTask: DsTaskMonitor,
   hdfs: HdfsView,
   dbQuery: DbQueryView,
-  userManage: UserManageView
+  userManage: UserManageView,
+  dataleap: DataLeapView
 }
 
 const activePath = computed(() => route.path)

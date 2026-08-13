@@ -19,6 +19,13 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
+    path: '/dataleap',
+    title: 'DataLeap 实验',
+    name: 'dataleap',
+    icon: 'Connection',
+    kind: 'native'
+  },
+  {
     path: '/yarn', title: 'YARN 应用', name: 'yarn', icon: 'Monitor', kind: 'native' },
   {
     path: '/ds-task',

@@ -54,6 +54,11 @@ const router = createRouter({
           component: () => import('@/views/admin/UserManageView.vue'),
           meta: { adminOnly: true }
         },
+        {
+          path: 'dataleap',
+          name: 'dataleap',
+          component: () => import('@/views/dataleap/DataLeapView.vue')
+        },
         ...subappRoutes
       ]
     },
