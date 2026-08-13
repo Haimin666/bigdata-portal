@@ -115,5 +115,7 @@ export default {
   authEnabled: pick(fileCfg.auth?.enabled, 'AUTH_ENABLED', true),
   authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12),
   // 反代层数:0 = 不信任(本地直连);生产 nginx 反代时设 1,登录/解锁限速按真实客户端 IP 计
-  trustProxy: pickInt(fileCfg.trustProxy, 'TRUST_PROXY', 0)
+  trustProxy: pickInt(fileCfg.trustProxy, 'TRUST_PROXY', 0),
+  // DataLeap 发布到 DS 的目标项目(固定一个测试项目,不污染原始项目)
+  dataleapPublishProject: pick(fileCfg.dataleapPublishProject, 'DATALEAP_PUBLISH_PROJECT', 'whm-test')
 }

@@ -7,6 +7,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { exec } from 'node:child_process'
+import http from 'node:http'
+import https from 'node:https'
 import config from './config.js'
 
 const DLEAP_DIR = path.join(path.dirname(import.meta.dirname), 'data', 'dleap')
@@ -254,6 +256,90 @@ async function schedulerTick() {
   }
 }
 
+
+// ── DS 工作流序列化(发布管道核心,纯函数可单测)─────────────
+/** DS 工作流/任务名清洗:保留中文/字母/数字/下划线/中划线/点 */
+function sanitizeDsName(n) {
+  return String(n || '').replace(/[^\w\u4e00-\u9fa5.-]/g, '_').slice(0, 60) || 'task'
+}
+
+/** DataLeap 节点 → DS 工作流定义(processDefinitionJson + connects + locations)
+ *  一个节点 = 一个 SHELL 任务;SQL 节点包装 spark-sql;依赖 = preTasks + connects */
+export function buildDsWorkflow(nodes, name) {
+  const { cycles } = topoSort(nodes)
+  if (cycles.length) throw new Error(`存在依赖环,无法发布: ${cycles.map((c) => c.join(' → ')).join('; ')}`)
+  const idMap = new Map()
+  nodes.forEach((n, i) => idMap.set(n.id, `tasks-dleap-${i}`))
+  const taskDefs = nodes.map((n, i) => {
+    const tid = idMap.get(n.id)
+    const preTasks = (n.deps || []).map((d) => idMap.get(d)).filter(Boolean)
+    let params
+    if (n.type === 'sql') {
+      const db = n.db ? `--database ${n.db} ` : ''
+      const sql = String(n.content || '').replace(/"/g, '\\"').trim()
+      params = { resourceList: [], localParams: [], rawScript: sql ? `spark-sql ${db}-e "${sql}"` : 'echo "empty sql"' }
+    } else {
+      params = { resourceList: [], localParams: [], rawScript: String(n.content || '') }
+    }
+    return {
+      type: 'SHELL',
+      id: tid,
+      name: sanitizeDsName(n.name),
+      params,
+      description: `DataLeap 节点(${n.type})`,
+      timeout: { strategy: '', interval: null, enable: false },
+      runFlag: 'NORMAL',
+      conditionResult: { successNode: [''], failedNode: [''] },
+      dependence: {},
+      maxRetryTimes: 0,
+      retryInterval: 1,
+      taskInstancePriority: 'MEDIUM',
+      workerGroup: 'default',
+      preTasks
+    }
+  })
+  const connects = nodes.flatMap((n) => (n.deps || []).map((d) => ({ endPointSourceId: idMap.get(d), endPointTargetId: idMap.get(n.id) })))
+  const locations = {}
+  nodes.forEach((n, i) => {
+    const tid = idMap.get(n.id)
+    locations[tid] = { name: sanitizeDsName(n.name), targetarr: '', nodenumber: '0', x: 120 + (i % 4) * 240, y: 120 + Math.floor(i / 4) * 180 }
+  })
+  return {
+    name,
+    processDefinitionJson: JSON.stringify({ globalParams: [], tasks: taskDefs, tenantId: 1, timeout: 0 }),
+    connects: JSON.stringify(connects),
+    locations: JSON.stringify(locations)
+  }
+}
+
+/** 调 DS API(带 token) */
+function dsRequest(method, pathname, queryParams = {}) {
+  return new Promise((resolve, reject) => {
+    const base = config.dsWebUrl || ''
+    const qs = new URLSearchParams(queryParams).toString()
+    const url = `${base}${pathname}${qs ? '?' + qs : ''}`
+    const mod = url.startsWith('https://') ? https : http
+    const req = mod.request(
+      url,
+      { method, headers: { token: config.dsToken || '' } },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data))
+          } catch {
+            resolve({ code: -1, msg: `parse error: ${data.slice(0, 100)}` })
+          }
+        })
+      }
+    )
+    req.on('error', (e) => reject(e))
+    req.setTimeout(15000, () => req.destroy(new Error('DS 请求超时')))
+    req.end()
+  })
+}
+
 export function initDataleap() {
   if (schedulerTimer) return
   schedulerTimer = setInterval(() => void schedulerTick(), 30 * 1000).unref()
@@ -467,6 +553,45 @@ export function dataleapRouter() {
       results
     })
     res.json({ code: 0, data: { results, message: `${okCount}/${results.length} 个失败节点重跑完成` } })
+  })
+
+  // 发布到 DS:统一创建到固定测试项目(默认 whm-test),不污染原始项目
+  // 真实操作:创建 whm-test 下的工作流定义(不触发实例执行)
+  router.post('/publish/ds', async (req, res) => {
+    const nodes = loadNodes()
+    if (!nodes.length) return res.json({ code: 0, data: { message: '无节点可发布' } })
+    const project = config.dataleapPublishProject || 'whm-test'
+    const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14)
+    const wfName = `dleap_${ts}`
+    let wf
+    try {
+      wf = buildDsWorkflow(nodes, wfName)
+    } catch (e) {
+      return res.status(400).json({ code: 400, msg: e.message })
+    }
+    try {
+      const d = await dsRequest('POST', `/projects/${encodeURIComponent(project)}/process/save`, {
+        name: wf.name,
+        connects: wf.connects,
+        locations: wf.locations,
+        processDefinitionJson: wf.processDefinitionJson,
+        description: `DataLeap 发布 ${nodes.length} 个节点`
+      })
+      if (d?.code !== 0) {
+        return res.status(500).json({ code: 500, msg: `DS 返回: ${d?.msg || JSON.stringify(d).slice(0, 200)}` })
+      }
+      res.json({
+        code: 0,
+        data: {
+          message: `已发布到 DS 项目「${project}」,工作流: ${wf.name}(${nodes.length} 个任务)`,
+          project,
+          workflowName: wf.name,
+          dsData: d?.data
+        }
+      })
+    } catch (e) {
+      res.status(502).json({ code: 502, msg: `DS 发布失败: ${e instanceof Error ? e.message : e}` })
+    }
   })
 
   // 发布预览:按依赖拓扑生成 DS 工作流序列化(mock,不触发真实操作)

@@ -8,6 +8,7 @@
       <el-button size="small" :icon="FolderOpened" @click="openIngest">数据接入</el-button>
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Promotion" :loading="pubLoading" @click="onPublish">发布预览</el-button>
+      <el-button size="small" type="success" :icon="Position" :loading="pubDsLoading" @click="onPublishDs">发布到 DS</el-button>
       <el-button size="small" type="danger" plain :icon="VideoPlay" :loading="runAllLoading" @click="onRunAll">按拓扑执行全部</el-button>
       <el-button size="small" :icon="Clock" @click="openRuns">执行历史</el-button>
       <el-tag v-if="graph.cycles.length" type="danger" size="small">检测到 {{ graph.cycles.length }} 个依赖环</el-tag>
@@ -325,7 +326,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock, Search, Position } from '@element-plus/icons-vue'
 import { queryDb, listDataSources, listTables, querySpark, type DbDataSource } from '@/api/db'
 import CronSetter from './components/CronSetter.vue'
 import G6 from '@antv/g6'
@@ -342,6 +343,7 @@ import {
   runAll,
   fetchRuns,
   rerunRun,
+  publishDs,
   type RunAllItem,
   type RunRecord,
   type DleapNode,
@@ -358,6 +360,7 @@ const graph = ref<DleapGraph>({ nodes: [], edges: [], topoOrder: [], cycles: [] 
 const loading = ref(false)
 const saving = ref(false)
 const pubLoading = ref(false)
+const pubDsLoading = ref(false)
 const currentId = ref('')
 const current = ref<DleapNodeDetail | null>(null)
 const form = ref<{ name: string; type: DleapNodeType; project: string; cron: string; content: string; deps: string[]; db: string; dir: string }>({
@@ -728,6 +731,32 @@ function fmtTs(ts: string): string {
     return new Date(ts).toLocaleString('zh-CN', { hour12: false })
   } catch {
     return ts
+  }
+}
+
+/** 发布到 DS:统一创建到 whm-test 测试项目,不污染原始项目 */
+async function onPublishDs() {
+  if (!nodes.value.length) return ElMessage.warning('暂无节点')
+  try {
+    await ElMessageBox.confirm(
+      `将把 ${nodes.value.length} 个节点作为一个工作流创建到 DS 测试项目「whm-test」(不会动其他项目)。确认发布?`,
+      '发布到 DS',
+      { type: 'warning', confirmButtonText: '发布', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  pubDsLoading.value = true
+  try {
+    const d = await publishDs()
+    ElMessage.success(d.message || '发布成功')
+    pubMsg.value = d.message || ''
+    pubJson.value = JSON.stringify({ project: d.project, workflowName: d.workflowName, dsData: d.dsData }, null, 2)
+    pubVisible.value = true
+  } catch (e) {
+    ElMessage.error(`发布失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    pubDsLoading.value = false
   }
 }
 

@@ -74,6 +74,10 @@ export function publishPreview(): Promise<{ message: string; workflow: unknown }
   return req('/publish/preview', { method: 'POST' })
 }
 
+export function publishDs(): Promise<{ message: string; project: string; workflowName: string; dsData?: unknown }> {
+  return req('/publish/ds', { method: 'POST' })
+}
+
 export interface ShellRunResult {
   stdout: string
   stderr: string
