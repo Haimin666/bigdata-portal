@@ -380,12 +380,13 @@ const yarnDynamicProxy = httpProxy.createProxyServer({
   secure: false,
   selfHandleResponse: true
 })
-yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
+yarnDynamicProxy.on('proxyRes', (proxyRes, req, res) => {
   delete proxyRes.headers['x-frame-options']
   // 302 重定向 → 继续走代理(否则浏览器直连内网失败)。
-  // 重写基准 = 本次代理的目标 origin(入口 /api/iframe-proxy 挂到 req._proxyOrigin),
-  // 不能以门户自身 Host 为基准,否则 /static 等根路径会被解析到门户自己(S4)。
-  const origin = proxyRes.req?._proxyOrigin || ''
+  // 重写基准 = 本次代理的目标 origin(入口 /api/iframe-proxy 挂到 req._proxyOrigin)。
+  // 注意:proxyRes.req 是 http-proxy 的 upstream 请求对象,没有自定义属性,
+  // 原始客户端请求是回调第二参数 req。
+  const origin = req?._proxyOrigin || ''
   if (proxyRes.headers.location && origin) {
     try {
       const loc = new URL(proxyRes.headers.location, origin)
