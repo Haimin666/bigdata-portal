@@ -19,14 +19,25 @@
       <div class="dleap-side">
         <div class="side-title">节点({{ nodes.length }})</div>
         <div v-loading="loading" class="node-list">
+          <el-input
+            v-model="searchText"
+            size="small"
+            placeholder="搜索文件…"
+            clearable
+            class="tree-search"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
           <el-tree
             v-if="nodes.length"
+            ref="treeRef"
             :data="treeData"
             node-key="id"
             default-expand-all
             highlight-current
             :props="{ label: 'name', children: 'children', isLeaf: (d: TreeItem) => !d.dir }"
             :current-node-key="currentId"
+            :filter-node-method="treeFilter"
             class="dleap-tree"
             @node-click="onTreeNodeClick"
           >
@@ -56,7 +67,7 @@
               <el-option label="Spark" value="spark" />
             </el-select>
             <el-input v-model="form.dir" size="small" placeholder="目录(可选)" class="dir-input" />
-            <el-input v-model="form.cron" size="small" placeholder="调度 cron(可选)" class="cron-input" />
+            <CronSetter v-model="form.cron" class="cron-setter-w" />
             <el-button size="small" type="primary" :loading="saving" @click="onSave">保存</el-button>
           </div>
           <div class="edit-row">
@@ -279,8 +290,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock } from '@element-plus/icons-vue'
+import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock, Search } from '@element-plus/icons-vue'
 import { queryDb, listDataSources, listTables, querySpark, type DbDataSource } from '@/api/db'
+import CronSetter from './components/CronSetter.vue'
 import G6 from '@antv/g6'
 import {
   listNodes,
@@ -388,6 +400,13 @@ function buildTree(items: DleapNode[]): TreeItem[] {
 }
 
 const treeData = computed(() => buildTree(nodes.value))
+const treeRef = ref()
+const searchText = ref('')
+function treeFilter(value: string, data: TreeItem): boolean {
+  if (!value) return true
+  return String(data.name || '').toLowerCase().includes(value.toLowerCase())
+}
+watch(searchText, (v) => treeRef.value?.filter(v))
 const sortedNodes = computed(() => [...nodes.value].sort((a, b) => a.name.localeCompare(b.name)))
 const depCandidates = computed(() => sortedNodes.value.filter((n) => n.id !== currentId.value))
 const depsChanged = computed(() => {
@@ -679,29 +698,46 @@ function registerNodeCard() {
     name,
     {
       draw(cfg: any, group: any) {
-        const W = 150
-        const H = 40
+        const W = 168
+        const H = 52
         const sel = cfg.__selected
+        const hover = cfg.__hover
+        const border = sel ? C.primary() : hover ? C.primary() : typeColor(cfg.nodeType)
         const key = group.addShape('rect', {
           attrs: {
             x: -W / 2,
             y: -H / 2,
             width: W,
             height: H,
-            radius: 6,
+            radius: 8,
             fill: C.panel(),
-            stroke: sel ? C.primary() : typeColor(cfg.nodeType),
-            lineWidth: sel ? 2.5 : 1.5,
-            shadowColor: 'rgba(0,0,0,0.06)',
-            shadowBlur: sel ? 8 : 3,
+            stroke: border,
+            lineWidth: sel ? 2.5 : hover ? 2 : 1.5,
+            shadowColor: 'rgba(0,0,0,0.08)',
+            shadowBlur: sel || hover ? 10 : 3,
             cursor: 'pointer'
           }
         })
-        group.addShape('circle', { attrs: { x: -W / 2 + 12, y: 0, r: 4, fill: typeColor(cfg.nodeType) } })
+        group.addShape('circle', { attrs: { x: -W / 2 + 11, y: -14, r: 4, fill: typeColor(cfg.nodeType) } })
         const label = String(cfg.label || '')
         const short = label.length > 16 ? label.slice(0, 15) + '…' : label
         group.addShape('text', {
-          attrs: { x: -W / 2 + 24, y: 0, text: short, fontSize: 12, fill: C.text(), textAlign: 'left', textBaseline: 'middle' }
+          attrs: { x: -W / 2 + 22, y: -14, text: short, fontSize: 12, fill: C.text(), textAlign: 'left', textBaseline: 'middle' }
+        })
+        // 副行:类型 · cron · 依赖数
+        const subParts = [String(cfg.nodeType || '').toUpperCase()]
+        if (cfg.cron) subParts.push('⏱')
+        if (cfg.depCount != null) subParts.push(`↳${cfg.depCount}`)
+        group.addShape('text', {
+          attrs: {
+            x: -W / 2 + 22,
+            y: 14,
+            text: subParts.join(' · '),
+            fontSize: 10,
+            fill: C.muted(),
+            textAlign: 'left',
+            textBaseline: 'middle'
+          }
         })
         return key
       }
@@ -714,10 +750,14 @@ function renderGraph() {
   if (!g6El.value) return
   graphInst?.destroy()
   registerNodeCard()
+  const depCount = new Map<string, number>()
+  for (const e of graph.value.edges) depCount.set(e.source, (depCount.get(e.source) || 0) + 1)
   const nodesData = graph.value.nodes.map((n) => ({
     id: n.id,
     label: n.name,
     nodeType: n.type,
+    cron: n.cron,
+    depCount: depCount.get(n.id) || 0,
     __selected: n.id === currentId.value
   }))
   const edgesData = graph.value.edges.map((e) => ({ source: e.source, target: e.target }))
@@ -736,14 +776,67 @@ function renderGraph() {
       style: { stroke: C.border(), lineWidth: 1.5, endArrow: { path: G6.Arrow.triangle(4, 6, 0), d: 0 } }
     }
   })
-  graphInst.node((n: any) => ({ type: 'dleap-node', size: [150, 40], label: n.label, nodeType: n.nodeType, __selected: n.__selected }))
+  graphInst.node((n: any) => ({
+    type: 'dleap-node',
+    size: [168, 52],
+    label: n.label,
+    nodeType: n.nodeType,
+    cron: n.cron,
+    depCount: n.depCount,
+    __selected: n.__selected
+  }))
   graphInst.data({ nodes: nodesData, edges: edgesData })
   graphInst.render()
   graphInst.fitView(30, true, false)
+
+  // 单击打开编辑;双击复制名称
   graphInst.on('node:click', (evt: any) => {
     const m = evt.item.getModel()
     if (m.id !== currentId.value) void openNode(m.id)
   })
+  graphInst.on('node:dblclick', (evt: any) => {
+    const m = evt.item.getModel()
+    navigator.clipboard?.writeText(String(m.label || '')).catch(() => {})
+    ElMessage.info(`已复制节点名: ${m.label}`)
+  })
+  // hover 高亮邻接上下游(边 + 节点)
+  const clearHover = () => {
+    graphInst.getNodes().forEach((no: any) => {
+      no.getModel().__hover = false
+      graphInst.refreshItem(no)
+    })
+    graphInst.getEdges().forEach((ed: any) => {
+      ed.getModel().__hover = false
+      graphInst.refreshItem(ed)
+    })
+  }
+  graphInst.on('node:mouseenter', (evt: any) => {
+    const id = evt.item.getModel().id
+    clearHover()
+    const related = new Set<string>([id])
+    for (const e of graph.value.edges) {
+      if (e.source === id) related.add(e.target)
+      if (e.target === id) related.add(e.source)
+    }
+    graphInst.getNodes().forEach((no: any) => {
+      if (related.has(no.getModel().id)) {
+        no.getModel().__hover = true
+        graphInst.refreshItem(no)
+      }
+    })
+    graphInst.getEdges().forEach((ed: any) => {
+      const m = ed.getModel()
+      if (related.has(m.source) && related.has(m.target)) {
+        m.__hover = true
+        ed.getKeyShape().attr('stroke', C.primary())
+        ed.getKeyShape().attr('lineWidth', 2.5)
+      } else {
+        ed.getKeyShape().attr('stroke', C.border())
+        ed.getKeyShape().attr('lineWidth', 1.5)
+      }
+    })
+  })
+  graphInst.on('node:mouseleave', clearHover)
   const ro = new ResizeObserver(() => {
     if (g6El.value) graphInst?.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
   })
@@ -958,6 +1051,10 @@ onBeforeUnmount(() => {
       width: 140px;
     }
 
+    .cron-setter-w {
+      width: 340px;
+    }
+
     .deps-select {
       flex: 1;
     }
@@ -1040,6 +1137,10 @@ onBeforeUnmount(() => {
     width: 40px;
     flex-shrink: 0;
   }
+}
+
+.tree-search {
+  margin-bottom: 4px;
 }
 
 .dleap-tree {
