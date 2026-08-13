@@ -45,6 +45,7 @@ function listView(nodes) {
     project: n.project || '',
     deps: n.deps || [],
     cron: n.cron || '',
+    db: n.db || '',
     updatedAt: n.updatedAt
   }))
 }
@@ -105,7 +106,7 @@ export function dataleapRouter() {
 
   // 新建节点
   router.post('/nodes', (req, res) => {
-    const { name, type = 'sql', project = '实验项目', content = '', cron = '' } = req.body || {}
+    const { name, type = 'sql', project = '实验项目', content = '', cron = '', db = '' } = req.body || {}
     const n = String(name || '').trim()
     if (!n) return res.status(400).json({ code: 400, msg: 'name 不能为空' })
     if (!NODE_TYPES.includes(type)) return res.status(400).json({ code: 400, msg: `type 必须为 ${NODE_TYPES.join('/')}` })
@@ -118,6 +119,7 @@ export function dataleapRouter() {
       content: String(content || ''),
       deps: [],
       cron: String(cron || ''),
+      db: String(db || ''),
       updatedAt: new Date().toISOString()
     }
     nodes.push(node)
@@ -137,7 +139,7 @@ export function dataleapRouter() {
     const nodes = loadNodes()
     const n = findNode(nodes, req.params.id)
     if (!n) return res.status(404).json({ code: 404, msg: '节点不存在' })
-    const { name, type, project, content, cron } = req.body || {}
+    const { name, type, project, content, cron, db } = req.body || {}
     if (name !== undefined) n.name = String(name).trim() || n.name
     if (type !== undefined) {
       if (!NODE_TYPES.includes(type)) return res.status(400).json({ code: 400, msg: `type 必须为 ${NODE_TYPES.join('/')}` })
@@ -146,6 +148,7 @@ export function dataleapRouter() {
     if (project !== undefined) n.project = String(project)
     if (content !== undefined) n.content = String(content)
     if (cron !== undefined) n.cron = String(cron)
+    if (db !== undefined) n.db = String(db)
     n.updatedAt = new Date().toISOString()
     saveNodes(nodes)
     res.json({ code: 0, data: { node: listView([n])[0] } })

@@ -16,18 +16,21 @@
       <div class="dleap-side">
         <div class="side-title">节点({{ nodes.length }})</div>
         <div v-loading="loading" class="node-list">
-          <div
-            v-for="n in sortedNodes"
-            :key="n.id"
-            class="node-item"
-            :class="{ active: currentId === n.id }"
-            @click="openNode(n.id)"
-          >
-            <el-icon class="node-icon" :class="n.type"><Document v-if="n.type === 'sql'" /><Cpu v-else-if="n.type === 'spark'" /><Setting v-else /></el-icon>
-            <span class="node-name" :title="n.name">{{ n.name }}</span>
-            <el-tag size="small" class="node-type" effect="plain">{{ n.type }}</el-tag>
-            <el-icon class="del-icon" title="删除" @click.stop="onDelete(n.id)"><Delete /></el-icon>
-          </div>
+          <template v-for="group in projectGroups" :key="group[0]">
+            <div class="group-title">{{ group[0] }} ({{ group[1].length }})</div>
+            <div
+              v-for="n in group[1]"
+              :key="n.id"
+              class="node-item"
+              :class="{ active: currentId === n.id }"
+              @click="openNode(n.id)"
+            >
+              <el-icon class="node-icon" :class="n.type"><Document v-if="n.type === 'sql'" /><Cpu v-else-if="n.type === 'spark'" /><Setting v-else /></el-icon>
+              <span class="node-name" :title="n.name">{{ n.name }}</span>
+              <el-tag size="small" class="node-type" effect="plain">{{ n.type }}</el-tag>
+              <el-icon class="del-icon" title="删除" @click.stop="onDelete(n.id)"><Delete /></el-icon>
+            </div>
+          </template>
           <div v-if="!nodes.length && !loading" class="side-empty">暂无节点,点「新建节点」开始</div>
         </div>
       </div>
@@ -44,6 +47,25 @@
             </el-select>
             <el-input v-model="form.cron" size="small" placeholder="调度 cron(可选)" class="cron-input" />
             <el-button size="small" type="primary" :loading="saving" @click="onSave">保存</el-button>
+          </div>
+          <div class="edit-row">
+            <span class="label">数据源</span>
+            <el-select v-model="form.db" size="small" filterable clearable placeholder="选择数据源(试跑用)" class="db-select">
+              <el-option
+                v-for="d in datasources.filter((x) => x.type === 'mysql' || x.type === 'oracle')"
+                :key="d.name"
+                :label="`${d.label || d.name}${d.label && d.label !== d.name ? ' (' + d.name + ')' : ''}`"
+                :value="d.name"
+              />
+            </el-select>
+            <el-button
+              size="small"
+              type="success"
+              :icon="VideoPlay"
+              :loading="runLoading"
+              :disabled="form.type !== 'sql' || !form.db"
+              @click="onRun"
+            >试跑</el-button>
           </div>
           <div class="edit-row">
             <span class="label">上游依赖(血缘:依赖的节点先执行)</span>
@@ -69,6 +91,28 @@
             class="content-area"
             :placeholder="contentPlaceholder"
           />
+          <!-- 试跑结果 -->
+          <div v-if="runResult || runError" class="run-result">
+            <el-alert v-if="runError" type="error" :title="runError" show-icon :closable="false" />
+            <template v-else-if="runResult">
+              <div class="run-meta">{{ runResult.rows.length }} 行 · {{ runResult.costMs }}ms<template v-if="runResult.truncated">(已截断)</template></div>
+              <el-table :data="runResult.rows" border size="small" max-height="260" class="run-table">
+                <el-table-column type="index" label="#" width="50" align="center" />
+                <el-table-column
+                  v-for="c in runResult.columns"
+                  :key="c"
+                  :prop="c"
+                  :label="c"
+                  min-width="120"
+                  show-overflow-tooltip
+                >
+                  <template #default="{ row }">
+                    <span :title="`${row[c]}`">{{ row[c] == null ? 'NULL' : row[c] }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
+          </div>
         </template>
         <div v-else class="edit-empty">← 选择左侧节点编辑,或新建节点</div>
       </div>
@@ -91,7 +135,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete } from '@element-plus/icons-vue'
+import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay } from '@element-plus/icons-vue'
+import { queryDb, listDataSources, type DbDataSource } from '@/api/db'
 import G6 from '@antv/g6'
 import {
   listNodes,
@@ -118,17 +163,22 @@ const saving = ref(false)
 const pubLoading = ref(false)
 const currentId = ref('')
 const current = ref<DleapNodeDetail | null>(null)
-const form = ref<{ name: string; type: DleapNodeType; project: string; cron: string; content: string; deps: string[] }>({
+const form = ref<{ name: string; type: DleapNodeType; project: string; cron: string; content: string; deps: string[]; db: string }>({
   name: '',
   type: 'sql',
   project: '实验项目',
   cron: '',
   content: '',
-  deps: []
+  deps: [],
+  db: ''
 })
 const pubVisible = ref(false)
 const pubMsg = ref('')
 const pubJson = ref('')
+const datasources = ref<DbDataSource[]>([])
+const runResult = ref<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean } | null>(null)
+const runLoading = ref(false)
+const runError = ref('')
 const g6El = ref<HTMLDivElement>()
 let graphInst: any | null = null
 
@@ -181,8 +231,11 @@ async function openNode(id: string) {
       project: node.project || '实验项目',
       cron: node.cron || '',
       content: node.content || '',
-      deps: [...(node.deps || [])]
+      deps: [...(node.deps || [])],
+      db: node.db || ''
     }
+    runResult.value = null
+    runError.value = ''
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e))
   }
@@ -216,7 +269,8 @@ async function onSave() {
       name: form.value.name.trim(),
       type: form.value.type,
       cron: form.value.cron.trim(),
-      content: form.value.content
+      content: form.value.content,
+      db: form.value.db
     })
     Object.assign(current.value, node)
     const idx = nodes.value.findIndex((n) => n.id === node.id)
@@ -262,6 +316,35 @@ async function onDelete(id: string) {
     ElMessage.error(`删除失败:${e instanceof Error ? e.message : e}`)
   }
 }
+
+/** 试跑:SQL 节点经 /api/dbquery/query 只读执行(写拦截/错误透传由门户网关负责) */
+async function onRun() {
+  if (!current.value) return
+  if (!form.value.db) return ElMessage.warning('请先选择数据源')
+  if (form.value.type !== 'sql') return ElMessage.warning('仅 SQL 节点支持试跑')
+  if (!form.value.content.trim()) return ElMessage.warning('SQL 内容为空')
+  runLoading.value = true
+  runError.value = ''
+  runResult.value = null
+  try {
+    runResult.value = await queryDb(form.value.db, form.value.content)
+  } catch (e) {
+    runError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    runLoading.value = false
+  }
+}
+
+// 节点按项目分组
+const projectGroups = computed(() => {
+  const m = new Map<string, DleapNode[]>()
+  for (const n of sortedNodes.value) {
+    const p = n.project || '未分组'
+    if (!m.has(p)) m.set(p, [])
+    m.get(p)!.push(n)
+  }
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+})
 
 async function onPublish() {
   pubLoading.value = true
@@ -380,8 +463,13 @@ watch(currentId, async () => {
   renderGraph()
 })
 
-onMounted(() => {
+onMounted(async () => {
   void reload()
+  try {
+    datasources.value = await listDataSources()
+  } catch {
+    /* 数据源列表不可用不影响节点管理 */
+  }
 })
 
 onBeforeUnmount(() => {
@@ -522,6 +610,13 @@ onBeforeUnmount(() => {
   }
 }
 
+.group-title {
+  padding: 6px 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bd-muted, #888);
+}
+
 .side-empty,
 .edit-empty {
   padding: 24px 12px;
@@ -568,6 +663,10 @@ onBeforeUnmount(() => {
     .deps-select {
       flex: 1;
     }
+
+    .db-select {
+      width: 200px;
+    }
   }
 
   .content-area {
@@ -580,6 +679,24 @@ onBeforeUnmount(() => {
       line-height: 1.55;
     }
   }
+}
+
+.run-result {
+  flex-shrink: 0;
+  border: 1px solid var(--bd-border, #c9cdd6);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bd-panel, #fff);
+}
+
+.run-meta {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--bd-muted, #888);
+}
+
+.run-table {
+  width: 100%;
 }
 
 .g6-canvas {
