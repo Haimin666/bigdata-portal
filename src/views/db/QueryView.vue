@@ -24,7 +24,7 @@ import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
 import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
-import { applyTheme, getTheme } from '@/utils/theme'
+import { getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkJobsDialog from './FlinkJobsDialog.vue'
@@ -347,7 +347,9 @@ let completionTimer: number | null = null
 // 默认 SQL:清空(用户自行编写)
 const DEFAULT_SQL = ''
 
-// 编辑器主题:dark(默认)/ light,持久化到 localStorage;与全局主题联动
+// 编辑器主题:dark(默认)/ light,持久化到 localStorage
+// 只作用于本页 sql-canvas 画布(CodeMirror 区域),与全局主题解耦:
+// 初始跟随全局(getTheme),之后用户按按钮仅切画布,不影响全局
 const THEME_KEY = 'db-query-theme'
 const themeMode = ref<'dark' | 'light'>(
   localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
@@ -362,8 +364,8 @@ const MAX_FONT = 24
 function toggleTheme() {
   themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
   localStorage.setItem(THEME_KEY, themeMode.value)
-  // 编辑器主题切换与全局主题联动(主界面深浅一致)
-  applyTheme(themeMode.value)
+  // 仅切换画布 class(.sql-canvas.dark / .light),不调 applyTheme,避免污染全局主题
+  nextTick(() => cm?.refresh())
 }
 
 function adjustFont(delta: number) {

@@ -144,4 +144,28 @@ html.dark {
     --el-tag-info-border-color: rgba(144, 147, 153, 0.3);
     --el-tag-info-text-color: #9aa8b4;
   }
+
+  /* 表格暗色统一:行背景贴面板、表头更深、边框/悬浮低饱和,避免 EP dark 默认偏亮 */
+  .el-table {
+    --el-table-bg-color: var(--bd-panel);
+    --el-table-tr-bg-color: var(--bd-panel);
+    --el-table-header-bg-color: var(--bd-table-header);
+    --el-table-border-color: var(--bd-border);
+    --el-table-row-hover-bg-color: var(--bd-table-hover);
+    --el-table-header-text-color: var(--bd-muted);
+    --el-table-text-color: var(--bd-text);
+    color: var(--bd-text);
+  }
+
+  /* 卡片暗色统一:背景贴面板、边框低饱和 */
+  .el-card {
+    --el-card-bg-color: var(--bd-panel);
+    --el-card-border-color: var(--bd-border);
+  }
+
+  /* 开关暗色:关闭态深灰蓝(替代 EP 亮灰),开启态走主题青 */
+  .el-switch {
+    --el-switch-off-color: #23303f;
+    --el-switch-off-border-color: #2c3b4d;
+  }
 }

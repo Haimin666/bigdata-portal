@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { ColumnHeader, StatusColor, YarnApp } from '@/types/yarn'
-import { formatElapsed, formatTimestamp, yarnStateColor } from '@/utils/format'
+import { formatElapsed, formatTimestamp, yarnStateColor, yarnStateHex } from '@/utils/format'
 
 defineOptions({ name: 'AppInfoLine' })
 
@@ -29,7 +29,7 @@ const NUMERIC_HEADERS = new Set<keyof YarnApp>([
 ])
 
 type Display =
-  | { kind: 'badge'; text: string; color: StatusColor }
+  | { kind: 'badge'; text: string; color: StatusColor | string }
   | { kind: 'bar'; value: number; max: number; color: string }
   | { kind: 'text'; text: string; numeric: boolean }
 
@@ -41,7 +41,7 @@ const display = computed<Display>(() => {
   const h = props.header.value
   const v = props.item[h]
   if (h === 'state') {
-    return { kind: 'badge', text: String(v), color: yarnStateColor(String(v)) }
+    return { kind: 'badge', text: String(v), color: yarnStateHex(String(v)) ?? yarnStateColor(String(v)) }
   }
   if (h === 'startedTime' || h === 'finishedTime') {
     return { kind: 'text', text: formatTimestamp(Number(v), props.humanize), numeric: false }
@@ -72,7 +72,12 @@ const barPct = computed(() => {
 </script>
 
 <template>
-  <StatusBadge v-if="display.kind === 'badge'" :label="display.text" :type="display.color" />
+  <StatusBadge
+    v-if="display.kind === 'badge'"
+    :label="display.text"
+    :type="typeof display.color === 'string' ? undefined : display.color"
+    :color="typeof display.color === 'string' ? display.color : undefined"
+  />
   <span v-else-if="display.kind === 'bar'" class="cell-bar">
     <span class="bar-track">
       <span class="bar-fill" :style="{ width: `${barPct}%`, background: display.color }" />

@@ -15,6 +15,25 @@ export function yarnStateColor(state: string): StatusColor {
   }
 }
 
+/** YARN 状态专属色(hex):浅色模式下明确区分各状态(RUNNING 蓝 / ACCEPTED 橙 / FINISHED 翠绿 / FAILED 红 / KILLED 灰)。
+ *  返回 undefined 时由调用方回退到 yarnStateColor 的语义色。 */
+export function yarnStateHex(state: string): string | undefined {
+  switch (state) {
+    case 'RUNNING':
+      return '#3b82f6'
+    case 'ACCEPTED':
+      return '#f59e0b'
+    case 'FINISHED':
+      return '#10b981'
+    case 'FAILED':
+      return '#ef4444'
+    case 'KILLED':
+      return '#6b7280'
+    default:
+      return undefined
+  }
+}
+
 export function formatTimestamp(ts: number, humanize: boolean): string {
   if (!ts) return 'n/a'
   if (!humanize) return String(ts)
