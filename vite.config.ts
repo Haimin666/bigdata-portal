@@ -34,6 +34,7 @@ export default defineConfig({
     proxy: {
       '/hadoopapi': gatewayProxy,
       '/apps': gatewayProxy,
+      '/yarniframe': gatewayProxy,
       '/stingray-static': gatewayProxy,
       '/__/stingray': gatewayProxy,
       '/api': gatewayProxy,

@@ -47,7 +47,6 @@ const auth = setupAuth(app, config)
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users', '/api/theme',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
-  '/api/yarn-resource',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
 ]
@@ -414,108 +413,6 @@ app.use(
     logLevel: 'warn'
   })
 )
-
-// ── YARN 资源管理:容器日志类型列表 ────────────────────────────
-// 重建 RM UI 弹窗需要:containerlogs 目录页是 HTML,前端不便解析,
-// 后端抓取并提取日志文件名列表返回 JSON(白名单同 iframe-proxy)。
-app.get('/api/yarn-resource/logs', async (req, res) => {
-  const { node, container, user } = req.query
-  if (!node || !container) {
-    return res.status(400).json({ ok: false, msg: 'node/container required' })
-  }
-  let host
-  try {
-    host = new URL(`http://${node}`).hostname
-  } catch {
-    return res.status(400).json({ ok: false, msg: 'bad node' })
-  }
-  if (!isYarnProxyAllowed(host)) {
-    return res.status(403).json({ ok: false, msg: 'target not allowed' })
-  }
-  try {
-    const resp = await fetch(`http://${node}/node/containerlogs/${container}/${user || 'root'}`, {
-      signal: AbortSignal.timeout(8000)
-    })
-    const html = await resp.text()
-    const files = [
-      ...new Set(
-        [...html.matchAll(/containerlogs\/[^"'/]+\/[^"'/]+\/([^"'/?]+)/g)].map((m) => m[1])
-      )
-    ]
-    res.json({ ok: true, files })
-  } catch (e) {
-    res.status(502).json({ ok: false, msg: String(e) })
-  }
-})
-
-// ── YARN 资源管理:容器日志内容提取 ────────────────────────────
-// NM containerlogs 日志页是 HTML 包装,正文在 <pre> 中(实体转义),
-// 后端提取纯文本返回,避免前端解析 HTML。
-app.get('/api/yarn-resource/log-content', async (req, res) => {
-  const { node, container, user, file, full } = req.query
-  if (!node || !container || !file) {
-    return res.status(400).json({ ok: false, msg: 'node/container/file required' })
-  }
-  let host
-  try {
-    host = new URL(`http://${node}`).hostname
-  } catch {
-    return res.status(400).json({ ok: false, msg: 'bad node' })
-  }
-  if (!isYarnProxyAllowed(host)) {
-    return res.status(403).json({ ok: false, msg: 'target not allowed' })
-  }
-  try {
-    const suffix = full ? '?start=0' : '?start=-4096'
-    const url = `http://${node}/node/containerlogs/${container}/${user || 'root'}/${file}/${suffix}`
-    const resp = await fetch(url, { signal: AbortSignal.timeout(20000) })
-    const html = await resp.text()
-    const m = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i)
-    let text = m ? m[1] : html
-    // HTML 实体反转义
-    text = text
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&amp;/g, '&')
-    res.json({ ok: true, text })
-  } catch (e) {
-    res.status(502).json({ ok: false, msg: String(e) })
-  }
-})
-
-// ── YARN 资源管理:通用 REST 转发(RM 8088 / NM 8042 只读 JSON/文本)──
-// 用 Node fetch(自动解压 gzip),避免 http-proxy 对 gzip/JSON 的 pipe 兼容问题。
-app.get('/api/yarn-resource/proxy', async (req, res) => {
-  const target = String(req.query.url || '')
-  let u
-  try {
-    u = new URL(target)
-  } catch {
-    return res.status(400).json({ ok: false, msg: 'bad url' })
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    return res.status(400).json({ ok: false, msg: 'bad protocol' })
-  }
-  if (!isYarnProxyAllowed(u.hostname)) {
-    return res.status(403).json({ ok: false, msg: 'target not allowed' })
-  }
-  try {
-    const resp = await fetch(target, { signal: AbortSignal.timeout(25000) })
-    const ct = resp.headers.get('content-type') || 'text/plain; charset=utf-8'
-    let body = await resp.text()
-    // 大文件截断(日志场景):?maxBytes=1000000 → 只回传前 N 字节并标注
-    const maxBytes = Number.parseInt(String(req.query.maxBytes || ''), 10)
-    if (Number.isFinite(maxBytes) && maxBytes > 0 && body.length > maxBytes) {
-      body = `${body.slice(0, maxBytes)}\n\n...[内容过长,已截断至前 ${maxBytes} 字节,完整日志共 ${body.length} 字节,请跳转原生页查看]`
-    }
-    res.setHeader('content-type', ct)
-    res.status(resp.status).send(body)
-  } catch (e) {
-    res.status(502).json({ ok: false, msg: String(e) })
-  }
-})
 
 // ── DS Web 子应用 ──────────────────────────────────────────────
 app.use('/apps/dsweb', iframeProxy(config.dsWebUrl, '/apps/dsweb'))

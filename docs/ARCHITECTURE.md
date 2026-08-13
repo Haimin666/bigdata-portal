@@ -72,7 +72,7 @@ src/
 ### 3.2 代理体系
 
 - **子应用 iframe 代理**:`/apps/*`(DS Web)、`/apps/jupyter`、`/dolphinscheduler`、`/apps/streamx` 等 —— HTML 内绝对路径重写 + cookie 域名重写,保证 iframe 内链路完整
-- **YARN 页面代理**:`/yarniframe`(同构,URL 重写)、`/api/iframe-proxy?url=`(动态,host 白名单 `yarnProxyAllowHosts`)、`/api/yarn-resource/*`(REST JSON 转发,支持 `maxBytes` 截断大日志)
+- **YARN 页面代理**:`/yarniframe`(同构代理 → RM,`/cluster/app/{appId}` 与 `/proxy/{appId}/` 均支持,URL 重写)、`/api/iframe-proxy?url=`(动态,host 白名单 `yarnProxyAllowHosts`)
 - 白名单默认 `.bigdata.shiqiao.com` 全域名
 
 ### 3.3 认证与写操作防线
