@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
+import YarnResourceDialog from './YarnResourceDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsCardView' })
@@ -41,7 +42,7 @@ const paged = computed(() =>
   rows.value.slice(props.page * props.rowsPerPage, (props.page + 1) * props.rowsPerPage)
 )
 
-// 追踪 / 日志 / 详情:追踪 iframe 弹窗查看(经门户代理),日志/详情新窗口打开原生地址
+// 追踪 iframe 弹窗 + 资源管理器重建弹窗;日志入口已移除
 const frameShow = ref(false)
 const frameUrl = ref('')
 const frameTitle = ref('')
@@ -54,9 +55,12 @@ function open(url: string, title?: string) {
 function trackingProxyUrl(appId: string): string {
   return `/yarniframe/proxy/${appId}/`
 }
-/** 日志 / 详情 → 新窗口打开原生地址 */
-function openNative(url: string): void {
-  window.open(url, '_blank')
+/** 资源管理器(卡片视图称「详情」)→ 重建 RM UI 弹窗 */
+const resShow = ref(false)
+const resApp = ref<{ id: string; name: string; user?: string } | null>(null)
+function openResource(row: { id: string; name?: string; user?: string }): void {
+  resApp.value = { id: row.id, name: row.name || row.id, user: row.user }
+  resShow.value = true
 }
 
 function onPageChange(p: number) {
@@ -89,11 +93,8 @@ function onSizeChange(s: number) {
             >
               追踪
             </el-button>
-            <el-button v-if="app.amContainerLogs" size="small" @click="openNative(app.amContainerLogs)">
-              日志
-            </el-button>
-            <el-button size="small" @click="openNative(props.resourceManager + '/cluster/app/' + app.id)">
-              详情
+            <el-button size="small" @click="openResource(app)">
+              资源管理器
             </el-button>
             <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
               终止
@@ -116,6 +117,16 @@ function onSizeChange(s: number) {
 
     <!-- 追踪 / 日志 / 详情 iframe 弹窗 -->
     <UrlFrameDialog v-model="frameShow" :url="frameUrl" :title="frameTitle" />
+
+    <!-- 资源管理器:重建 RM UI 弹窗 -->
+    <YarnResourceDialog
+      v-if="resApp"
+      v-model="resShow"
+      :app-id="resApp.id"
+      :app-name="resApp.name"
+      :user="resApp.user || 'root'"
+      :rm-host="props.resourceManager"
+    />
   </div>
 </template>
 

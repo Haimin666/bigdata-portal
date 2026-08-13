@@ -17,6 +17,7 @@ import {
 import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
 import DsDepsDialog from './DsDepsDialog.vue'
 import { searchWorkflows, rerunInstances } from '@/api/dsDeps'
 
@@ -53,12 +54,13 @@ const rmHost = ref('')
 const stateOptions: StateOption[] = [
   // 注意:本版本海豚运行中状态枚举为 RUNNING_EXEUTION(少一个 C),
   // 展示与筛选参数均为该拼写(实测确认,传标准 RUNNING_EXECUTION 会 10113 报错)
-  { label: '运行中', value: 'RUNNING_EXEUTION', type: 'primary', running: true },
+  // 运行中 → 蓝(与 yarn RUNNING 一致);成功绿/失败红/暂停橙/停止灰保持语义色
+  { label: '运行中', value: 'RUNNING_EXEUTION', color: '#3b82f6', running: true },
   { label: '成功', value: 'SUCCESS', type: 'success' },
   { label: '失败', value: 'FAILURE', type: 'danger' },
   { label: '暂停', value: 'PAUSE', type: 'warning' },
   { label: '停止', value: 'STOP', type: 'info' },
-  { label: '已提交', value: 'SUBMITTED_SUCCESS', type: 'info', running: true },
+  { label: '已提交', value: 'SUBMITTED_SUCCESS', color: '#3b82f6', running: true },
   { label: '已终止', value: 'KILL', type: 'info' }
 ]
 
@@ -82,8 +84,16 @@ function dsStateLabel(state: string): string {
   return stateOptions.find((o) => o.value === state)?.label || extraStateLabels[state] || state
 }
 
-function stateTagType(state: string): StateOption['type'] {
-  return stateOptions.find((o) => o.value === state)?.type || 'info'
+/** 状态列展示:优先自定义色(运行中蓝),否则语义色(成功绿/失败红/暂停橙/停止灰) */
+function stateBadgeProps(state: string): { type?: 'success' | 'failure' | 'paused' | 'stopped' | 'neutral'; color?: string } {
+  const o = stateOptions.find((x) => x.value === state)
+  const map: Record<string, 'success' | 'failure' | 'paused' | 'stopped' | 'neutral'> = {
+    success: 'success',
+    danger: 'failure',
+    warning: 'paused',
+    info: 'stopped'
+  }
+  return { type: o?.type ? map[o.type] : 'neutral', color: o?.color }
 }
 
 function isRunning(state: string): boolean {
@@ -546,7 +556,11 @@ onMounted(async () => {
               <el-table-column prop="taskType" label="类型" width="90" sortable />
               <el-table-column label="状态" width="100" sortable>
                 <template #default="{ row: t }">
-                  <el-tag :type="stateTagType(t.state)" size="small">{{ dsStateLabel(t.state) }}</el-tag>
+                  <StatusBadge
+                    :label="dsStateLabel(t.state)"
+                    :type="stateBadgeProps(t.state).type"
+                    :color="stateBadgeProps(t.state).color"
+                  />
                 </template>
               </el-table-column>
               <el-table-column label="开始时间" width="155" sortable>
@@ -600,7 +614,11 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column label="状态" width="130" sortable>
         <template #default="{ row }">
-          <el-tag :type="stateTagType(row.state)" size="small">{{ dsStateLabel(row.state) }}</el-tag>
+          <StatusBadge
+            :label="dsStateLabel(row.state)"
+            :type="stateBadgeProps(row.state).type"
+            :color="stateBadgeProps(row.state).color"
+          />
         </template>
       </el-table-column>
       <el-table-column label="工作流" min-width="160" show-overflow-tooltip sortable>
@@ -647,7 +665,11 @@ onMounted(async () => {
       <el-table-column prop="taskType" label="类型" width="100" sortable />
       <el-table-column label="状态" width="110" sortable>
         <template #default="{ row }">
-          <el-tag :type="stateTagType(row.state)" size="small">{{ dsStateLabel(row.state) }}</el-tag>
+          <StatusBadge
+            :label="dsStateLabel(row.state)"
+            :type="stateBadgeProps(row.state).type"
+            :color="stateBadgeProps(row.state).color"
+          />
         </template>
       </el-table-column>
       <el-table-column prop="workerGroup" label="Worker" width="110" show-overflow-tooltip sortable />

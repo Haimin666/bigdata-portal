@@ -12,6 +12,8 @@ export interface StateOption {
   value: string
   /** 展示颜色 */
   type?: StateTagType
+  /** 自定义主色(hex,优先级高于 type,如运行中蓝色) */
+  color?: string
   /** 是否视为"运行中"状态(控制重跑/停止等操作) */
   running?: boolean
 }

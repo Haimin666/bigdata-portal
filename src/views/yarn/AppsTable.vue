@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
+import YarnResourceDialog from './YarnResourceDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsTable' })
@@ -75,7 +76,7 @@ function onSizeChange(s: number) {
   emit('rows-change', s)
 }
 
-// 追踪UI / 日志 / 资源管理器:追踪UI 弹窗 iframe 查看(经门户代理),日志/资源管理器直接新窗口打开原生地址
+// 追踪UI iframe 弹窗 + 资源管理器重建弹窗;日志入口已移除(原 window.open 新窗口)
 const frameShow = ref(false)
 const frameUrl = ref('')
 const frameTitle = ref('')
@@ -88,9 +89,12 @@ function open(url: string, title?: string) {
 function trackingProxyUrl(appId: string): string {
   return `/yarniframe/proxy/${appId}/`
 }
-/** 日志 / 资源管理器 → 新窗口打开原生地址 */
-function openNative(url: string): void {
-  window.open(url, '_blank')
+/** 资源管理器 → 重建 RM UI 弹窗(接真实 REST,经门户代理) */
+const resShow = ref(false)
+const resApp = ref<{ id: string; name: string; user?: string } | null>(null)
+function openResource(row: { id: string; name?: string; user?: string }): void {
+  resApp.value = { id: row.id, name: row.name || row.id, user: row.user }
+  resShow.value = true
 }
 </script>
 
@@ -117,10 +121,7 @@ function openNative(url: string): void {
             >
               追踪UI{{ row.trackingUI ? ` - ${row.trackingUI}` : '' }}
             </el-button>
-            <el-button v-if="row.amContainerLogs" link type="primary" @click.stop="openNative(row.amContainerLogs)">
-              日志
-            </el-button>
-            <el-button link type="primary" @click.stop="openNative(props.resourceManager + '/cluster/app/' + row.id)">
+            <el-button link type="primary" @click.stop="openResource(row)">
               资源管理器
             </el-button>
             <el-button link type="danger" @click.stop="emit('kill', row.id, row.name)">
@@ -157,8 +158,18 @@ function openNative(url: string): void {
       @size-change="onSizeChange"
     />
 
-    <!-- 追踪UI / 日志 / 资源管理器 iframe 弹窗 -->
+    <!-- 追踪UI iframe 弹窗 -->
     <UrlFrameDialog v-model="frameShow" :url="frameUrl" :title="frameTitle" />
+
+    <!-- 资源管理器:重建 RM UI 弹窗 -->
+    <YarnResourceDialog
+      v-if="resApp"
+      v-model="resShow"
+      :app-id="resApp.id"
+      :app-name="resApp.name"
+      :user="resApp.user || 'root'"
+      :rm-host="props.resourceManager"
+    />
   </div>
 </template>
 
