@@ -19,21 +19,28 @@
       <div class="dleap-side">
         <div class="side-title">节点({{ nodes.length }})</div>
         <div v-loading="loading" class="node-list">
-          <template v-for="group in projectGroups" :key="group[0]">
-            <div class="group-title">{{ group[0] }} ({{ group[1].length }})</div>
-            <div
-              v-for="n in group[1]"
-              :key="n.id"
-              class="node-item"
-              :class="{ active: currentId === n.id }"
-              @click="openNode(n.id)"
-            >
-              <el-icon class="node-icon" :class="n.type"><Document v-if="n.type === 'sql'" /><Cpu v-else-if="n.type === 'spark'" /><Setting v-else /></el-icon>
-              <span class="node-name" :title="n.name">{{ n.name }}</span>
-              <el-tag size="small" class="node-type" effect="plain">{{ n.type }}</el-tag>
-              <el-icon class="del-icon" title="删除" @click.stop="onDelete(n.id)"><Delete /></el-icon>
-            </div>
-          </template>
+          <el-tree
+            v-if="nodes.length"
+            :data="treeData"
+            node-key="id"
+            default-expand-all
+            highlight-current
+            :props="{ label: 'name', children: 'children', isLeaf: (d: TreeItem) => !d.dir }"
+            :current-node-key="currentId"
+            class="dleap-tree"
+            @node-click="onTreeNodeClick"
+          >
+            <template #default="{ data }">
+              <div class="tree-node">
+                <el-icon :class="data.dir ? '' : data.node?.type">
+                  <Folder v-if="data.dir" /><Document v-else-if="data.node?.type === 'sql'" /><Cpu v-else-if="data.node?.type === 'spark'" /><Setting v-else />
+                </el-icon>
+                <span class="node-name" :title="data.name">{{ data.name }}</span>
+                <el-tag v-if="!data.dir" size="small" class="node-type" effect="plain">{{ data.node?.type }}</el-tag>
+                <el-icon v-if="!data.dir" class="del-icon" title="删除" @click.stop="onDelete(data.id)"><Delete /></el-icon>
+              </div>
+            </template>
+          </el-tree>
           <div v-if="!nodes.length && !loading" class="side-empty">暂无节点,点「新建节点」开始</div>
         </div>
       </div>
@@ -48,6 +55,7 @@
               <el-option label="Shell" value="shell" />
               <el-option label="Spark" value="spark" />
             </el-select>
+            <el-input v-model="form.dir" size="small" placeholder="目录(可选)" class="dir-input" />
             <el-input v-model="form.cron" size="small" placeholder="调度 cron(可选)" class="cron-input" />
             <el-button size="small" type="primary" :loading="saving" @click="onSave">保存</el-button>
           </div>
@@ -136,6 +144,30 @@
         <div ref="g6El" class="g6-canvas"></div>
       </div>
     </div>
+
+    <!-- 新建节点(名称/类型/目录) -->
+    <el-dialog v-model="showCreate" title="新建节点" width="420px">
+      <div class="create-row">
+        <span class="label">名称</span>
+        <el-input v-model="createForm.name" size="small" placeholder="如 ods_xxx.sql" @keyup.enter="submitCreate" />
+      </div>
+      <div class="create-row">
+        <span class="label">类型</span>
+        <el-radio-group v-model="createForm.type" size="small">
+          <el-radio-button value="sql">SQL</el-radio-button>
+          <el-radio-button value="shell">Shell</el-radio-button>
+          <el-radio-button value="spark">Spark</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="create-row">
+        <span class="label">目录</span>
+        <el-input v-model="createForm.dir" size="small" placeholder="如 ods/etl,留空=根目录" />
+      </div>
+      <template #footer>
+        <el-button size="small" @click="showCreate = false">取消</el-button>
+        <el-button size="small" type="primary" @click="submitCreate">创建</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 数据接入:选库/表生成 SQL 节点 -->
     <el-dialog v-model="showIngest" title="数据接入(选表生成 SQL 节点)" width="560px">
@@ -280,14 +312,15 @@ const saving = ref(false)
 const pubLoading = ref(false)
 const currentId = ref('')
 const current = ref<DleapNodeDetail | null>(null)
-const form = ref<{ name: string; type: DleapNodeType; project: string; cron: string; content: string; deps: string[]; db: string }>({
+const form = ref<{ name: string; type: DleapNodeType; project: string; cron: string; content: string; deps: string[]; db: string; dir: string }>({
   name: '',
   type: 'sql',
   project: '实验项目',
   cron: '',
   content: '',
   deps: [],
-  db: ''
+  db: '',
+  dir: ''
 })
 const pubVisible = ref(false)
 const pubMsg = ref('')
@@ -317,6 +350,44 @@ const filteredIngestTables = computed(() => {
 const g6El = ref<HTMLDivElement>()
 let graphInst: any | null = null
 
+interface TreeItem {
+  id: string
+  name: string
+  dir: boolean
+  children?: TreeItem[]
+  node?: DleapNode
+}
+
+function buildTree(items: DleapNode[]): TreeItem[] {
+  const root: TreeItem[] = []
+  const dirMap = new Map<string, TreeItem>()
+  const ensureDir = (path: string): TreeItem => {
+    const hit = dirMap.get(path)
+    if (hit) return hit
+    const parts = path.split('/')
+    const name = parts[parts.length - 1]
+    const parentPath = parts.slice(0, -1).join('/')
+    const item: TreeItem = { id: `dir:${path}`, name, dir: true, children: [] }
+    dirMap.set(path, item)
+    if (parentPath) ensureDir(parentPath).children!.push(item)
+    else root.push(item)
+    return item
+  }
+  for (const n of items) if (n.dir) ensureDir(n.dir)
+  for (const n of items) {
+    const file: TreeItem = { id: n.id, name: n.name, dir: false, node: n }
+    if (n.dir) ensureDir(n.dir).children!.push(file)
+    else root.push(file)
+  }
+  const sort = (arr: TreeItem[]) => {
+    arr.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1))
+    for (const it of arr) if (it.children) sort(it.children)
+  }
+  sort(root)
+  return root
+}
+
+const treeData = computed(() => buildTree(nodes.value))
 const sortedNodes = computed(() => [...nodes.value].sort((a, b) => a.name.localeCompare(b.name)))
 const depCandidates = computed(() => sortedNodes.value.filter((n) => n.id !== currentId.value))
 const depsChanged = computed(() => {
@@ -367,7 +438,8 @@ async function openNode(id: string) {
       cron: node.cron || '',
       content: node.content || '',
       deps: [...(node.deps || [])],
-      db: node.db || ''
+      db: node.db || '',
+      dir: node.dir || ''
     }
     runResult.value = null
     runError.value = ''
@@ -376,22 +448,31 @@ async function openNode(id: string) {
   }
 }
 
+function onTreeNodeClick(data: TreeItem) {
+  if (!data.dir && data.node) void openNode(data.node.id)
+}
+
+const showCreate = ref(false)
+const createForm = ref({ name: '', type: 'sql' as DleapNodeType, dir: '' })
 async function onCreate() {
+  createForm.value = { name: '', type: 'sql', dir: '' }
+  showCreate.value = true
+}
+async function submitCreate() {
+  if (!createForm.value.name.trim()) return ElMessage.warning('名称不能为空')
   try {
-    const { value } = await ElMessageBox.prompt('节点名称', '新建节点', {
-      inputValue: 'new_task.sql',
-      inputValidator: (v) => (v?.trim() ? true : '名称不能为空')
-    })
     const { node } = await createNode({
-      name: (value || '').trim(),
-      type: 'sql',
-      project: '实验项目'
+      name: createForm.value.name.trim(),
+      type: createForm.value.type,
+      project: '实验项目',
+      dir: createForm.value.dir.trim()
     })
     nodes.value.push(node)
+    showCreate.value = false
     await openNode(node.id)
     await reload()
   } catch (e) {
-    if (e !== 'cancel' && e !== 'close') ElMessage.error(`新建失败:${e instanceof Error ? e.message : e}`)
+    ElMessage.error(`新建失败:${e instanceof Error ? e.message : e}`)
   }
 }
 
@@ -405,7 +486,8 @@ async function onSave() {
       type: form.value.type,
       cron: form.value.cron.trim(),
       content: form.value.content,
-      db: form.value.db
+      db: form.value.db,
+      dir: form.value.dir
     })
     Object.assign(current.value, node)
     const idx = nodes.value.findIndex((n) => n.id === node.id)
@@ -481,18 +563,6 @@ async function onRun() {
   }
 }
 
-// 节点按项目分组
-const projectGroups = computed(() => {
-  const m = new Map<string, DleapNode[]>()
-  for (const n of sortedNodes.value) {
-    const p = n.project || '未分组'
-    if (!m.has(p)) m.set(p, [])
-    m.get(p)!.push(n)
-  }
-  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-})
-
-/** 数据接入:选库/表 → 自动生成 SQL 查询节点 */
 async function openIngest() {
   showIngest.value = true
   ingestDb.value = ''
@@ -884,6 +954,10 @@ onBeforeUnmount(() => {
       width: 160px;
     }
 
+    .dir-input {
+      width: 140px;
+    }
+
     .deps-select {
       flex: 1;
     }
@@ -952,6 +1026,66 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   background: var(--bd-panel, #fff);
+}
+
+.create-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+
+  .label {
+    font-size: 12px;
+    color: var(--bd-muted, #888);
+    width: 40px;
+    flex-shrink: 0;
+  }
+}
+
+.dleap-tree {
+  background: transparent;
+
+  :deep(.el-tree-node__content) {
+    height: 28px;
+    border-radius: 6px;
+
+    &:hover {
+      background: var(--bd-table-hover, rgba(0, 132, 156, 0.06));
+    }
+  }
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+
+  .node-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .node-type {
+    transform: scale(0.85);
+  }
+
+  .del-icon {
+    opacity: 0;
+    transition: opacity 0.15s;
+
+    &:hover {
+      color: #f56c6c;
+    }
+  }
+
+  &:hover .del-icon {
+    opacity: 1;
+  }
 }
 
 .ingest-row {

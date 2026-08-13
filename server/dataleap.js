@@ -65,6 +65,7 @@ function listView(nodes) {
     deps: n.deps || [],
     cron: n.cron || '',
     db: n.db || '',
+    dir: n.dir || '',
     updatedAt: n.updatedAt
   }))
 }
@@ -115,6 +116,150 @@ function topoSort(nodes) {
   return { order, cycles }
 }
 
+
+// ── 模块级执行辅助(router 与 cron 调度器共用)───────────────
+function execShellN(script) {
+  return new Promise((resolve) => {
+    fs.mkdirSync(RUN_DIR, { recursive: true })
+    const t0 = Date.now()
+    exec(String(script || ''), {
+      timeout: 30000,
+      maxBuffer: 64 * 1024,
+      shell: '/bin/sh',
+      cwd: RUN_DIR,
+      env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
+    }, (err, stdout, stderr) => {
+      resolve({
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+        exitCode: typeof err?.code === 'number' ? err.code : 0,
+        timedOut: !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL'),
+        costMs: Date.now() - t0
+      })
+    })
+  })
+}
+
+async function proxyDbQueryN(db, sql) {
+  if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
+  const r = await fetch(config.dbProxyUrl + '/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
+    body: JSON.stringify({ db, sql, timeoutMs: 60000 }),
+    signal: AbortSignal.timeout(65000)
+  })
+  const body = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+  return body.data || {}
+}
+
+async function proxySparkN(sql) {
+  if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
+  const r = await fetch(config.dbProxyUrl + '/spark/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
+    body: JSON.stringify({ kind: 'sql', sql, writeUnlocked: false, timeoutMs: 60000 }),
+    signal: AbortSignal.timeout(65000)
+  })
+  const body = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+  return body.data || {}
+}
+
+/** 执行单个节点,返回 {ok, stdout, stderr, rows, error, costMs} */
+async function runNode(n) {
+  const t0 = Date.now()
+  try {
+    if (n.type === 'shell') {
+      const r = await execShellN(n.content)
+      return { ok: r.exitCode === 0 && !r.timedOut, stdout: r.stdout, stderr: r.stderr, costMs: r.costMs }
+    }
+    if (n.type === 'sql') {
+      if (!n.db) throw new Error('未配置数据源')
+      const r = await proxyDbQueryN(n.db, n.content)
+      return { ok: true, rows: (r.rows || []).length, costMs: r.costMs }
+    }
+    if (n.type === 'spark') {
+      const r = await proxySparkN(n.content)
+      return { ok: true, rows: (r.rows || []).length, costMs: r.costMs }
+    }
+    return { ok: false, error: '未知类型' }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), costMs: Date.now() - t0 }
+  }
+}
+
+/** 记录执行历史(保留最近 200 条) */
+function recordRun({ trigger, nodeName, nodeType, summary, ok, results }) {
+  const runs = loadRuns()
+  runs.unshift({ id: randomUUID(), ts: new Date().toISOString(), trigger, nodeName, nodeType, summary, ok, results })
+  saveRuns(runs.slice(0, 200))
+}
+
+/** cron 5 字段匹配(分 时 日 月 周),支持 * 、,、-、/ */
+function cronMatch(cron, date) {
+  const parts = String(cron).trim().split(/\s+/)
+  if (parts.length !== 5) return false
+  const [min, hour, dom, mon, dow] = parts
+  const v = [date.getMinutes(), date.getHours(), date.getDate(), date.getMonth() + 1, date.getDay()]
+  return parts.every((expr, i) => fieldMatch(expr, v[i]))
+}
+function fieldMatch(expr, val) {
+  for (const part of String(expr).split(',')) {
+    const p = part.trim()
+    if (p === '*') return true
+    if (p.includes('/')) {
+      const [base, step] = p.split('/')
+      const b = base === '*' ? 0 : parseInt(base, 10)
+      const s = parseInt(step, 10)
+      if (s > 0 && val % s === b % s) return true
+      continue
+    }
+    const range = p.match(/^(\d+)-(\d+)$/)
+    if (range) {
+      if (val >= parseInt(range[1], 10) && val <= parseInt(range[2], 10)) return true
+      continue
+    }
+    if (parseInt(p, 10) === val) return true
+  }
+  return false
+}
+
+// ── cron 调度器(分钟级,完全本地,不接 DS)──────────────────
+let schedulerTimer = null
+let lastMinuteKey = ''
+/** 每分钟检查一次节点 cron,匹配则按拓扑执行该节点(及其被依赖影响由 run/all 覆盖) */
+async function schedulerTick() {
+  const now = new Date()
+  const key = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()} ${now.getHours()}:${now.getMinutes()}`
+  if (key === lastMinuteKey) return
+  lastMinuteKey = key
+  const nodes = loadNodes()
+  const targets = nodes.filter((n) => n.cron && cronMatch(n.cron, now))
+  for (const n of targets) {
+    try {
+      const r = await runNode(n)
+      recordRun({
+        trigger: 'cron',
+        nodeName: n.name,
+        nodeType: n.type,
+        summary: `${r.ok ? '成功' : '失败'} ${r.costMs != null ? r.costMs + 'ms' : ''}`,
+        ok: r.ok,
+        results: [{ id: n.id, name: n.name, type: n.type, ok: r.ok, ...r }]
+      })
+      console.log(`[dataleap] cron 执行 ${n.name}: ${r.ok ? '成功' : '失败'}`)
+    } catch (e) {
+      recordRun({ trigger: 'cron', nodeName: n.name, nodeType: n.type, summary: '调度执行异常', ok: false, results: [{ id: n.id, name: n.name, type: n.type, ok: false, error: String(e) }] })
+    }
+  }
+}
+
+export function initDataleap() {
+  if (schedulerTimer) return
+  schedulerTimer = setInterval(() => void schedulerTick(), 30 * 1000).unref()
+  console.log('[dataleap] cron 调度器已启动(30s 检查,分钟级触发)')
+}
+
 export function dataleapRouter() {
   const router = Router()
 
@@ -125,7 +270,7 @@ export function dataleapRouter() {
 
   // 新建节点
   router.post('/nodes', (req, res) => {
-    const { name, type = 'sql', project = '实验项目', content = '', cron = '', db = '' } = req.body || {}
+    const { name, type = 'sql', project = '实验项目', content = '', cron = '', db = '', dir = '' } = req.body || {}
     const n = String(name || '').trim()
     if (!n) return res.status(400).json({ code: 400, msg: 'name 不能为空' })
     if (!NODE_TYPES.includes(type)) return res.status(400).json({ code: 400, msg: `type 必须为 ${NODE_TYPES.join('/')}` })
@@ -139,6 +284,7 @@ export function dataleapRouter() {
       deps: [],
       cron: String(cron || ''),
       db: String(db || ''),
+      dir: String(dir || '').replace(/^\/+|\/+$/g, ''),
       updatedAt: new Date().toISOString()
     }
     nodes.push(node)
@@ -158,7 +304,7 @@ export function dataleapRouter() {
     const nodes = loadNodes()
     const n = findNode(nodes, req.params.id)
     if (!n) return res.status(404).json({ code: 404, msg: '节点不存在' })
-    const { name, type, project, content, cron, db } = req.body || {}
+    const { name, type, project, content, cron, db, dir } = req.body || {}
     if (name !== undefined) n.name = String(name).trim() || n.name
     if (type !== undefined) {
       if (!NODE_TYPES.includes(type)) return res.status(400).json({ code: 400, msg: `type 必须为 ${NODE_TYPES.join('/')}` })
@@ -168,6 +314,7 @@ export function dataleapRouter() {
     if (content !== undefined) n.content = String(content)
     if (cron !== undefined) n.cron = String(cron)
     if (db !== undefined) n.db = String(db)
+    if (dir !== undefined) n.dir = String(dir).replace(/^\/+|\/+$/g, '')
     n.updatedAt = new Date().toISOString()
     saveNodes(nodes)
     res.json({ code: 0, data: { node: listView([n])[0] } })
@@ -225,95 +372,25 @@ export function dataleapRouter() {
 
   // Shell 节点执行(试水):在门户服务器上运行脚本内容
   // 安全约束:需登录(/api/dataleap 已在保护前缀);30s 超时自动 kill;输出截断 64KB
-  router.post('/run/shell', (req, res) => {
+  router.post('/run/shell', async (req, res) => {
     const n = findNode(loadNodes(), req.body?.id)
     if (!n) return res.status(404).json({ code: 404, msg: '节点不存在' })
     if (n.type !== 'shell') return res.status(400).json({ code: 400, msg: '仅 Shell 节点可执行' })
     const script = String(n.content || '').trim()
     if (!script) return res.status(400).json({ code: 400, msg: '脚本内容为空' })
-    fs.mkdirSync(RUN_DIR, { recursive: true })
-    const t0 = Date.now()
-    exec(script, {
-      timeout: 30000,
-      maxBuffer: 64 * 1024,
-      shell: '/bin/sh',
-      cwd: RUN_DIR,
-      env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
-    }, (err, stdout, stderr) => {
-      const killed = !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL')
-      const data = {
-        stdout: String(stdout || ''),
-        stderr: String(stderr || ''),
-        exitCode: typeof err?.code === 'number' ? err.code : 0,
-        timedOut: killed,
-        costMs: Date.now() - t0
-      }
-      // 写入执行历史
-      const runs = loadRuns()
-      runs.unshift({
-        id: randomUUID(),
-        ts: new Date().toISOString(),
-        trigger: 'single',
-        nodeName: n.name,
-        nodeType: n.type,
-        summary: `exit=${data.exitCode}${data.timedOut ? ' 超时' : ''} ${data.costMs}ms`,
-        ok: data.exitCode === 0 && !data.timedOut,
-        results: [{ id: n.id, name: n.name, type: n.type, ok: data.exitCode === 0 && !data.timedOut, stdout: data.stdout, stderr: data.stderr, costMs: data.costMs }]
-      })
-      saveRuns(runs.slice(0, 200))
-      res.json({ code: 0, data })
+    const r = await execShellN(script)
+    recordRun({
+      trigger: 'single',
+      nodeName: n.name,
+      nodeType: n.type,
+      summary: `exit=${r.exitCode}${r.timedOut ? ' 超时' : ''} ${r.costMs}ms`,
+      ok: r.exitCode === 0 && !r.timedOut,
+      results: [{ id: n.id, name: n.name, type: n.type, ok: r.exitCode === 0 && !r.timedOut, stdout: r.stdout, stderr: r.stderr, costMs: r.costMs }]
     })
+    res.json({ code: 0, data: r })
   })
 
   // ── 依赖调度:按拓扑执行全部节点(本地串行,不接 DS)────────────
-  function execShell(script) {
-    return new Promise((resolve) => {
-      fs.mkdirSync(RUN_DIR, { recursive: true })
-      const t0 = Date.now()
-      exec(String(script || ''), {
-        timeout: 30000,
-        maxBuffer: 64 * 1024,
-        shell: '/bin/sh',
-        cwd: RUN_DIR,
-        env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
-      }, (err, stdout, stderr) => {
-        resolve({
-          stdout: String(stdout || ''),
-          stderr: String(stderr || ''),
-          exitCode: typeof err?.code === 'number' ? err.code : 0,
-          timedOut: !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL'),
-          costMs: Date.now() - t0
-        })
-      })
-    })
-  }
-
-  async function proxyDbQuery(db, sql) {
-    if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
-    const r = await fetch(config.dbProxyUrl + '/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
-      body: JSON.stringify({ db, sql, timeoutMs: 60000 }),
-      signal: AbortSignal.timeout(65000)
-    })
-    const body = await r.json().catch(() => ({}))
-    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-    return body.data || {}
-  }
-
-  async function proxySpark(sql) {
-    if (!config.dbProxyUrl) throw new Error('db-proxy 未配置(DB_PROXY_URL empty)')
-    const r = await fetch(config.dbProxyUrl + '/spark/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken || '' },
-      body: JSON.stringify({ kind: 'sql', sql, writeUnlocked: false, timeoutMs: 60000 }),
-      signal: AbortSignal.timeout(65000)
-    })
-    const body = await r.json().catch(() => ({}))
-    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-    return body.data || {}
-  }
-
   // 按拓扑执行全部节点(串行;SQL/Spark 只读,Shell 本地执行;失败记录不中断后续)
   router.post('/run/all', async (req, res) => {
     const nodes = loadNodes()
@@ -326,24 +403,8 @@ export function dataleapRouter() {
     for (const id of order) {
       const n = findNode(nodes, id)
       if (!n) continue
-      const t0 = Date.now()
-      try {
-        if (n.type === 'shell') {
-          const r = await execShell(n.content)
-          results.push({ id, name: n.name, type: n.type, ok: r.exitCode === 0, stdout: r.stdout, stderr: r.stderr, costMs: r.costMs })
-        } else if (n.type === 'sql') {
-          if (!n.db) throw new Error('未配置数据源')
-          const r = await proxyDbQuery(n.db, n.content)
-          results.push({ id, name: n.name, type: n.type, ok: true, rows: (r.rows || []).length, costMs: r.costMs })
-        } else if (n.type === 'spark') {
-          const r = await proxySpark(n.content)
-          results.push({ id, name: n.name, type: n.type, ok: true, rows: (r.rows || []).length, costMs: r.costMs })
-        } else {
-          results.push({ id, name: n.name, type: n.type, ok: false, error: '未知类型' })
-        }
-      } catch (e) {
-        results.push({ id, name: n.name, type: n.type, ok: false, error: e instanceof Error ? e.message : String(e), costMs: Date.now() - t0 })
-      }
+      const r = await runNode(n)
+      results.push({ id, name: n.name, type: n.type, ...r })
     }
     const okCount = results.filter((r) => r.ok).length
     // 写入执行历史

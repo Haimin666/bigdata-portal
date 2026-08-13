@@ -1098,8 +1098,9 @@ app.get('/api/config', (req, res) =>
 // ── 工作流依赖采集与级联重跑(/api/ds-deps)───────────────────
 import { initDsDeps, dsDepsRouter } from './ds-deps.js'
 import { dbScriptsRouter } from './db-scripts.js'
-import { dataleapRouter } from './dataleap.js'
+import { dataleapRouter, initDataleap } from './dataleap.js'
 initDsDeps() // 启动加载缓存 + 初始化采集 + 定时刷新
+initDataleap() // DataLeap cron 调度器(本地,分钟级)
 app.use('/api/ds-deps', dsDepsRouter())
 app.use('/api/scripts', dbScriptsRouter())
 app.use('/api/dataleap', dataleapRouter())

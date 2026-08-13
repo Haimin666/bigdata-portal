@@ -17,6 +17,7 @@ export interface DleapNode {
   deps: string[]
   cron: string
   db: string
+  dir: string
   updatedAt: string
 }
 
@@ -49,11 +50,11 @@ export function getNode(id: string): Promise<{ node: DleapNodeDetail }> {
   return req(`/nodes/${id}`)
 }
 
-export function createNode(payload: { name: string; type: DleapNodeType; project?: string; content?: string; cron?: string; db?: string }): Promise<{ node: DleapNode }> {
+export function createNode(payload: { name: string; type: DleapNodeType; project?: string; content?: string; cron?: string; db?: string; dir?: string }): Promise<{ node: DleapNode }> {
   return req('/nodes', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function updateNode(id: string, payload: Partial<Pick<DleapNodeDetail, 'name' | 'type' | 'project' | 'content' | 'cron' | 'db'>>): Promise<{ node: DleapNode }> {
+export function updateNode(id: string, payload: Partial<Pick<DleapNodeDetail, 'name' | 'type' | 'project' | 'content' | 'cron' | 'db' | 'dir'>>): Promise<{ node: DleapNode }> {
   return req(`/nodes/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
 }
 
