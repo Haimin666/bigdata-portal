@@ -843,7 +843,9 @@ if (config.dbProxyUrl) {
         }
         writeUnlocked = true
       }
-      const result = await sparkQuery(String(sql), { kind: k, writeUnlocked })
+      // 超时对齐:前端/门户/db-proxy 统一默认 120s,避免 SQL 卡住时无限等待
+      const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
+      const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data: result })
     } catch (e) {
       console.error('[spark/query]', e instanceof Error ? e.message : e)

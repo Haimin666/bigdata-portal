@@ -557,7 +557,7 @@ class SparkQueryReq(BaseModel):
     sql: Optional[str] = None
     code: Optional[str] = None
     writeUnlocked: bool = False
-    timeoutMs: int = 600000
+    timeoutMs: int = 120000  # 与门户/前端默认 120s 对齐;超时自动 cancelJobGroup 释放锁
 
 
 @app.post("/spark/query")

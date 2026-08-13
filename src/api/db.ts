@@ -89,15 +89,34 @@ export async function queryDb(db: string, sql: string, writeToken?: string): Pro
   return body.data as DbQueryResult
 }
 
-/** Spark SQL/PySpark 查询(经网关 /api/spark/query 走 db-proxy 常驻 SparkSession) */
-export async function querySpark(sql: string, writeToken?: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<DbQueryResult> {
+/** Spark SQL/PySpark 查询(经网关 /api/spark/query 走 db-proxy 常驻 SparkSession)
+ *  timeoutMs:前端侧 AbortSignal 超时 + 透传后端统一超时,默认 120s。
+ *  超时后自动请求 cancelSpark 清理后端挂起的 job,避免查询无限等待占锁。 */
+export async function querySpark(
+  sql: string,
+  writeToken?: string,
+  kind: 'sql' | 'pyspark' = 'sql',
+  timeoutMs = 120000
+): Promise<DbQueryResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
-  const res = await fetch('/api/spark/query', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ sql, kind })
-  })
+  let res: Response
+  try {
+    res = await fetch('/api/spark/query', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ sql, kind, timeoutMs }),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (e) {
+    // 前端/网关超时:尝试取消后端 job,避免 collect 挂起占住 db-proxy 串行锁
+    try {
+      await fetch('/api/spark/cancel', { method: 'POST' })
+    } catch {
+      /* 忽略取消失败 */
+    }
+    throw new Error(`执行超时(${Math.round(timeoutMs / 1000)}s),已自动取消后端任务,请缩小数据量或简化 SQL 后重试`)
+  }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
