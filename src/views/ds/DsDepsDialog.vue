@@ -4,10 +4,12 @@ import { ElMessage } from 'element-plus'
 import G6 from '@antv/g6'
 import {
   fetchWorkflowTree,
+  fetchTaskGraph,
   rerunCascade,
   type WorkflowTree,
   type DepNode,
-  type CascadeNode
+  type CascadeNode,
+  type TaskGraph
 } from '@/api/dsDeps'
 import DepBranch from './DepBranch.vue'
 import { getTheme } from '@/utils/theme'
@@ -388,7 +390,8 @@ onMounted(() => {
   watch(
     () => getTheme(),
     () => {
-      if (tree.value) renderChart()
+      if (viewMode.value === 'task') { if (taskGraph.value) renderTaskGraph() }
+      else if (tree.value) renderChart()
     }
   )
 })
@@ -397,6 +400,149 @@ onBeforeUnmount(() => {
   ;(graph as any)?.__ro?.disconnect()
   graph?.destroy()
   graph = null
+  ;(taskGraphInst as any)?.__ro?.disconnect()
+  taskGraphInst?.destroy()
+  taskGraphInst = null
+})
+
+// ── 任务血缘模式(工作流内任务 DAG)──────────────────────────
+const viewMode = ref<'wf' | 'task'>('wf')
+const taskG6El = ref<HTMLDivElement>()
+const taskGraph = ref<TaskGraph | null>(null)
+const taskLoading = ref(false)
+const taskError = ref('')
+let taskGraphInst: any | null = null
+
+/** 任务类型取色 */
+function taskTypeColor(t?: string): string {
+  const s = String(t || '').toUpperCase()
+  if (s === 'START' || s === 'END') return '#909399'
+  if (s === 'DEPENDENT') return '#e6a23c'
+  if (s.includes('SQL') || s.includes('SPARK') || s.includes('HIVE')) return C.primary()
+  if (s.includes('SHELL') || s.includes('PYTHON')) return '#67c23a'
+  return C.muted()
+}
+
+function registerTaskCard() {
+  const name = 'task-card'
+  if ((G6 as any).getRegisteredNode && (G6 as any).getRegisteredNode()[name]) return
+  G6.registerNode(
+    name,
+    {
+      draw(cfg: any, group: any) {
+        const W = 150
+        const H = 46
+        const t = cfg.taskType || ''
+        const label = String(cfg.label || cfg.name || cfg.id)
+        const key = group.addShape('rect', {
+          attrs: {
+            x: -W / 2,
+            y: -H / 2,
+            width: W,
+            height: H,
+            radius: 6,
+            fill: C.panel(),
+            stroke: taskTypeColor(t),
+            lineWidth: 1.5,
+            shadowColor: 'rgba(0,0,0,0.06)',
+            shadowBlur: 4,
+            cursor: 'pointer'
+          }
+        })
+        group.addShape('circle', {
+          attrs: { x: -W / 2 + 12, y: -14, r: 4, fill: taskTypeColor(t) }
+        })
+        const short = label.length > 15 ? label.slice(0, 14) + '…' : label
+        group.addShape('text', {
+          attrs: { x: -W / 2 + 24, y: -14, text: short, fontSize: 12, fill: C.text(), textBaseline: 'middle' }
+        })
+        group.addShape('text', {
+          attrs: {
+            x: -W / 2 + 24,
+            y: 12,
+            text: String(t || '').slice(0, 14) || 'TASK',
+            fontSize: 10,
+            fill: C.muted(),
+            textBaseline: 'middle'
+          }
+        })
+        return key
+      }
+    },
+    'single-node'
+  )
+}
+
+function renderTaskGraph() {
+  if (!taskG6El.value || !taskGraph.value) return
+  taskGraphInst?.destroy()
+  registerTaskCard()
+  const nodes = (taskGraph.value.tasks || []).map((t) => ({
+    id: String(t.id),
+    label: t.name,
+    taskType: t.type
+  }))
+  const edges = (taskGraph.value.connects || []).map((c) => ({
+    source: String(c.from),
+    target: String(c.to)
+  }))
+  taskGraphInst = new G6.Graph({
+    container: taskG6El.value,
+    width: taskG6El.value.clientWidth || 800,
+    height: taskG6El.value.clientHeight || 500,
+    fitView: true,
+    modes: { default: ['drag-canvas', 'zoom-canvas', 'drag-node'] },
+    layout: { type: 'dagre', rankdir: 'LR', nodesep: 24, ranksep: 90 },
+    defaultEdge: {
+      type: 'cubic-horizontal',
+      style: { stroke: C.border(), lineWidth: 1.5, endArrow: { path: G6.Arrow.triangle(4, 6, 0), d: 0 } }
+    }
+  })
+  taskGraphInst.node((n: any) => ({ type: 'task-card', size: [150, 46], label: n.label, taskType: n.taskType }))
+  taskGraphInst.data({ nodes, edges })
+  taskGraphInst.render()
+  taskGraphInst.fitView(30, true, false)
+  taskGraphInst.on('node:click', (evt: any) => {
+    const m = evt.item.getModel()
+    ElMessage.info(`任务: ${m.label} (${m.taskType || '未知类型'})`)
+  })
+  const ro = new ResizeObserver(() => {
+    if (taskG6El.value) taskGraphInst?.changeSize(taskG6El.value.clientWidth, taskG6El.value.clientHeight)
+  })
+  ro.observe(taskG6El.value)
+  ;(taskGraphInst as any).__ro = ro
+}
+
+async function loadTaskGraph() {
+  if (taskGraph.value && taskGraph.value.processId === props.processId) {
+    await nextTick()
+    renderTaskGraph()
+    return
+  }
+  taskLoading.value = true
+  taskError.value = ''
+  try {
+    taskGraph.value = await fetchTaskGraph(props.processId)
+    await nextTick()
+    renderTaskGraph()
+  } catch (e) {
+    taskError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    taskLoading.value = false
+  }
+}
+
+// 模式切换:渲染对应视图
+watch(viewMode, async (m) => {
+  if (m === 'task') {
+    if (!taskGraph.value) await loadTaskGraph()
+    else {
+      await nextTick()
+      renderTaskGraph()
+    }
+  } else if (tree.value) {
+    renderChart()
+  }
 })
 </script>
 
@@ -410,32 +556,50 @@ onBeforeUnmount(() => {
     @open="load"
   >
     <div v-loading="loading" class="deps-body">
-      <div v-if="error" class="deps-error">{{ error }}</div>
-      <template v-if="tree">
-        <!-- 上游(左):保留 DepBranch 简单展示 -->
-        <div v-if="tree.upstream?.length" class="upstream-wrap">
-          <div class="dep-section-title">上游依赖(仅展示,不参与重跑)</div>
-          <div class="mindmap-up">
-            <DepBranch
-              :nodes="tree.upstream"
-              direction="left"
-              :current-key="currentKey"
-              :checked="checked"
-              @toggle="toggle"
-              @jump="onJump"
-            />
+      <div class="mode-switch">
+        <el-radio-group v-model="viewMode" size="small">
+          <el-radio-button value="wf">工作流血缘</el-radio-button>
+          <el-radio-button value="task">任务血缘</el-radio-button>
+        </el-radio-group>
+      </div>
+      <!-- 工作流血缘(上游/下游,支持级联重跑) -->
+      <template v-if="viewMode === 'wf'">
+        <div v-if="error" class="deps-error">{{ error }}</div>
+        <template v-if="tree">
+          <!-- 上游(左):保留 DepBranch 简单展示 -->
+          <div v-if="tree.upstream?.length" class="upstream-wrap">
+            <div class="dep-section-title">上游依赖(仅展示,不参与重跑)</div>
+            <div class="mindmap-up">
+              <DepBranch
+                :nodes="tree.upstream"
+                direction="left"
+                :current-key="currentKey"
+                :checked="checked"
+                @toggle="toggle"
+                @jump="onJump"
+              />
+            </div>
           </div>
-        </div>
-        <!-- 下游(右):G6 树(当前为根,默认全选重跑) -->
-        <div class="dep-section-title">下游依赖(点击卡片折叠/展开,双击跳转,点「重跑」勾选)</div>
-        <div ref="g6El" class="g6-canvas"></div>
-        <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
+          <!-- 下游(右):G6 树(当前为根,默认全选重跑) -->
+          <div class="dep-section-title">下游依赖(点击卡片折叠/展开,双击跳转,点「重跑」勾选)</div>
+          <div ref="g6El" class="g6-canvas"></div>
+          <div v-if="!tree.upstream?.length && !tree.downstream?.length" class="dep-empty">该工作流无上下游依赖</div>
+        </template>
+        <div v-else-if="!loading" class="dep-empty">暂无依赖数据(联系运维在服务器执行全量刷新)</div>
       </template>
-      <div v-else-if="!loading" class="dep-empty">暂无依赖数据(联系运维在服务器执行全量刷新)</div>
+      <!-- 任务血缘(工作流内任务 DAG) -->
+      <template v-else>
+        <div class="dep-section-title">工作流内任务血缘(DAG):{{ processName }}</div>
+        <div v-if="taskError" class="deps-error">{{ taskError }}</div>
+        <div v-loading="taskLoading" ref="taskG6El" class="g6-canvas"></div>
+        <div v-if="!taskLoading && !taskError && taskGraph && !taskGraph.tasks?.length" class="dep-empty">
+          该工作流无任务定义
+        </div>
+      </template>
     </div>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">关闭</el-button>
-      <el-button v-if="instanceId" type="primary" :disabled="!checked.size" @click="doRerun">
+      <el-button v-if="instanceId && viewMode === 'wf'" type="primary" :disabled="!checked.size" @click="doRerun">
         级联重跑({{ checked.size }})
       </el-button>
     </template>
@@ -469,6 +633,11 @@ onBeforeUnmount(() => {
 .deps-body {
   max-height: 62vh;
   overflow: auto;
+}
+
+/* 模式切换(工作流血缘 / 任务血缘) */
+.mode-switch {
+  margin-bottom: 8px;
 }
 
 /* 上游横向分支(左) */

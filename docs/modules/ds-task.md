@@ -22,6 +22,7 @@ DsTaskMonitor → GET /api/ds/process-instances(海豚 API, dsToken)
 行操作 → POST /api/ds/... (执行/暂停/停止)
 依赖 → DsDepsDialog → /api/ds-deps/workflow-tree/:processId(最近一天实例)
      → DepBranch(ECharts 树/链路渲染)
+     → 双模式切换:工作流血缘(上游/下游,可级联重跑)/ 任务血缘(工作流内任务 DAG,GET /api/ds-deps/task-graph/:processId,G6 dagre 渲染)
 级联重跑 → POST /api/rerun-instances(实例 + 下游级联)
 ```
 
