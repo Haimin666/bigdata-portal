@@ -398,6 +398,6 @@ const statusColor = (c: string): StatusColor =>
   white-space: pre-wrap;
   word-break: break-all;
   color: $text;
-  background: #06090f;
+  background: var(--bd-panel-sub);
 }
 </style>
