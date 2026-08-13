@@ -1019,7 +1019,7 @@ app.post('/api/dbquery/query', async (req, res) => {
     const r = await fetch(config.dbProxyUrl + '/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-      body: JSON.stringify({ sql, timeoutMs }),
+      body: JSON.stringify({ db: String(req.body?.db || ''), sql, timeoutMs }),
       signal: AbortSignal.timeout(timeoutMs)
     })
     const body = await r.json().catch(() => ({}))
