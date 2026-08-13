@@ -1023,11 +1023,17 @@ app.post('/api/dbquery/query', async (req, res) => {
       signal: AbortSignal.timeout(timeoutMs)
     })
     const body = await r.json().catch(() => ({}))
-    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+    if (!r.ok) {
+      // 透传 db-proxy 的错误(状态码 + detail),前端才能看到真实原因
+      const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      err.status = r.status
+      throw err
+    }
     res.json({ code: 0, data: body.data })
   } catch (e) {
     console.error('[dbquery/query]', e instanceof Error ? e.message : e)
-    res.status(502).json({ code: 502, msg: '查询失败,请查看服务端日志' })
+    const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
   }
 })
 
