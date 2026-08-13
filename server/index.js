@@ -1042,16 +1042,23 @@ app.post('/api/dbquery/query', async (req, res) => {
     })
     const body = await r.json().catch(() => ({}))
     if (!r.ok) {
-      // 透传 db-proxy 的错误(状态码 + detail),前端才能看到真实原因
+      // 透传 db-proxy 的错误(状态码 + detail + 结构化 errorType/errorCode)
       const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
       err.status = r.status
+      err.errorType = body.errorType
+      err.errorCode = body.errorCode
       throw err
     }
     res.json({ code: 0, data: body.data })
   } catch (e) {
     console.error('[dbquery/query]', e instanceof Error ? e.message : e)
     const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
-    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+    res.status(status).json({
+      code: status,
+      msg: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+      ...(e?.errorType ? { errorType: e.errorType } : {}),
+      ...(e?.errorCode !== undefined ? { errorCode: e.errorCode } : {})
+    })
   }
 })
 

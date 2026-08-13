@@ -38,6 +38,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
@@ -404,6 +405,63 @@ def _rows_to_dicts(rows: List[Any], description: List[Any]) -> List[Dict[str, An
     return [{cols[i]: r[i] for i in range(len(cols))} for r in rows]
 
 
+class DbError(Exception):
+    """数据库执行错误(结构化,类似 SQL 客户端:类型 + 错误码)。"""
+
+    def __init__(self, engine: str, error_type: str, error_code, message: str):
+        super().__init__(message)
+        self.engine = engine
+        self.error_type = error_type
+        self.error_code = error_code
+        self.message = message
+
+
+_MYSQL_ERROR_TYPES = {
+    1045: "AccessDenied", 1049: "UnknownDatabase", 1054: "ColumnNotFound",
+    1062: "DuplicateEntry", 1064: "SyntaxError", 1142: "TableAccessDenied",
+    1146: "TableNotFound", 1205: "LockWaitTimeout", 1213: "Deadlock",
+    1364: "FieldNotDefault", 1406: "DataTooLong",
+    1451: "ForeignKeyViolation", 1452: "ForeignKeyViolation",
+    2002: "ConnectError", 2003: "ConnectError", 2006: "ConnectError", 2013: "ConnectError",
+}
+
+_ORACLE_ERROR_TYPES = {
+    "ORA-00001": "DuplicateEntry", "ORA-00900": "SyntaxError",
+    "ORA-00904": "ColumnNotFound", "ORA-00933": "SyntaxError",
+    "ORA-00942": "TableNotFound", "ORA-01017": "AccessDenied",
+    "ORA-01400": "FieldNotDefault", "ORA-01401": "DataTooLong",
+    "ORA-12154": "ConnectError", "ORA-12541": "ConnectError",
+    "ORA-12560": "ConnectError", "ORA-00060": "Deadlock",
+}
+
+
+def _extract_sql_error(e: Exception, engine: str) -> DbError:
+    """从数据库驱动异常提取结构化错误(类型 + 错误码 + 消息)。
+
+    - MySQL(pymysql):异常 args[0] 为 errno(如 1064),args[1] 为消息
+    - Oracle(oracledb):e.full_code(ORA-xxxxx)/e.code/e.message
+    """
+    msg = str(e)
+    if engine == "mysql":
+        code = None
+        args = getattr(e, "args", ())
+        if args and isinstance(args[0], int):
+            code = args[0]
+            if len(args) > 1:
+                msg = str(args[1])
+        etype = _MYSQL_ERROR_TYPES.get(code, "DatabaseError")
+        return DbError(engine, etype, code, msg)
+    if engine == "oracle":
+        full = getattr(e, "full_code", None) or ""
+        code = full or getattr(e, "code", None)
+        etype = "DatabaseError"
+        if full:
+            etype = _ORACLE_ERROR_TYPES.get(full, "DatabaseError")
+        m = getattr(e, "message", None) or msg
+        return DbError(engine, etype, code, m)
+    return DbError(engine, "DatabaseError", None, msg)
+
+
 def fetch(sql: str, db: str) -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。"""
@@ -439,7 +497,10 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, QUERY_TIMEOUT)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"connect failed: {e}")
+        de = _extract_sql_error(e, ds.type)
+        if de.error_type == "DatabaseError":
+            de = DbError(ds.type, "ConnectError", de.error_code, de.message)
+        raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}")
     try:
         # 查询类:追加行数限制并取结果集;写语句:直接执行取受影响行数
         if is_select:
@@ -472,7 +533,8 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
                 "truncated": False,
             }
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"query failed: {e}")
+        de = _extract_sql_error(e, ds.type)
+        raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}")
     finally:
         try:
             conn.close()
@@ -545,6 +607,27 @@ def query(
             req.sql[:200],
         )
         return {"code": 0, "data": result}
+    except DbError as e:
+        # 结构化 SQL 错误(类似 SQL 客户端:类型 + 错误码)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "code": 502,
+                "errorType": e.error_type,
+                "errorCode": e.error_code,
+                "detail": "%s %s%s: %s" % (
+                    e.engine,
+                    e.error_type,
+                    (" [%s]" % e.error_code) if e.error_code is not None else "",
+                    e.message,
+                )[:500],
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("query unexpected error: %.300s", str(e))
+        raise HTTPException(status_code=500, detail=str(e)[:500])
     finally:
         _query_semaphore.release()
 
