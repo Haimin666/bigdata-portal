@@ -1007,7 +1007,7 @@ function isNumeric(val: unknown): boolean {
         <el-divider direction="vertical" />
       </template>
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
-      <el-button v-if="(engine === 'sparksql' || engine === 'pyspark' || engine === 'flinksql') && loading" type="danger" :icon="VideoPause" @click="stopQuery">
+      <el-button v-if="loading" type="danger" :icon="VideoPause" @click="stopQuery">
         停止
       </el-button>
       <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
