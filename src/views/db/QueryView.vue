@@ -536,6 +536,14 @@ function clearSparkLogs() {
   sparkLogOffsets.value = { jvm: 0, audit: 0 }
 }
 
+/** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
+const logEmptyHint = computed(() => {
+  if (loading.value) return '(等待 Spark 输出…)'
+  const cur = results.value[activeResult.value]
+  if (cur?.error) return '(查询失败,详见上方错误信息;下方为引擎日志)'
+  return '(查询成功,无引擎日志输出)'
+})
+
 // 画布高度(可拖拽)
 const canvasHeight = ref(280)
 const MIN_H = 120
@@ -1137,7 +1145,7 @@ function isNumeric(val: unknown): boolean {
           <el-button text size="small" @click="showSparkLogs = false; stopSparkLogPolling()">收起</el-button>
         </span>
       </div>
-      <pre class="spark-logs-body">{{ sparkLogText || '(等待 Spark 输出…)' }}</pre>
+      <pre class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
     </div>
 
     <!-- 空状态 -->
@@ -1749,7 +1757,7 @@ function isNumeric(val: unknown): boolean {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  min-height: 120px; /* 确保展开后可见,不被结果区挤没 */
   border-top: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
 }

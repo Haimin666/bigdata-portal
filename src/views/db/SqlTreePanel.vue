@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
@@ -24,6 +24,21 @@ const emit = defineEmits<{
 }>()
 
 const activeTab = ref<'my' | 'catalog'>('my')
+
+// ── 模糊搜索(我的目录 / 表目录,按名称包含匹配)────────────────
+const mySearch = ref('')
+const catSearch = ref('')
+const myTreeRef = ref()
+const catTreeRef = ref()
+
+/** el-tree filter-node-method:名称模糊匹配(大小写不敏感) */
+function filterNode(value: string, data: { name?: string }): boolean {
+  if (!value) return true
+  return String(data.name || '').toLowerCase().includes(String(value).toLowerCase())
+}
+
+watch(mySearch, (v) => myTreeRef.value?.filter(v))
+watch(catSearch, (v) => catTreeRef.value?.filter(v))
 
 // ── 我的目录 ─────────────────────────────────────────────────
 const myTree = ref<ScriptNode[]>([])
@@ -258,9 +273,19 @@ onUnmounted(() => {
           <el-button :icon="Refresh" title="刷新" @click="reloadMy" />
         </el-button-group>
       </div>
+      <el-input
+        v-model="mySearch"
+        class="tree-search"
+        size="small"
+        placeholder="搜索脚本/目录…"
+        clearable
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
       <div v-loading="myLoading" class="tree-wrap">
         <el-tree
           v-if="myTree.length"
+          ref="myTreeRef"
           :data="myTree"
           node-key="id"
           default-expand-all
@@ -268,6 +293,7 @@ onUnmounted(() => {
           :allow-drop="allowDrop"
           @node-drop="onNodeDrop"
           class="file-tree"
+          :filter-node-method="filterNode"
           @node-click="(d: ScriptNode) => onNodeClick(d)"
         >
           <template #default="{ data }">
@@ -289,14 +315,25 @@ onUnmounted(() => {
       <div class="panel-toolbar">
         <span class="toolbar-title">表结构(点击表/字段插入)</span>
       </div>
+      <el-input
+        v-model="catSearch"
+        class="tree-search"
+        size="small"
+        placeholder="搜索库/表/字段…"
+        clearable
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
       <div class="tree-wrap">
         <el-tree
+          ref="catTreeRef"
           :key="dbsKey"
           :props="{ label: 'name', children: 'children', isLeaf: 'isLeaf' }"
           node-key="id"
           lazy
           :load="lazyLoad"
           class="file-tree cat-tree"
+          :filter-node-method="filterNode"
           @node-click="(d: CatNode) => onCatalogClick(d)"
         >
           <template #default="{ data }">
@@ -399,6 +436,11 @@ onUnmounted(() => {
   flex: 1;
   overflow: auto;
   padding: 4px;
+}
+
+.tree-search {
+  margin: 6px 8px 0;
+  flex-shrink: 0;
 }
 
 .tree-empty {
