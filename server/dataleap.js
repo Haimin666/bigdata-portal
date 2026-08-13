@@ -269,7 +269,8 @@ export function buildDsWorkflow(nodes, name) {
   const { cycles } = topoSort(nodes)
   if (cycles.length) throw new Error(`存在依赖环,无法发布: ${cycles.map((c) => c.join(' → ')).join('; ')}`)
   const idMap = new Map()
-  nodes.forEach((n, i) => idMap.set(n.id, `tasks-dleap-${i}`))
+  // DS 校验任务 id 必须为 tasks-{纯数字}(对照真实工作流 tasks-49317)
+  nodes.forEach((n, i) => idMap.set(n.id, `tasks-${100000 + i}`))
   const taskDefs = nodes.map((n, i) => {
     const tid = idMap.get(n.id)
     const preTasks = (n.deps || []).map((d) => idMap.get(d)).filter(Boolean)
@@ -286,13 +287,13 @@ export function buildDsWorkflow(nodes, name) {
       id: tid,
       name: sanitizeDsName(n.name),
       params,
-      description: `DataLeap 节点(${n.type})`,
+      description: '',
       timeout: { strategy: '', interval: null, enable: false },
       runFlag: 'NORMAL',
       conditionResult: { successNode: [''], failedNode: [''] },
       dependence: {},
-      maxRetryTimes: 0,
-      retryInterval: 1,
+      maxRetryTimes: '0',
+      retryInterval: '1',
       taskInstancePriority: 'MEDIUM',
       workerGroup: 'default',
       preTasks
@@ -570,6 +571,7 @@ export function dataleapRouter() {
       return res.status(400).json({ code: 400, msg: e.message })
     }
     try {
+      console.log(`[dataleap] 发布到 DS: project=${project} name=${wf.name} nodes=${nodes.length}`)
       const d = await dsRequest('POST', `/projects/${encodeURIComponent(project)}/process/save`, {
         name: wf.name,
         connects: wf.connects,
@@ -577,6 +579,7 @@ export function dataleapRouter() {
         processDefinitionJson: wf.processDefinitionJson,
         description: `DataLeap 发布 ${nodes.length} 个节点`
       })
+      console.log(`[dataleap] DS 发布响应: code=${d?.code} msg=${d?.msg || ''}`)
       if (d?.code !== 0) {
         return res.status(500).json({ code: 500, msg: `DS 返回: ${d?.msg || JSON.stringify(d).slice(0, 200)}` })
       }
