@@ -505,10 +505,9 @@ async function pollSparkLogs() {
     const data = await sparkLogs(sparkLogOffsets.value)
     if (data.content) {
       sparkLogText.value += data.content
-      // 日志超长时只保留尾部 500KB
-      if (sparkLogText.value.length > 500000) {
-        sparkLogText.value = sparkLogText.value.slice(-500000)
-      }
+      // 只保留最近 500 行(引擎日志 tail 500 条)
+      const lines = sparkLogText.value.split('\n')
+      if (lines.length > 500) sparkLogText.value = lines.slice(-500).join('\n')
     }
     sparkLogOffsets.value = data.offsets
   } catch {
@@ -735,8 +734,16 @@ async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record
 
 /** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
  *  token 过期(网关 403)自动重新解锁后重试一次 */
+/** 执行前确保已选库:下拉有源但 db 未选中(如引擎切换/初始化时序)时自动取该引擎第一个源 */
+function ensureDb(): boolean {
+  if (db.value) return true
+  const candidates = filteredDbs.value
+  db.value = candidates.find((d) => d.type === engine.value)?.name || candidates[0]?.name || ''
+  return !!db.value
+}
+
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (!db.value) throw new Error('请先选择数据库')
+  if (!ensureDb()) throw new Error('请先选择数据库')
   if (isSparkWriteSql(sql) && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写操作未解锁')
@@ -816,7 +823,7 @@ async function runQuery() {
     return
   }
   batchCancelled = false
-  if (!db.value) {
+  if (!ensureDb()) {
     ElMessage.warning('请先选择数据库')
     return
   }
