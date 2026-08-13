@@ -4,6 +4,8 @@ import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import YarnResourceDialog from './YarnResourceDialog.vue'
+import FlinkUiDialog from './FlinkUiDialog.vue'
+import SparkUiDialog from './SparkUiDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsTable' })
@@ -96,6 +98,25 @@ function openResource(row: { id: string; name?: string; user?: string }): void {
   resApp.value = { id: row.id, name: row.name || row.id, user: row.user }
   resShow.value = true
 }
+
+/** Flink UI / Spark UI → 重建弹窗(按 applicationType 显示) */
+const flinkShow = ref(false)
+const sparkShow = ref(false)
+const uiApp = ref<{ id: string; name: string } | null>(null)
+function isFlink(row: { applicationType?: string }): boolean {
+  return /flink/i.test(row.applicationType || '')
+}
+function isSpark(row: { applicationType?: string }): boolean {
+  return /spark/i.test(row.applicationType || '')
+}
+function openFlink(row: { id: string; name?: string }): void {
+  uiApp.value = { id: row.id, name: row.name || row.id }
+  flinkShow.value = true
+}
+function openSpark(row: { id: string; name?: string }): void {
+  uiApp.value = { id: row.id, name: row.name || row.id }
+  sparkShow.value = true
+}
 </script>
 
 <template>
@@ -123,6 +144,12 @@ function openResource(row: { id: string; name?: string; user?: string }): void {
             </el-button>
             <el-button link type="primary" @click.stop="openResource(row)">
               资源管理器
+            </el-button>
+            <el-button v-if="isFlink(row)" link type="primary" @click.stop="openFlink(row)">
+              Flink UI
+            </el-button>
+            <el-button v-if="isSpark(row)" link type="primary" @click.stop="openSpark(row)">
+              Spark UI
             </el-button>
             <el-button link type="danger" @click.stop="emit('kill', row.id, row.name)">
               终止应用
@@ -169,6 +196,22 @@ function openResource(row: { id: string; name?: string; user?: string }): void {
       :app-name="resApp.name"
       :user="resApp.user || 'root'"
       :rm-host="props.resourceManager"
+    />
+    <!-- Flink UI:重建弹窗 -->
+    <FlinkUiDialog
+      v-if="uiApp"
+      v-model="flinkShow"
+      :app-id="uiApp.id"
+      :app-name="uiApp.name"
+      :rm="props.resourceManager"
+    />
+    <!-- Spark UI:重建弹窗(4 tab + 10s 自动刷新) -->
+    <SparkUiDialog
+      v-if="uiApp"
+      v-model="sparkShow"
+      :app-id="uiApp.id"
+      :app-name="uiApp.name"
+      :rm="props.resourceManager"
     />
   </div>
 </template>

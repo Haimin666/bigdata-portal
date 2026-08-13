@@ -7,6 +7,9 @@
 
 /* ── 亮色(浅色控制台)── */
 :root {
+  /* 全局字体栈(管理端「主题设置」可覆盖);body 与 Element Plus 均引用此变量 */
+  --bd-font: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
+    'Microsoft YaHei', monospace;
   --bd-primary: #00849c;
   --bd-bg: #eef3f8;
   --bd-panel: #ffffff;
@@ -22,9 +25,8 @@
   --el-color-primary-light-9: #cce8ed;
   --el-color-primary-dark-2: #006a7d;
 
-  /* Element Plus 字体统一为深空控制台等宽系 */
-  --el-font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono',
-    'PingFang SC', 'Microsoft YaHei', monospace;
+  /* Element Plus 字体统一为深空控制台等宽系(可被 --bd-font 覆盖) */
+  --el-font-family: var(--bd-font);
   --bd-muted: #5d7a8c;
   --bd-table-header: #f1f6fa;
   --bd-table-hover: #e9f2f8;

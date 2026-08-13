@@ -7,9 +7,13 @@ body,
 }
 
 body {
-  /* 深空控制台:全局等宽字体(与状态条/侧边栏/登录页统一),中文回退系统字体 */
-  font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
-    'Microsoft YaHei', monospace;
+  /* 深空控制台:全局等宽字体(与状态条/侧边栏/登录页统一),中文回退系统字体
+     字体可通过管理端「主题设置」覆盖(变量 --bd-font) */
+  font-family: var(
+    --bd-font,
+    'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
+      'Microsoft YaHei', monospace
+  );
   background: $bg;
   color: $text;
   position: relative;

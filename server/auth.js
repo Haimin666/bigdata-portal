@@ -250,6 +250,42 @@ export function setupAuth(app, config) {
     }
   })
 
+  // ── 主题设置(管理员可配置全局字体/颜色,存 data/theme.json)────────
+  const themeFile = path.join(dataDir, 'theme.json')
+  const THEME_KEYS = ['text', 'muted', 'primary', 'bg', 'panel', 'border', 'sidebar']
+  const readTheme = () => {
+    try {
+      return JSON.parse(fs.readFileSync(themeFile, 'utf-8'))
+    } catch {
+      return null
+    }
+  }
+  const saveTheme = (t) => {
+    const tmp = themeFile + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(t, null, 2), 'utf-8')
+    fs.renameSync(tmp, themeFile)
+  }
+  // 字体栈注入 CSS 前先消毒:只允许字体名/引号/逗号/空格/连字符
+  const sanitizeFont = (s) => String(s || '').replace(/[^A-Za-z0-9 ,'"_\-]/g, '')
+  const sanitizeColor = (s) => (typeof s === 'string' && /^#[0-9a-fA-F]{3,8}$|^rgba?\([\d\s,./%]+\)$/.test(s.trim()) ? s.trim() : '')
+
+  app.get('/api/theme', requireAuth, (_req, res) => {
+    res.json({ code: 0, data: readTheme() })
+  })
+
+  app.put('/api/theme', requireAdmin, (req, res) => {
+    const body = req.body || {}
+    const out = { fontFamily: sanitizeFont(body.fontFamily) }
+    for (const mode of ['light', 'dark']) {
+      const src = body[mode] || {}
+      const dst = {}
+      for (const k of THEME_KEYS) dst[k] = sanitizeColor(src[k])
+      out[mode] = dst
+    }
+    saveTheme(out)
+    res.json({ code: 0, data: out })
+  })
+
   // 返回给 index.js:守卫挂载与状态
   return {
     enabled,

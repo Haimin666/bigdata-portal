@@ -18,6 +18,13 @@ export const menus: MenuItem[] = [
     icon: 'User',
     kind: 'native'
   },
+  {
+    path: '/theme',
+    title: '主题设置',
+    name: 'theme',
+    icon: 'Brush',
+    kind: 'native'
+  },
   { path: '/yarn', title: 'YARN 应用', name: 'yarn', icon: 'Monitor', kind: 'native' },
   {
     path: '/ds-task',

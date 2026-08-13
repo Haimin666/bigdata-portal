@@ -45,7 +45,7 @@ const auth = setupAuth(app, config)
 // 受保护路径:未登录一律 401(除 /api/auth/* 与静态资源/SPA 页面,由前端路由守卫拦截)。
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 const PROTECTED_PREFIXES = [
-  '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
+  '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users', '/api/theme',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
   '/api/yarn-resource',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
@@ -502,9 +502,14 @@ app.get('/api/yarn-resource/proxy', async (req, res) => {
     return res.status(403).json({ ok: false, msg: 'target not allowed' })
   }
   try {
-    const resp = await fetch(target, { signal: AbortSignal.timeout(20000) })
+    const resp = await fetch(target, { signal: AbortSignal.timeout(25000) })
     const ct = resp.headers.get('content-type') || 'text/plain; charset=utf-8'
-    const body = await resp.text()
+    let body = await resp.text()
+    // 大文件截断(日志场景):?maxBytes=1000000 → 只回传前 N 字节并标注
+    const maxBytes = Number.parseInt(String(req.query.maxBytes || ''), 10)
+    if (Number.isFinite(maxBytes) && maxBytes > 0 && body.length > maxBytes) {
+      body = `${body.slice(0, maxBytes)}\n\n...[内容过长,已截断至前 ${maxBytes} 字节,完整日志共 ${body.length} 字节,请跳转原生页查看]`
+    }
     res.setHeader('content-type', ct)
     res.status(resp.status).send(body)
   } catch (e) {

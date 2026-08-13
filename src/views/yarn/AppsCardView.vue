@@ -4,6 +4,8 @@ import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import YarnResourceDialog from './YarnResourceDialog.vue'
+import FlinkUiDialog from './FlinkUiDialog.vue'
+import SparkUiDialog from './SparkUiDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
 
 defineOptions({ name: 'AppsCardView' })
@@ -63,6 +65,25 @@ function openResource(row: { id: string; name?: string; user?: string }): void {
   resShow.value = true
 }
 
+/** Flink UI / Spark UI → 重建弹窗(按 applicationType 显示) */
+const flinkShow = ref(false)
+const sparkShow = ref(false)
+const uiApp = ref<{ id: string; name: string } | null>(null)
+function isFlink(row: { applicationType?: string }): boolean {
+  return /flink/i.test(row.applicationType || '')
+}
+function isSpark(row: { applicationType?: string }): boolean {
+  return /spark/i.test(row.applicationType || '')
+}
+function openFlink(row: { id: string; name?: string }): void {
+  uiApp.value = { id: row.id, name: row.name || row.id }
+  flinkShow.value = true
+}
+function openSpark(row: { id: string; name?: string }): void {
+  uiApp.value = { id: row.id, name: row.name || row.id }
+  sparkShow.value = true
+}
+
 function onPageChange(p: number) {
   emit('page-change', p - 1)
 }
@@ -96,6 +117,12 @@ function onSizeChange(s: number) {
             <el-button size="small" @click="openResource(app)">
               资源管理器
             </el-button>
+            <el-button v-if="isFlink(app)" size="small" @click="openFlink(app)">
+              Flink UI
+            </el-button>
+            <el-button v-if="isSpark(app)" size="small" @click="openSpark(app)">
+              Spark UI
+            </el-button>
             <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
               终止
             </el-button>
@@ -126,6 +153,22 @@ function onSizeChange(s: number) {
       :app-name="resApp.name"
       :user="resApp.user || 'root'"
       :rm-host="props.resourceManager"
+    />
+    <!-- Flink UI:重建弹窗 -->
+    <FlinkUiDialog
+      v-if="uiApp"
+      v-model="flinkShow"
+      :app-id="uiApp.id"
+      :app-name="uiApp.name"
+      :rm="props.resourceManager"
+    />
+    <!-- Spark UI:重建弹窗(4 tab + 10s 自动刷新) -->
+    <SparkUiDialog
+      v-if="uiApp"
+      v-model="sparkShow"
+      :app-id="uiApp.id"
+      :app-name="uiApp.name"
+      :rm="props.resourceManager"
     />
   </div>
 </template>
