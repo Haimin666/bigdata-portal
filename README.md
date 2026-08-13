@@ -41,6 +41,8 @@ Vite(3002,ws:true)→ Express 网关(3000)
   /api/config → 配置下发        /api/login/* → 自动登录
 ```
 
+> 完整架构与模块文档见 [`docs/`](./docs/):`ARCHITECTURE.md`(总体架构)、`DEVELOPMENT.md`(文档驱动开发流程契约)、`modules/*.md`(各模块)。**开发前必须先读对应模块文档。**
+
 ## 快速开始
 
 ```bash
