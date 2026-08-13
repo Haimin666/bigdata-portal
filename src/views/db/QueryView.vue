@@ -86,6 +86,12 @@ function cancelSparkAuth() {
   sparkAuthResolve = null
 }
 
+/** 弹窗完全关闭(含 ESC):必须 resolve 挂起的 promise,否则 await openSparkAuth() 永久挂起卡死 */
+function onSparkAuthClosed() {
+  sparkAuthResolve?.(null)
+  sparkAuthResolve = null
+}
+
 function lockSparkWrite() {
   sparkToken.value = ''
   sessionStorage.removeItem(SPARK_TOKEN_KEY)
@@ -1148,7 +1154,8 @@ function isNumeric(val: unknown): boolean {
     title="Spark 写权限验证"
     width="400px"
     :close-on-click-modal="false"
-    @closed="sparkAuthResolve = null"
+    :close-on-press-escape="false"
+    @closed="onSparkAuthClosed"
   >
     <div class="spark-auth-tip">
       <el-icon color="#e6a23c"><Lock /></el-icon>

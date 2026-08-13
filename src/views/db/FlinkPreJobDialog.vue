@@ -52,6 +52,11 @@ function cancelAuth() {
   authResolve?.(null)
 }
 
+/** 弹窗完全关闭(含 ESC):resolve 挂起的 promise,避免 ensureUnlock 永久挂起 */
+function onAuthClosed() {
+  authResolve?.(null)
+}
+
 // ── 提交表单 ──────────────────────────────────────────────
 const name = ref('')
 const queue = ref('')
@@ -246,7 +251,8 @@ watch(() => props.modelValue, (v) => {
     </el-drawer>
 
     <!-- 解锁弹窗(与 Spark 共用同一密码) -->
-    <el-dialog v-model="showAuth" title="解锁 Flink 写权限" width="360px" append-to-body>
+    <el-dialog v-model="showAuth" title="解锁 Flink 写权限" width="360px" append-to-body
+      :close-on-click-modal="false" :close-on-press-escape="false" @closed="onAuthClosed">
       <el-input
         v-model="pwd"
         type="password"

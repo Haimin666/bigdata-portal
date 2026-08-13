@@ -16,9 +16,11 @@ Reasonix 主模型（DeepSeek）**不支持视觉**：用户直接发送图片�
 - 存在且 `consumed == false`：
   1. 读取 `images` 列表（图片绝对路径）。
   2. **先把 `consumed` 置为 `true` 写回文件**（防重复处理）。
-  3. 调用 `run_skill({name: "doubao-chat"})`，按其中"视觉/多模态辅助"章节：
-     `attach_chat.sh` 复用常驻 doubao 会话 → `fill` 提示 → `run-code setInputFiles`
-     上传每张图片 → Enter → 等「朗读」按钮出现 → 提取豆包回答。
+  3. 优先调用 **doubao MCP 工具** `mcp__doubao__doubao_vision`
+     （`{images: [...], prompt: "请分析这些图片"}`，路径用绝对路径）；
+     若 MCP 不可用，降级 `run_skill({name: "doubao-chat"})` 走 playwright-cli
+     手动流程（`attach_chat.sh` → fill → `run-code setInputFiles` → Enter →
+     等「朗读」按钮出现 → 提取豆包回答）。
   4. **审查/交叉验证**豆包结论（可能不准确/编造），整合后回答用户，
      回答开头注明"已由豆包识别"。
   5. 处理完成：**把 `consumed` 置为 `true` 写回，保留 `pending_vision.json` 文件**。

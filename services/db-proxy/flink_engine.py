@@ -354,12 +354,13 @@ class FlinkEngine:
         return self._t_env_stream if mode == "stream" else self._t_env_batch
 
     # ── 查询/脚本执行 ─────────────────────────────────────
-    def execute_script(self, script: str, limit: int = 0, mode: str = "batch") -> Dict[str, Any]:
+    def execute_script(self, script: str, limit: int = 0, mode: str = "batch",
+                       write_unlocked: bool = False) -> Dict[str, Any]:
         """执行 Flink SQL 脚本(多条语句,`;` 分隔)。
 
         - SET 'k' = 'v'            → 会话配置
         - USE [CATALOG] `x`        → 切换 catalog / database
-        - CREATE CATALOG / TABLE   → DDL(受 allowWrite 控制)
+        - CREATE CATALOG / TABLE   → DDL(受 allowWrite 且需门户解锁 write_unlocked)
         - SELECT / SHOW / DESC     → 查询,最后一条的结果返回
 
         mode=batch:即席查询,结果返回;mode=stream:流式执行,
@@ -370,12 +371,12 @@ class FlinkEngine:
             statements = split_flink_sql(script)
             if not statements:
                 raise ValueError("empty sql")
-            # 写语句白名单检查(逐条)
+            # 写语句白名单检查(逐条):allowWrite 且门户已解锁(write_unlocked)才放行
             for stmt in statements:
                 clean = _clean_sql(stmt)
-                if is_write_sql(clean) and not self._allow_write:
+                if is_write_sql(clean) and not (self._allow_write and write_unlocked):
                     raise PermissionError(
-                        "flink write is disabled (datasources.json flink.allowWrite=false), "
+                        "flink write is disabled (datasources.json flink.allowWrite=false 或未解锁), "
                         "only SELECT/SHOW/DESC/EXPLAIN allowed"
                     )
             if limit <= 0:
@@ -541,9 +542,9 @@ class FlinkEngine:
         return collected, truncated
 
     # ── 流式任务管理 ──────────────────────────────────────
-    def submit_stream_job(self, script: str) -> Dict[str, Any]:
+    def submit_stream_job(self, script: str, write_unlocked: bool = False) -> Dict[str, Any]:
         """提交流式任务(脚本执行,INSERT INTO 提交后台常驻)。"""
-        result = self.execute_script(script, mode="stream")
+        result = self.execute_script(script, mode="stream", write_unlocked=write_unlocked)
         job_id = result.get("jobId")
         if job_id:
             self._refresh_job_status(job_id)
@@ -611,9 +612,10 @@ class FlinkEngine:
             pass
 
     # ── 兼容 ──────────────────────────────────────────────
-    def execute_sql(self, sql: str, limit: int = 0, mode: str = "batch") -> Dict[str, Any]:
+    def execute_sql(self, sql: str, limit: int = 0, mode: str = "batch",
+                    write_unlocked: bool = False) -> Dict[str, Any]:
         """兼容单条 SQL(内部走脚本解析)。"""
-        return self.execute_script(sql, limit, mode=mode)
+        return self.execute_script(sql, limit, mode=mode, write_unlocked=write_unlocked)
 
     def cancel(self) -> bool:
         """取消当前正在执行的 job(超时/手动停止)。"""

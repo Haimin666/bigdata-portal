@@ -65,6 +65,8 @@ async function submit() {
   try {
     if (isInit.value) {
       await authApi.init(name, password.value)
+      // S4:init 成功先拉取当前用户,否则路由守卫判定未登录踢回初始化页,导致重复提交
+      await auth.fetchMe()
       ElMessage.success('管理员创建成功,已自动登录')
     } else {
       await auth.login(name, password.value)

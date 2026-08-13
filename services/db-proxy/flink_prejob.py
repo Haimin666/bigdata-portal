@@ -69,6 +69,8 @@ class FlinkPreJobManager:
         self._hadoop_conf_dir = str(self.cfg.get("hadoopConfDir", "")).strip() or "/etc/hadoop/conf"
         self._queue = str(self.cfg.get("queue", "")).strip() or "default"
         self._rm_url = str(self.cfg.get("yarnRmUrl", "")).strip().rstrip("/")
+        # 写权限:prejob 段优先,回退 flink 段顶层 allowWrite(S2:prejob 必须与交互引擎一致受控)
+        self._allow_write = bool(self.cfg.get("allowWrite", (fallback or {}).get("allowWrite", False)))
         # connector jar / catalog:prejob 段优先,回退 flink 段(fallback)
         self._jars = self.cfg.get("jars") or (fallback or {}).get("pipelineJars") or []
         self._catalogs = self.cfg.get("catalogs") or (fallback or {}).get("catalogs") or []
@@ -155,9 +157,22 @@ class FlinkPreJobManager:
 
     # ── 提交 ────────────────────────────────────────────
     def submit(self, name: str, sql: str, queue: Optional[str] = None,
-               extra_conf: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+               extra_conf: Optional[Dict[str, str]] = None,
+               write_unlocked: bool = False) -> Dict[str, Any]:
         if not self.enabled:
             raise PermissionError("flink prejob disabled (datasources.json flink.prejob.enabled=false)")
+        # S2:与交互引擎一致的写判定 —— prejob 提交前逐条检查,受 allowWrite 且需门户解锁(write_unlocked)
+        from flink_engine import _clean_sql, is_write_sql, split_flink_sql
+
+        statements = split_flink_sql(sql)
+        if not statements:
+            raise ValueError("empty sql")
+        for stmt in statements:
+            if is_write_sql(_clean_sql(stmt)) and not (self._allow_write and write_unlocked):
+                raise PermissionError(
+                    "flink write is disabled (datasources.json flink.allowWrite=false 或未解锁), "
+                    "prejob submit rejected: %s" % _clean_sql(stmt)[:80]
+                )
         with self._lock:
             jobs = self._load_jobs()
             running = [j for j in jobs.values()

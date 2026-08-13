@@ -162,7 +162,7 @@ async function loadAllOrOne<T>(
   mode: 'task' | 'process',
   { start, end }: { start?: string; end?: string }
 ): Promise<{ totalList: T[]; total: number }> {
-  const common = { pageNo: 1, pageSize: pageSize.value, stateType: stateType.value || undefined, startDate: start, endDate: end }
+  const common = { pageNo: pageNo.value, pageSize: pageSize.value, stateType: stateType.value || undefined, startDate: start, endDate: end }
   // 单个项目
   if (projectName.value) {
     if (mode === 'task') {
@@ -261,13 +261,18 @@ async function resolveYarnAppId(taskId: number): Promise<string | null> {
 // 工作流实例表格实例(整行点击展开用)
 const tableRef = ref<TableInstance>()
 
+/** 实例所属项目:全部项目模式下行带 _projectName(由 loadAllOrOne 标记),否则用当前筛选 */
+function instProject<T>(row: T): string {
+  return (row as { _projectName?: string })._projectName || projectName.value
+}
+
 /** 展开工作流实例行:加载任务列表 + 并发解析 YARN appId(限 4 路,避免日志接口并发过高卡顿) */
 async function onExpandChange(row: DsProcessInstance, expanded: boolean) {
   const r = row as unknown as { _tasks?: DsTaskInstance[]; _tasksLoading?: boolean }
   if (!expanded || r._tasks) return
   r._tasksLoading = true
   try {
-    r._tasks = await listTasksByProcess(projectName.value, row.id)
+    r._tasks = await listTasksByProcess(instProject(row), row.id)
   } catch (e) {
     ElMessage.error(`加载任务失败:${e instanceof Error ? e.message : e}`)
     r._tasksLoading = false
@@ -348,7 +353,7 @@ async function onExecute(inst: DsProcessInstance, executeType: string) {
     return
   }
   try {
-    await executeProcess(projectName.value, inst.id, executeType)
+    await executeProcess(instProject(inst), inst.id, executeType)
     ElMessage.success(`${label}成功`)
     load()
   } catch (e) {
@@ -369,7 +374,7 @@ function openDeps(inst: DsProcessInstance) {
   depsTarget.value = {
     processId: inst.processDefinitionId,
     processName: inst.name,
-    projectName: projectName.value,
+    projectName: instProject(inst),
     instanceId: inst.id,
     instanceName: inst.name
   }
@@ -450,7 +455,7 @@ async function onRerunFromTask(t: DsTaskInstance, cascade: boolean) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        projectName: projectName.value,
+        projectName: instProject(t),
         processInstanceId: t.processInstanceId,
         startNodeId: nodeId
       })

@@ -32,6 +32,7 @@ import os
 import re
 import time
 import uuid
+import secrets
 import collections
 import threading
 from typing import Any, Dict, List, Optional
@@ -149,9 +150,18 @@ except ImportError:  # pragma: no cover
     oracledb = None  # type: ignore
     _HAS_ORACLE = False
 
-# 提取 SQL 中出现的表名(粗略:FROM/JOIN/INTO/UPDATE 后跟的表)
+# 提取 SQL 中出现的表名(粗略:FROM/JOIN/INTO/UPDATE/TABLE 后跟的表)。
+# 支持 MySQL 反引号完整标识符 `db`.`tbl` 与单段 `tbl`;普通名可带 "库.表"
+# (点号后必须跟名字段,避免 `db.` 尾点误提取)。
 TABLE_RE = re.compile(
-    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[\"\[]?)([A-Za-z0-9_$.]+)(?:[\"\]]?)?",
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"
+    r"(?:`([^`]+)`\.`([^`]+)`|`([^`]+)`|[\"\[(]?([A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+)*)[\"\]]?)",
+    re.IGNORECASE,
+)
+# 反引号混合形态补充:`db`.tbl、db.`tbl`(限定表关键字后,避免命中字符串字面量)
+BACKTICK_TABLE_RE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"
+    r"(?:`([^`]+)`\s*\.\s*([A-Za-z0-9_$]+)|([A-Za-z0-9_$]+)\s*\.\s*(`[^`]+`))",
     re.IGNORECASE,
 )
 # 行数上限检测(MySQL/Oracle 通用):LIMIT n 或 FETCH FIRST n ROWS
@@ -325,10 +335,35 @@ def check_tables_allowed(sql: str) -> None:
     """表级白名单:从 SQL 提取表名,不在白名单拒绝。"""
     if not ALLOWED_TABLES:
         return
+    names: List[str] = []
+    seen = set()
+
+    def _add(n: Optional[str]) -> None:
+        n = (n or "").replace("`", "").strip()
+        if not n or n in seen:
+            return
+        seen.add(n)
+        names.append(n)
+
     for m in TABLE_RE.finditer(sql):
-        table = m.group(1)
+        # 反引号双段 `db`.`tbl` → 拼完整名;单段/普通名取对应组
+        if m.group(1) and m.group(2):
+            _add(f"{m.group(1)}.{m.group(2)}")
+        else:
+            _add(m.group(3) or m.group(4))
+    for m in BACKTICK_TABLE_RE.finditer(sql):
+        if m.group(1) and m.group(2):
+            _add(f"{m.group(1)}.{m.group(2)}")
+        elif m.group(3) and m.group(4):
+            _add(f"{m.group(3)}.{m.group(4)}")
+    # 完整名(含 .)优先判定;裸名中若是某个完整名的库前缀,不单独判定(避免误拒)
+    full_names = [t for t in names if "." in t]
+    db_prefixes = {f.split(".", 1)[0] for f in full_names}
+    bare_extra = [t for t in names if "." not in t and t not in db_prefixes]
+    for table in full_names + bare_extra:
+        bare = table.split(".", 1)[-1]
         # 支持 "库.表" 完整名或裸表名,任一匹配即通过
-        if table in ALLOWED_TABLES or table.split(".", 1)[-1] in ALLOWED_TABLES:
+        if table in ALLOWED_TABLES or bare in ALLOWED_TABLES:
             continue
         raise HTTPException(
             status_code=403,
@@ -560,9 +595,32 @@ class SparkQueryReq(BaseModel):
     timeoutMs: int = 120000  # 与门户/前端默认 120s 对齐;超时自动 cancelJobGroup 释放锁
 
 
+def _check_spark_write_creds(write_unlocked: bool, req_token: Optional[str]) -> None:
+    """写解锁凭证服务端校验(S1):
+    writeUnlocked=true 必须携带与配置一致的 X-Spark-Write 头(共享密钥,
+    仅门户网关持有,与 datasources.json spark.writeToken 一致)。
+    堵死直连 db-proxy 的调用者伪造 writeUnlocked 绕过门户鉴权。
+    未配置 writeToken → 一律拒绝写(安全默认)。
+    """
+    if not write_unlocked:
+        return
+    cfg_token = str(SPARK_CFG.get("writeToken", "") or "")
+    if not cfg_token:
+        raise HTTPException(
+            status_code=403,
+            detail="spark write disabled on db-proxy (datasources.json spark.writeToken 未配置)",
+        )
+    if not req_token or not secrets.compare_digest(cfg_token, req_token):
+        raise HTTPException(
+            status_code=403, detail="spark write token mismatch (无法自行解锁写权限)"
+        )
+
+
 @app.post("/spark/query")
 def spark_query(
-    req: SparkQueryReq, x_db_token: Optional[str] = Header(default=None)
+    req: SparkQueryReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_spark_write: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
     if not SPARK_ENGINE.enabled:
@@ -570,6 +628,8 @@ def spark_query(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
     try:
+        # 写解锁凭证校验:writeUnlocked=true 必须经门户携带共享密钥,防直连伪造
+        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
         if req.kind == "pyspark":
             if not req.code:
                 raise HTTPException(status_code=400, detail="code required for pyspark")
@@ -629,6 +689,7 @@ class FlinkQueryReq(BaseModel):
     limit: Optional[int] = None
     timeoutMs: int = 600000
     mode: str = "batch"  # batch=即席查询(秒回) / stream=流式任务(后台常驻)
+    writeUnlocked: bool = False  # 与 spark 同语义:写语句需门户解锁后置位(服务端校验 X-Spark-Write)
 
 
 class FlinkDdlReq(BaseModel):
@@ -640,7 +701,9 @@ class FlinkDdlReq(BaseModel):
 
 @app.post("/flink/query")
 def flink_query(
-    req: FlinkQueryReq, x_db_token: Optional[str] = Header(default=None)
+    req: FlinkQueryReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_spark_write: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
     if not FLINK_CFG.get("enabled"):
@@ -649,7 +712,11 @@ def flink_query(
         )
     mode = req.mode if req.mode in ("batch", "stream") else "batch"
     try:
-        result = FLINK_ENGINE.execute_script(req.sql, req.limit or 0, mode=mode)
+        # 写解锁凭证校验:与 spark 同密钥体系,防直连伪造 writeUnlocked 绕过
+        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
+        result = FLINK_ENGINE.execute_script(
+            req.sql, req.limit or 0, mode=mode, write_unlocked=req.writeUnlocked
+        )
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
@@ -776,6 +843,7 @@ class FlinkPreJobReq(BaseModel):
     name: str = ""
     sql: str
     queue: Optional[str] = None
+    writeUnlocked: bool = False  # 写类 prejob 需门户解锁后置位(服务端校验 X-Spark-Write)
 
 
 def _prejob_guard() -> None:
@@ -797,11 +865,19 @@ def flink_prejob_config(x_db_token: Optional[str] = Header(default=None)) -> Dic
 
 
 @app.post("/flink/prejob/jobs")
-def flink_prejob_submit(req: FlinkPreJobReq, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def flink_prejob_submit(
+    req: FlinkPreJobReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_spark_write: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     require_auth(x_db_token)
     _prejob_guard()
     try:
-        return {"code": 0, "data": FLINK_PREJOB.submit(req.name, req.sql, queue=req.queue)}
+        # 写凭证校验:与 spark/flink 交互同密钥体系,防直连伪造 writeUnlocked 向 YARN 提交写作业
+        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
+        return {"code": 0, "data": FLINK_PREJOB.submit(
+            req.name, req.sql, queue=req.queue, write_unlocked=req.writeUnlocked
+        )}
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except (ValueError, RuntimeError) as e:

@@ -35,9 +35,13 @@ export async function query(sql, { kind = 'sql', writeUnlocked = false, timeoutM
     kind === 'pyspark'
       ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
       : { kind: 'sql', sql, writeUnlocked, timeoutMs }
+  // 写解锁凭证:仅当 writeUnlocked=true 时附加共享密钥头,供 db-proxy 侧服务端校验(S1)
+  const headers = {}
+  if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
   const res = await proxy('/spark/query', {
     method: 'POST',
     body: JSON.stringify(payload),
+    headers,
     timeoutMs
   })
   return res.data

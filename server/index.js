@@ -24,6 +24,10 @@ EventEmitter.defaultMaxListeners = 20
 const DIST_DIR = path.join(import.meta.dirname, '../dist')
 const app = express()
 
+// 反代部署(nginx 等)下取真实客户端 IP(登录/解锁限速按真实 IP 计)。
+// 默认 0(不信任,本地直连安全);生产经反代时在 config.local.json 设 "trustProxy": 1。
+if (config.trustProxy) app.set('trust proxy', config.trustProxy)
+
 app.use(cookieParser())
 app.use(express.static(DIST_DIR))
 
@@ -52,7 +56,9 @@ const PROTECTED_PREFIXES = [
 ]
 app.use((req, res, next) => {
   if (!auth.enabled) return next()
-  if (!PROTECTED_PREFIXES.some((p) => req.path.startsWith(p))) return next()
+  // Express 4 路由默认大小写不敏感,保护前缀必须统一用小写匹配,否则 /API/... 变体绕过门禁
+  const p = req.path.toLowerCase()
+  if (!PROTECTED_PREFIXES.some((pre) => p.startsWith(pre))) return next()
   const user = auth.currentUser(req)
   if (!user) {
     if (auth.users.isEmpty()) {
@@ -61,6 +67,37 @@ app.use((req, res, next) => {
     return res.status(401).json({ code: 401, msg: '未登录或会话已过期' })
   }
   req.user = user
+  next()
+})
+
+// ── 执行类操作门禁(角色 + 模块,防 viewer 越权)────────────────
+// viewer(只读)一律禁止执行类操作;dev/admin 还需通过模块白名单。
+// 模块白名单 null(全部)或包含 gate.module 才放行。
+const EXEC_GATES = [
+  { re: /^\/api\/spark\//, module: 'dbQuery' }, // SQL/PySpark 执行、解锁、停止
+  { re: /^\/api\/flink\//, module: 'dbQuery' }, // Flink 查询/PreJob 提交/停止
+  { re: /^\/api\/dbquery\//, module: 'dbQuery' }, // MySQL/Oracle 查询
+  { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
+  { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
+  { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
+]
+app.use((req, res, next) => {
+  if (!auth.enabled) return next()
+  // Express 路由大小写不敏感,门禁路径统一小写匹配,防 /API/... 变体绕过
+  const p = req.path.toLowerCase()
+  const gate = EXEC_GATES.find(
+    (g) => g.re.test(p) && (g.onlyWrite ? !['GET', 'HEAD'].includes(req.method) : true)
+  )
+  if (!gate) return next()
+  const user = req.user || auth.currentUser(req)
+  if (!user) return res.status(401).json({ code: 401, msg: '未登录或会话已过期' })
+  if (user.role === 'viewer') {
+    return res.status(403).json({ code: 403, msg: '只读账号无权执行该操作' })
+  }
+  const mods = auth.users.modulesOf(user)
+  if (gate.module && mods && Array.isArray(mods) && !mods.includes(gate.module)) {
+    return res.status(403).json({ code: 403, msg: `无 ${gate.module} 模块权限,无法执行该操作` })
+  }
   next()
 })
 
@@ -211,7 +248,12 @@ function createLoginEndpoint({
         })
       }
     )
-    proxyReq.on('error', (e) => res.status(502).json({ ok: false, msg: String(e) }))
+    // 上游登录接口挂起兜底:15s 超时销毁,避免连接永久悬挂
+    proxyReq.setTimeout(15000, () => proxyReq.destroy(new Error('login upstream timeout')))
+    proxyReq.on('error', (e) => {
+      if (!res.headersSent) res.status(502).json({ ok: false, msg: String(e) })
+      else res.end()
+    })
     proxyReq.write(payload)
     proxyReq.end()
   }
@@ -255,6 +297,9 @@ yarnRmProxy.on('proxyRes', (proxyRes, req, res) => {
   }
   const type = proxyRes.headers['content-type'] || ''
   if (!type.includes('text/html')) {
+    // S1:非 HTML 资源也要先写响应头(selfHandleResponse 下库不会自动写),
+    // 否则状态码/Content-Type 丢失 → 浏览器严格 MIME 检查拒绝执行 JS/CSS(白屏根因)
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
     proxyRes.pipe(res)
     return
   }
@@ -320,8 +365,10 @@ const yarnDynamicProxy = httpProxy.createProxyServer({
 })
 yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
   delete proxyRes.headers['x-frame-options']
-  // 302 重定向 → 继续走代理(否则浏览器直连内网失败)
-  const origin = proxyRes.req?.headers?.host ? `http://${proxyRes.req.headers.host}` : ''
+  // 302 重定向 → 继续走代理(否则浏览器直连内网失败)。
+  // 重写基准 = 本次代理的目标 origin(入口 /api/iframe-proxy 挂到 req._proxyOrigin),
+  // 不能以门户自身 Host 为基准,否则 /static 等根路径会被解析到门户自己(S4)。
+  const origin = proxyRes.req?._proxyOrigin || ''
   if (proxyRes.headers.location && origin) {
     try {
       const loc = new URL(proxyRes.headers.location, origin)
@@ -332,6 +379,8 @@ yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
   }
   const type = proxyRes.headers['content-type'] || ''
   if (!type.includes('text/html')) {
+    // S1:非 HTML 资源也要先写响应头(同 yarnRmProxy)
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
     proxyRes.pipe(res)
     return
   }
@@ -343,7 +392,7 @@ yarnDynamicProxy.on('proxyRes', (proxyRes, _req, res) => {
     if (origin) {
       html = html.replace(
         /(href|src)\s*=\s*(["'])\/(?!api\/iframe-proxy)((?:[^"'])*)(["'])/g,
-        (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + '/' + path)}${q2}`
+        (m, attr, q, path, q2) => `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(origin + path)}${q2}`
       )
       // 完整 URL(含主机)→ 继续走动态代理(NM 日志页 css 常为 http://host:8042/static/... 或 //host/...)
       html = html.replace(
@@ -376,9 +425,12 @@ app.get('/api/iframe-proxy', (req, res) => {
   if (!isYarnProxyAllowed(u.hostname)) {
     return res.status(403).json({ ok: false, msg: 'target not allowed' })
   }
+  // 把本次目标 origin 挂到请求对象,供 proxyRes 回调作 HTML/302 重写基准(S4)
+  req._proxyOrigin = u.origin
   req.url = u.pathname + u.search
   yarnDynamicProxy.web(req, res, { target: u.origin, changeOrigin: true }, (err) => {
-    res.status(502).json({ ok: false, msg: String(err) })
+    if (!res.headersSent) res.status(502).json({ ok: false, msg: String(err) })
+    else res.end()
   })
 })
 
@@ -579,7 +631,7 @@ if (config.dbProxyUrl) {
     //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
     //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
     //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || req.path === '/query' || req.path.startsWith('/scripts')) {
+    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path)) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
@@ -607,13 +659,18 @@ const SPARK_READONLY_KW = /^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i
 const SPARK_WRITE_KW = /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i
 // SELECT 前缀走私:MySQL 可用 SELECT ... INTO OUTFILE/DUMPFILE 写服务器文件,
 // LOAD_FILE() 读服务器文件 —— 均视为写/敏感操作,需解锁
-const SPARK_SELECT_SMUGGLE = /\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(/i
+// SELECT 前缀走私:MySQL 可用 SELECT ... INTO OUTFILE/DUMPFILE 写服务器文件、
+// LOAD_FILE() 读服务器文件、FOR UPDATE 行锁、GET_LOCK/SLEEP/BENCHMARK 资源消耗,
+// 均视为写/敏感操作,需解锁
+const SPARK_SELECT_SMUGGLE =
+  /\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(|\bFOR\s+UPDATE\b|\bINTO\s+@[A-Za-z0-9_]+|\bGET_LOCK\s*\(|\bSLEEP\s*\(|\bBENCHMARK\s*\(/i
 
-/** 按分号切分,跳过单引号字符串内的分号(与 flink split_flink_sql 同思路) */
+/** 按分号切分,跳过单引号/双引号字符串内的分号(与 flink split_flink_sql 同思路) */
 function splitSqlStatements(s) {
   const parts = []
   let cur = ''
   let inStr = false
+  let inDQ = false
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
     if (c === '\\' && i + 1 < s.length) {
@@ -621,12 +678,17 @@ function splitSqlStatements(s) {
       i++
       continue
     }
-    if (c === "'") {
+    if (c === "'" && !inDQ) {
       inStr = !inStr
       cur += c
       continue
     }
-    if (c === ';' && !inStr) {
+    if (c === '"' && !inStr) {
+      inDQ = !inDQ
+      cur += c
+      continue
+    }
+    if (c === ';' && !inStr && !inDQ) {
       parts.push(cur)
       cur = ''
       continue
@@ -745,8 +807,9 @@ if (config.dbProxyUrl) {
       const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data: result })
     } catch (e) {
-      console.error('[spark/query]', e instanceof Error ? e.message : e)
-      res.status(502).json({ code: 502, msg: 'spark 查询失败,请查看服务端日志' })
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[spark/query]', msg)
+      res.status(502).json({ code: 502, msg: `spark 查询失败: ${msg.slice(0, 300)}` })
     }
   })
 
@@ -783,6 +846,12 @@ if (config.dbProxyUrl) {
       res.status(502).json({ code: 502, msg: 'spark 停止失败,请查看服务端日志' })
     }
   })
+  // 周期清理过期 spark token 与解锁失败计数,防止内存无限增长(G2)
+  setInterval(() => {
+    const now = Date.now()
+    for (const [tk, exp] of sparkTokens) if (exp < now) sparkTokens.delete(tk)
+    for (const [ip, rec] of authFails) if (rec.lockUntil > 0 && rec.lockUntil < now) authFails.delete(ip)
+  }, 30 * 60 * 1000).unref()
 } else {
   app.post('/api/spark/auth', (req, res) =>
     res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL 为空)' })
@@ -813,15 +882,17 @@ if (config.dbProxyUrl) {
       return res.status(403).json({ code: 403, msg: 'Flink 任务需要解锁,请先输入密码(与 Spark 同一密码)' })
     }
     try {
+      const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
       const data = await flinkQuery(String(req.body?.sql || ''), {
         mode: req.body?.mode === 'stream' ? 'stream' : 'batch',
         writeUnlocked: true,
-        timeoutMs: Number(req.body?.timeoutMs) || 120000
+        timeoutMs
       })
       res.json({ code: 0, data })
     } catch (e) {
-      console.error('[flink/query]', e instanceof Error ? e.message : e)
-      res.status(502).json({ code: 502, msg: 'flink 查询失败,请查看服务端日志' })
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[flink/query]', msg)
+      res.status(502).json({ code: 502, msg: `flink 查询失败: ${msg.slice(0, 300)}` })
     }
   })
 
@@ -900,7 +971,7 @@ if (config.dbProxyUrl) {
     catch (e) { console.error('[flink/prejob/status]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 详情获取失败' }) }
   })
   app.get('/api/flink/prejob/jobs/:id/logs', async (req, res) => {
-    try { res.json({ code: 0, data: await prejobLogs(req.params.id, Number(req.query.tail) || 200) }) }
+    try { res.json({ code: 0, data: await prejobLogs(req.params.id, Math.min(Number(req.query.tail) || 200, 5000)) }) }
     catch (e) { console.error('[flink/prejob/logs]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 日志获取失败' }) }
   })
   app.post('/api/flink/prejob/jobs/:id/cancel', async (req, res) => {
@@ -942,12 +1013,14 @@ app.post('/api/dbquery/query', async (req, res) => {
       return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入密码(与 Spark 同一密码)' })
     }
   }
+  // 超时对齐:统一默认 120s,上限 10 分钟;转发体白名单化,丢弃未知字段(G5)
+  const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
   try {
     const r = await fetch(config.dbProxyUrl + '/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-      body: JSON.stringify(req.body || {}),
-      signal: AbortSignal.timeout(Number(req.body?.timeoutMs) || 120000)
+      body: JSON.stringify({ sql, timeoutMs }),
+      signal: AbortSignal.timeout(timeoutMs)
     })
     const body = await r.json().catch(() => ({}))
     if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
@@ -1015,6 +1088,14 @@ const jupyterWsProxy = httpProxy.createProxyServer({
   changeOrigin: true
 })
 
+// S2:目标不可达时必须销毁 socket,否则 unhandled 'error' 会拖垮进程
+const wsErr = (err, _req, socket) => {
+  console.error('[ws-proxy]', err instanceof Error ? err.message : err)
+  if (socket && !socket.destroyed) socket.destroy()
+}
+wsProxy.on('error', wsErr)
+jupyterWsProxy.on('error', wsErr)
+
 const server = app.listen(config.port, () => {
   console.log(`[bigdata-portal] gateway listening on http://localhost:${config.port}`)
   console.log(`  RM:      ${config.resourceManagers.join(', ')}`)
@@ -1030,5 +1111,7 @@ server.on('upgrade', (req, socket, head) => {
     wsProxy.ws(req, socket, head)
   } else if (req.url.startsWith('/apps/jupyter')) {
     jupyterWsProxy.ws(req, socket, head)
+  } else {
+    socket.destroy() // 未匹配的 upgrade 直接关闭,避免悬挂
   }
 })

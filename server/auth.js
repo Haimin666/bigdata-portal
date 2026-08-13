@@ -286,6 +286,22 @@ export function setupAuth(app, config) {
     res.json({ code: 0, data: out })
   })
 
+  // 周期清理过期会话与登录限速记录,防止长期运行内存/文件无限增长(G2/G3)
+  setInterval(() => {
+    const now = Date.now()
+    let changed = false
+    for (const [k, s] of Object.entries(sessions)) {
+      if (s.expiresAt < now) {
+        delete sessions[k]
+        changed = true
+      }
+    }
+    for (const [ip, rec] of loginAttempts) {
+      if (rec.resetAt < now) loginAttempts.delete(ip)
+    }
+    if (changed) saveSessions()
+  }, 30 * 60 * 1000).unref()
+
   // 返回给 index.js:守卫挂载与状态
   return {
     enabled,

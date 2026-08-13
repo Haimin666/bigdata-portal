@@ -76,6 +76,9 @@ export default {
   dsToken: pick(fileCfg.dsToken, 'DS_TOKEN', ''),
   dbProxyUrl: pick(fileCfg.dbProxyUrl, 'DB_PROXY_URL', ''),
   dbProxyToken: pick(fileCfg.dbProxyToken, 'DB_PROXY_TOKEN', ''),
+  // db-proxy 写解锁共享密钥:与客户机 datasources.json 的 spark.writeToken 一致。
+  // 门户在写操作解锁后附加 X-Spark-Write 头,db-proxy 侧校验后才放行写(双保险)。
+  dbProxyWriteToken: pick(fileCfg.dbProxyWriteToken, 'DB_PROXY_WRITE_TOKEN', ''),
   // Livy(Spark SQL)地址:数据库查询的 sparksql 引擎经 /api/spark/query 走这里
   livyUrl,
   livy,
@@ -110,5 +113,7 @@ export default {
   enabledModules: Array.isArray(fileCfg.enabledModules) ? fileCfg.enabledModules.map(String) : [],
   // 认证(用户管理):默认开启;首次启动无用户时引导创建管理员
   authEnabled: pick(fileCfg.auth?.enabled, 'AUTH_ENABLED', true),
-  authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12)
+  authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12),
+  // 反代层数:0 = 不信任(本地直连);生产 nginx 反代时设 1,登录/解锁限速按真实客户端 IP 计
+  trustProxy: pickInt(fileCfg.trustProxy, 'TRUST_PROXY', 0)
 }

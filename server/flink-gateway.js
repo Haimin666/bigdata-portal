@@ -31,9 +31,13 @@ async function proxy(path, opts = {}) {
  * @param {{ mode?: 'batch'|'stream', writeUnlocked?: boolean, timeoutMs?: number }} [opts]
  */
 export async function query(sql, { mode = 'batch', writeUnlocked = false, timeoutMs = 120000 } = {}) {
+  // 写解锁凭证:仅当 writeUnlocked=true 时附加共享密钥头,供 db-proxy 侧服务端校验(S1)
+  const headers = {}
+  if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
   const res = await proxy('/flink/query', {
     method: 'POST',
     body: JSON.stringify({ sql, mode, writeUnlocked, timeoutMs }),
+    headers,
     timeoutMs
   })
   return res.data
@@ -93,9 +97,13 @@ export async function jobStop(jobId) {
 
 // ── PreJob 提交(yarn-per-job 独立作业)────────────────────
 export async function prejobSubmit(payload, timeoutMs = 180000) {
+  // prejob 提交一律为执行类:门户 /api/flink/prejob/jobs 已强制 X-Spark-Token 解锁,
+  // 这里带上写解锁凭证供 db-proxy 侧服务端校验(直连 8756 者无法伪造)
+  const headers = { 'X-Spark-Write': config.dbProxyWriteToken }
   const res = await proxy('/flink/prejob/jobs', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, writeUnlocked: true }),
+    headers,
     timeoutMs
   })
   return res.data
