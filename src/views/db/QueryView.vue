@@ -768,7 +768,8 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
 }
 
 /** 执行单条 SQL 并记录结果 */
-async function execOne(sql: string, index: number): Promise<void> {
+/** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
+async function execOne(sql: string, index: number, seq: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
   const isFlink = engine.value === 'flinksql'
   const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
@@ -781,8 +782,10 @@ async function execOne(sql: string, index: number): Promise<void> {
     if (isFlink) r = await execFlink(sql)
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await execDb(sql)
+    if (seq !== runSeq) return // 旧批次已失效,丢弃结果
     results.value[index] = { sql, ...r }
   } catch (e) {
+    if (seq !== runSeq) return
     results.value[index] = {
       sql,
       columns: [],
@@ -792,7 +795,8 @@ async function execOne(sql: string, index: number): Promise<void> {
       error: e instanceof Error ? e.message : String(e)
     }
   } finally {
-    if (isSpark) stopSparkLogPolling()
+    // 仅本批次仍有效时才停日志轮询(否则会停掉新批次的轮询)
+    if (isSpark && seq === runSeq) stopSparkLogPolling()
   }
 }
 
@@ -805,18 +809,20 @@ function getSegments(text: string): string[] {
 
 /** 批量执行互斥:同一次「执行」点击为一个批次;批内多条按 FIFO 逐条串行。
  *  每人同时最多提交一批 —— 执行中再次点击执行会被拒绝(loading 互斥)。
- *  batchCancelled:停止按钮置位,中断本批剩余段 */
+ *  batchCancelled:停止按钮置位,中断本批剩余段。
+ *  runSeq:批次号,停止/新执行使旧批次在途结果与日志失效。 */
 let batchCancelled = false
+let runSeq = 0
 
 /** 执行目标 SQL 段列表(逐条 FIFO 串行执行) */
-async function execSegments(segs: string[]) {
+async function execSegments(segs: string[], seq: number) {
   results.value = segs.map((sql) => ({ sql, columns: [], rows: [], costMs: 0, truncated: false }))
   for (let i = 0; i < segs.length; i++) {
     if (batchCancelled) break
-    await execOne(segs[i], i)
+    await execOne(segs[i], i, seq)
   }
   // 默认展示最后一个 tab(最新执行的结果;日志 tab 恒为第一个)
-  activePane.value = results.value.length
+  if (seq === runSeq) activePane.value = results.value.length
 }
 
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
@@ -827,6 +833,7 @@ async function runQuery() {
     return
   }
   batchCancelled = false
+  const seq = ++runSeq // 新批次号:使上一批(如被停止)的在途结果失效
   if (!ensureDb()) {
     ElMessage.warning('请先选择数据库')
     return
@@ -842,8 +849,8 @@ async function runQuery() {
     error.value = ''
     try {
       results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
-      await execOne(target, 0)
-      activePane.value = 1
+      await execOne(target, 0, seq)
+      if (seq === runSeq) activePane.value = 1
     } finally {
       loading.value = false
     }
@@ -858,7 +865,7 @@ async function runQuery() {
   loading.value = true
   error.value = ''
   try {
-    await execSegments(segs)
+    await execSegments(segs, seq)
   } finally {
     loading.value = false
   }
@@ -867,6 +874,7 @@ async function runQuery() {
 /** 停止当前查询:中断本批剩余段(前端不再发后续 SQL),并尝试取消引擎 job */
 async function stopQuery() {
   batchCancelled = true
+  runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
   try {
     if (engine.value === 'flinksql') {
       await cancelFlink()
