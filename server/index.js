@@ -33,7 +33,8 @@ app.use(express.static(DIST_DIR))
 
 // 代理路径不解析请求体:express.json() 会消费 stream 导致 http-proxy-middleware
 // 转发时 Content-Length 与实际数据不匹配,下游(海豚登录/YARN kill 等)挂起超时。
-const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db']
+// 注意:'/api/db/' 带尾斜杠,避免误匹配 /api/dbquery/query(否则 express.json 被跳过,body 丢失)
+const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db/']
 app.use((req, res, next) => {
   if (PROXY_PATHS.some((p) => req.path.startsWith(p))) return next()
   express.json()(req, res, next)
