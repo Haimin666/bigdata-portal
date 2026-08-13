@@ -49,7 +49,7 @@ export function getNode(id: string): Promise<{ node: DleapNodeDetail }> {
   return req(`/nodes/${id}`)
 }
 
-export function createNode(payload: { name: string; type: DleapNodeType; project?: string; content?: string; cron?: string }): Promise<{ node: DleapNode }> {
+export function createNode(payload: { name: string; type: DleapNodeType; project?: string; content?: string; cron?: string; db?: string }): Promise<{ node: DleapNode }> {
   return req('/nodes', { method: 'POST', body: JSON.stringify(payload) })
 }
 

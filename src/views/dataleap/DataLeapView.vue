@@ -5,6 +5,7 @@
       <span class="dleap-title">DataLeap 实验 · 文件化数据开发(一个文件 = 一个节点)</span>
       <el-button size="small" type="primary" :icon="Plus" @click="onCreate">新建节点</el-button>
       <el-button size="small" :icon="Refresh" @click="reload">刷新</el-button>
+      <el-button size="small" :icon="FolderOpened" @click="openIngest">数据接入</el-button>
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Promotion" :loading="pubLoading" @click="onPublish">发布预览</el-button>
       <el-tag v-if="graph.cycles.length" type="danger" size="small">检测到 {{ graph.cycles.length }} 个依赖环</el-tag>
@@ -134,6 +135,37 @@
       </div>
     </div>
 
+    <!-- 数据接入:选库/表生成 SQL 节点 -->
+    <el-dialog v-model="showIngest" title="数据接入(选表生成 SQL 节点)" width="560px">
+      <div class="ingest-row">
+        <span class="label">数据源</span>
+        <el-select v-model="ingestDb" size="small" filterable placeholder="选择数据源" class="ingest-db" @change="loadIngestTables">
+          <el-option
+            v-for="d in datasources.filter((x) => x.type === 'mysql' || x.type === 'oracle')"
+            :key="d.name"
+            :label="`${d.label || d.name}${d.label && d.label !== d.name ? ' (' + d.name + ')' : ''}`"
+            :value="d.name"
+          />
+        </el-select>
+      </div>
+      <div v-loading="ingestLoading" class="ingest-tables">
+        <el-input v-model="ingestFilter" size="small" placeholder="过滤表名…" clearable class="ingest-filter" />
+        <div class="ingest-list">
+          <div
+            v-for="t in filteredIngestTables"
+            :key="t"
+            class="ingest-item"
+            @click="onPickTable(t)"
+          >
+            <el-icon><Grid /></el-icon>
+            <span>{{ t }}</span>
+            <el-icon class="ingest-plus"><Plus /></el-icon>
+          </div>
+          <div v-if="!ingestLoading && !filteredIngestTables.length" class="side-empty">选择数据源后展示表列表,点击表生成 SQL 节点</div>
+        </div>
+      </div>
+    </el-dialog>
+
     <!-- 发布预览结果 -->
     <el-dialog v-model="pubVisible" title="发布预览(序列化,mock 不触发真实操作)" width="720px">
       <el-alert v-if="pubMsg" type="success" :title="pubMsg" show-icon :closable="false" style="margin-bottom: 10px" />
@@ -145,8 +177,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay } from '@element-plus/icons-vue'
-import { queryDb, listDataSources, type DbDataSource } from '@/api/db'
+import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid } from '@element-plus/icons-vue'
+import { queryDb, listDataSources, listTables, type DbDataSource } from '@/api/db'
 import G6 from '@antv/g6'
 import {
   listNodes,
@@ -193,6 +225,15 @@ type RunResult =
 const runResult = ref<RunResult | null>(null)
 const runLoading = ref(false)
 const runError = ref('')
+const showIngest = ref(false)
+const ingestDb = ref('')
+const ingestTables = ref<string[]>([])
+const ingestLoading = ref(false)
+const ingestFilter = ref('')
+const filteredIngestTables = computed(() => {
+  const kw = ingestFilter.value.trim().toLowerCase()
+  return kw ? ingestTables.value.filter((t) => t.toLowerCase().includes(kw)) : ingestTables.value
+})
 const g6El = ref<HTMLDivElement>()
 let graphInst: any | null = null
 
@@ -366,6 +407,41 @@ const projectGroups = computed(() => {
   }
   return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 })
+
+/** 数据接入:选库/表 → 自动生成 SQL 查询节点 */
+async function openIngest() {
+  showIngest.value = true
+  ingestDb.value = ''
+  ingestTables.value = []
+}
+async function loadIngestTables() {
+  if (!ingestDb.value) return
+  ingestLoading.value = true
+  try {
+    ingestTables.value = await listTables(ingestDb.value)
+  } catch (e) {
+    ElMessage.error(`加载表失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    ingestLoading.value = false
+  }
+}
+async function onPickTable(t: string) {
+  try {
+    const { node } = await createNode({
+      name: `${t}.sql`,
+      type: 'sql',
+      db: ingestDb.value,
+      content: `SELECT * FROM ${t}`
+    })
+    nodes.value.push(node)
+    ElMessage.success(`已生成节点: ${t}.sql`)
+    showIngest.value = false
+    await openNode(node.id)
+    await reload()
+  } catch (e) {
+    ElMessage.error(`生成失败:${e instanceof Error ? e.message : e}`)
+  }
+}
 
 async function onPublish() {
   pubLoading.value = true
@@ -749,6 +825,62 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   background: var(--bd-panel, #fff);
+}
+
+.ingest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+
+  .label {
+    font-size: 12px;
+    color: var(--bd-muted, #888);
+  }
+
+  .ingest-db {
+    flex: 1;
+  }
+}
+
+.ingest-tables {
+  border: 1px solid var(--bd-border, #c9cdd6);
+  border-radius: 6px;
+  overflow: hidden;
+
+  .ingest-filter {
+    border-bottom: 1px solid var(--bd-border, #c9cdd6);
+  }
+}
+
+.ingest-list {
+  max-height: 360px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.ingest-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--bd-table-hover, rgba(0, 132, 156, 0.06));
+
+    .ingest-plus {
+      opacity: 1;
+    }
+  }
+
+  .ingest-plus {
+    margin-left: auto;
+    opacity: 0;
+    color: var(--bd-primary, #00849c);
+  }
 }
 
 .pub-json {
