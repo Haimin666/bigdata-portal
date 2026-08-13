@@ -239,43 +239,78 @@
       </el-table>
     </el-dialog>
 
-    <!-- 执行历史 -->
-    <el-dialog v-model="runsVisible" title="执行历史(最近 50 条)" width="760px">
-      <div v-loading="runsLoading" class="runs-list">
-        <el-collapse v-if="runRecords.length">
-          <el-collapse-item v-for="r in runRecords" :key="r.id" :name="r.id">
-            <template #title>
-              <div class="run-title">
-                <el-tag size="small" :type="r.ok ? 'success' : 'danger'" effect="plain">{{ r.ok ? '成功' : '失败' }}</el-tag>
-                <el-tag size="small" effect="plain">{{ r.trigger === 'topo' ? '拓扑' : r.trigger === 'cron' ? '定时' : '单节点' }}</el-tag>
-                <span class="run-name">{{ r.nodeName }}</span>
-                <span class="run-summary">{{ r.summary }}</span>
-                <span class="run-ts">{{ fmtTs(r.ts) }}</span>
-              </div>
+    <!-- 任务执行历史(实例运维) -->
+    <el-dialog v-model="runsVisible" title="任务执行历史(实例运维)" width="860px" top="5vh">
+      <div class="run-filter">
+        <el-select v-model="runFilter.trigger" size="small" placeholder="触发方式" clearable style="width:110px" @change="loadRuns">
+          <el-option label="全部" value="" />
+          <el-option label="单节点" value="single" />
+          <el-option label="按拓扑" value="topo" />
+          <el-option label="定时(cron)" value="cron" />
+          <el-option label="失败重跑" value="rerun" />
+        </el-select>
+        <el-select v-model="runFilter.status" size="small" placeholder="状态" clearable style="width:100px" @change="loadRuns">
+          <el-option label="全部" value="" />
+          <el-option label="成功" value="ok" />
+          <el-option label="失败" value="fail" />
+        </el-select>
+        <el-input v-model="runFilter.keyword" size="small" placeholder="节点名搜索…" clearable style="width:180px" @keyup.enter="loadRuns" @clear="loadRuns" />
+        <el-button size="small" @click="loadRuns">查询</el-button>
+        <el-button size="small" text @click="resetRunFilter">重置</el-button>
+      </div>
+      <div v-loading="runsLoading">
+        <el-table v-if="runRecords.length" :data="runRecords" border size="small" max-height="52vh">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <el-table :data="row.results || []" border size="small">
+                <el-table-column prop="name" label="节点" min-width="150" show-overflow-tooltip />
+                <el-table-column prop="type" label="类型" width="70" align="center" />
+                <el-table-column label="状态" width="70" align="center">
+                  <template #default="{ r }"><el-tag size="small" :type="r.ok ? 'success' : 'danger'">{{ r.ok ? '成功' : '失败' }}</el-tag></template>
+                </el-table-column>
+                <el-table-column label="输出/日志" min-width="220">
+                  <template #default="{ r }">
+                    <span v-if="r.stdout" class="cell-out">{{ r.stdout.slice(0, 120) }}</span>
+                    <span v-else-if="r.stderr || r.error" class="cell-err">{{ (r.stderr || r.error || '').slice(0, 120) }}</span>
+                    <span v-else-if="r.rows != null">{{ r.rows }} 行</span>
+                    <span v-else>—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="耗时" width="70" align="right">
+                  <template #default="{ r }"><span v-if="r.costMs != null">{{ r.costMs }}ms</span></template>
+                </el-table-column>
+              </el-table>
             </template>
-            <el-table :data="r.results" border size="small" max-height="260">
-              <el-table-column prop="name" label="节点" min-width="140" show-overflow-tooltip />
-              <el-table-column prop="type" label="类型" width="70" align="center" />
-              <el-table-column label="状态" width="70" align="center">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="row.ok ? 'success' : 'danger'">{{ row.ok ? '成功' : '失败' }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="输出" min-width="180">
-                <template #default="{ row }">
-                  <span v-if="row.stdout" class="cell-out">{{ row.stdout.slice(0, 100) }}</span>
-                  <span v-else-if="row.stderr || row.error" class="cell-err">{{ (row.stderr || row.error || '').slice(0, 100) }}</span>
-                  <span v-else-if="row.rows != null">{{ row.rows }} 行</span>
-                  <span v-else>—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="耗时" width="70" align="right">
-                <template #default="{ row }"><span v-if="row.costMs != null">{{ row.costMs }}ms</span></template>
-              </el-table-column>
-            </el-table>
-          </el-collapse-item>
-        </el-collapse>
-        <div v-else-if="!runsLoading" class="side-empty">暂无执行历史</div>
+          </el-table-column>
+          <el-table-column label="状态" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.ok ? 'success' : 'danger'" effect="plain">{{ row.ok ? '成功' : '失败' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="触发" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain">{{ row.trigger === 'topo' ? '按拓扑' : row.trigger === 'cron' ? '定时' : row.trigger === 'rerun' ? '失败重跑' : '单节点' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="nodeName" label="节点/批次" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="summary" label="摘要" min-width="120" show-overflow-tooltip />
+          <el-table-column label="时间" width="150">
+            <template #default="{ row }"><span class="run-ts">{{ fmtTs(row.ts) }}</span></template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" align="center">
+            <template #default="{ row }">
+              <el-button
+                v-if="hasFailed(row)"
+                size="small"
+                text
+                type="danger"
+                :loading="rerunningId === row.id"
+                @click="onRerunRun(row)"
+              >重跑失败</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-else-if="!runsLoading" class="side-empty">暂无执行记录(调整筛选条件)</div>
       </div>
     </el-dialog>
 
@@ -306,6 +341,7 @@ import {
   runShell,
   runAll,
   fetchRuns,
+  rerunRun,
   type RunAllItem,
   type RunRecord,
   type DleapNode,
@@ -343,6 +379,8 @@ const runAllResult = ref<RunAllItem[]>([])
 const runsVisible = ref(false)
 const runsLoading = ref(false)
 const runRecords = ref<RunRecord[]>([])
+const runFilter = ref({ trigger: '', status: '', keyword: '' })
+const rerunningId = ref('')
 const datasources = ref<DbDataSource[]>([])
 type RunResult =
   | { kind: 'sql'; columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
@@ -637,17 +675,51 @@ async function onRunAll() {
   }
 }
 
-/** 打开执行历史 */
+/** 打开执行历史(实例运维) */
 async function openRuns() {
   runsVisible.value = true
+  await loadRuns()
+}
+async function loadRuns() {
   runsLoading.value = true
   try {
-    const d = await fetchRuns(50)
+    const d = await fetchRuns({
+      limit: 100,
+      trigger: runFilter.value.trigger || undefined,
+      status: runFilter.value.status || undefined,
+      keyword: runFilter.value.keyword || undefined
+    })
     runRecords.value = d.runs || []
   } catch (e) {
     ElMessage.error(`加载历史失败:${e instanceof Error ? e.message : e}`)
   } finally {
     runsLoading.value = false
+  }
+}
+function hasFailed(r: RunRecord): boolean {
+  return (r.results || []).some((x: RunAllItem) => !x.ok)
+}
+function resetRunFilter() {
+  runFilter.value = { trigger: '', status: '', keyword: '' }
+  void loadRuns()
+}
+/** 重跑实例的失败节点 */
+async function onRerunRun(r: RunRecord) {
+  if (!(r.results || []).some((x: RunAllItem) => !x.ok)) return
+  try {
+    await ElMessageBox.confirm(`重跑该实例的 ${r.results.filter((x) => !x.ok).length} 个失败节点?`, '重跑失败节点', { type: 'warning' })
+  } catch {
+    return
+  }
+  rerunningId.value = r.id
+  try {
+    const d = await rerunRun(r.id)
+    ElMessage.success(d.message || '重跑完成')
+    await loadRuns()
+  } catch (e) {
+    ElMessage.error(`重跑失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    rerunningId.value = ''
   }
 }
 
@@ -1243,6 +1315,14 @@ onBeforeUnmount(() => {
     opacity: 0;
     color: var(--bd-primary, #00849c);
   }
+}
+
+.run-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 
 .runs-list {

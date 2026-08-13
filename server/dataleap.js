@@ -423,11 +423,50 @@ export function dataleapRouter() {
     res.json({ code: 0, data: { results, message: `${okCount}/${results.length} 个节点执行成功` } })
   })
 
-  // 执行历史(最近 100 条,含结果明细)
+  // 执行历史(实例运维):筛选 trigger/status/节点名,含结果明细
   router.get('/runs', (req, res) => {
-    const runs = loadRuns()
-    const limit = Math.min(Number(req.query.limit) || 50, 200)
+    let runs = loadRuns()
+    const { trigger, status, keyword } = req.query
+    if (trigger) runs = runs.filter((r) => r.trigger === trigger)
+    if (status === 'ok') runs = runs.filter((r) => r.ok)
+    if (status === 'fail') runs = runs.filter((r) => !r.ok)
+    if (keyword) {
+      const kw = String(keyword).toLowerCase()
+      runs = runs.filter((r) => r.nodeName.toLowerCase().includes(kw) || (r.results || []).some((x) => String(x.name).toLowerCase().includes(kw)))
+    }
+    const limit = Math.min(Number(req.query.limit) || 100, 300)
     res.json({ code: 0, data: { runs: runs.slice(0, limit) } })
+  })
+
+  // 重跑某实例:按其结果明细重跑失败的节点(生成新实例,trigger='rerun')
+  router.post('/runs/:id/rerun', async (req, res) => {
+    const runs = loadRuns()
+    const idx = runs.findIndex((r) => r.id === req.params.id)
+    if (idx === -1) return res.status(404).json({ code: 404, msg: '实例不存在' })
+    const src = runs[idx]
+    const failed = (src.results || []).filter((x) => !x.ok)
+    if (!failed.length) return res.status(400).json({ code: 400, msg: '该实例没有失败节点可重跑' })
+    const nodes = loadNodes()
+    const results = []
+    for (const f of failed) {
+      const n = findNode(nodes, f.id)
+      if (!n) {
+        results.push({ id: f.id, name: f.name, type: f.type, ok: false, error: '节点已删除,无法重跑' })
+        continue
+      }
+      const r = await runNode(n)
+      results.push({ id: n.id, name: n.name, type: n.type, ...r })
+    }
+    const okCount = results.filter((r) => r.ok).length
+    recordRun({
+      trigger: 'rerun',
+      nodeName: `${src.nodeName}(失败重跑)`,
+      nodeType: src.nodeType,
+      summary: `${okCount}/${results.length} 成功`,
+      ok: okCount === results.length,
+      results
+    })
+    res.json({ code: 0, data: { results, message: `${okCount}/${results.length} 个失败节点重跑完成` } })
   })
 
   // 发布预览:按依赖拓扑生成 DS 工作流序列化(mock,不触发真实操作)

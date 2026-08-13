@@ -113,6 +113,15 @@ export interface RunRecord {
   results: RunAllItem[]
 }
 
-export function fetchRuns(limit = 50): Promise<{ runs: RunRecord[] }> {
-  return req(`/runs?limit=${limit}`)
+export function fetchRuns(opts: { limit?: number; trigger?: string; status?: string; keyword?: string } = {}): Promise<{ runs: RunRecord[] }> {
+  const q = new URLSearchParams()
+  q.set('limit', String(opts.limit ?? 100))
+  if (opts.trigger) q.set('trigger', opts.trigger)
+  if (opts.status) q.set('status', opts.status)
+  if (opts.keyword) q.set('keyword', opts.keyword)
+  return req(`/runs?${q}`)
+}
+
+export function rerunRun(id: string): Promise<{ results: RunAllItem[]; message: string }> {
+  return req(`/runs/${id}/rerun`, { method: 'POST' })
 }
