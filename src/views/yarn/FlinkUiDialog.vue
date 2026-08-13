@@ -4,6 +4,7 @@
  *  - 数据源:RM 的 /proxy/{appId}/... → Flink REST API
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import DialogMaxBtn from '@/components/DialogMaxBtn.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -238,9 +239,7 @@ onUnmounted(() => {
       <div class="fud-dlg-head">
         <span class="fud-dlg-title">Flink UI - {{ appName }}</span>
         <div class="fud-dlg-actions">
-          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
-            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
-          </el-button>
+          <DialogMaxBtn :fs="fs" @toggle="fs = !fs" />
         </div>
       </div>
     </template>

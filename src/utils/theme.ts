@@ -81,3 +81,31 @@ export async function loadThemeOverrides(): Promise<void> {
     /* 网络或未登录,保持默认主题 */
   }
 }
+
+/** 读取某主题模式下真实生效的 CSS 变量值(含 variables.scss 默认,未被覆盖时) */
+export function readCssVarSet(mode: ThemeMode): Partial<Record<string, string>> {
+  const root = document.documentElement
+  const wasDark = root.classList.contains('dark')
+  if (mode === 'dark' && !wasDark) root.classList.add('dark')
+  if (mode === 'light' && wasDark) root.classList.remove('dark')
+  const cs = getComputedStyle(root)
+  const keys = ['text', 'muted', 'primary', 'bg', 'panel', 'border', 'sidebar'] as const
+  const out: Partial<Record<string, string>> = {}
+  for (const k of keys) {
+    const v = cs.getPropertyValue(`--bd-${k}`).trim()
+    if (v) out[k] = v
+  }
+  // 恢复原主题状态
+  root.classList.toggle('dark', wasDark)
+  return out
+}
+
+/** 移除主题覆盖 style 标签,完全回退到 scss 默认 */
+export function clearThemeOverrides(): void {
+  cached = null
+  if (overridesStyle) {
+    overridesStyle.textContent = ''
+    overridesStyle.remove()
+    overridesStyle = null
+  }
+}

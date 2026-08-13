@@ -5,6 +5,7 @@
  *  数据源:RM 的 /proxy/{appId}/api/v1/... → Spark REST API
  */
 import { ref, onMounted, onUnmounted } from 'vue'
+import DialogMaxBtn from '@/components/DialogMaxBtn.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -161,9 +162,7 @@ onUnmounted(() => {
       <div class="sud-dlg-head">
         <span class="sud-dlg-title">Spark UI - {{ appName }}</span>
         <div class="sud-dlg-actions">
-          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
-            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
-          </el-button>
+          <DialogMaxBtn :fs="fs" @toggle="fs = !fs" />
         </div>
       </div>
     </template>

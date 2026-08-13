@@ -8,6 +8,7 @@
  *   日志内容   GET /api/yarn-resource/proxy?url=<NM>/node/containerlogs/{container}/{user}/{file}[?start=-4096]
  */
 import { computed, onMounted, ref, watch } from 'vue'
+import DialogMaxBtn from '@/components/DialogMaxBtn.vue'
 import type { StatusColor } from '@/types/yarn'
 
 defineOptions({ name: 'YarnResourceDialog' })
@@ -202,9 +203,7 @@ const statusColor = (c: string): StatusColor =>
       <div class="yrd-dlg-head">
         <span class="yrd-dlg-title">资源管理 {{ appName || appId }}</span>
         <div class="yrd-dlg-actions">
-          <el-button text size="small" :title="fs ? '还原' : '放大'" @click="fs = !fs">
-            <el-icon><component :is="fs ? 'Compress' : 'Expand'" /></el-icon>
-          </el-button>
+          <DialogMaxBtn :fs="fs" @toggle="fs = !fs" />
         </div>
       </div>
     </template>
