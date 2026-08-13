@@ -5,13 +5,6 @@ const THEME_KEY = 'bigdata-portal.theme'
 
 export type ThemeMode = 'light' | 'dark'
 
-/** 管理端主题覆盖(来自 GET /api/theme,字段为空 = 用默认) */
-export interface ThemeOverrides {
-  fontFamily?: string
-  light?: Partial<Record<'text' | 'muted' | 'primary' | 'bg' | 'panel' | 'border' | 'sidebar', string>>
-  dark?: Partial<Record<'text' | 'muted' | 'primary' | 'bg' | 'panel' | 'border' | 'sidebar', string>>
-}
-
 export function getTheme(): ThemeMode {
   return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
 }
@@ -41,71 +34,4 @@ export function initTheme(): void {
     /* 忽略 */
   }
   applyTheme(saved ?? 'light')
-}
-
-// ── 管理端主题覆盖(全局 CSS 变量注入)──────────────────────────
-let overridesStyle: HTMLStyleElement | null = null
-let cached: ThemeOverrides | null = null
-
-const OVERRIDE_KEYS = ['text', 'muted', 'primary', 'bg', 'panel', 'border', 'sidebar'] as const
-
-function cssVars(vals?: Partial<Record<(typeof OVERRIDE_KEYS)[number], string>>): string {
-  if (!vals) return ''
-  return OVERRIDE_KEYS.filter((k) => vals[k]).map((k) => `  --bd-${k}: ${vals[k]};\n`).join('')
-}
-
-/** 将管理端主题覆盖写为 <style> 注入 html 根变量(优先级高于 variables.scss 默认) */
-export function applyThemeOverrides(t?: ThemeOverrides | null): void {
-  if (t) cached = t
-  if (!cached) return
-  if (!overridesStyle) {
-    overridesStyle = document.createElement('style')
-    overridesStyle.id = 'bd-theme-overrides'
-    document.head.appendChild(overridesStyle)
-  }
-  const font = cached.fontFamily || ''
-  overridesStyle.textContent =
-    (font ? `:root { --bd-font: ${font}; }\n` : '') +
-    `:root {\n${cssVars(cached.light)}}\n` +
-    `html.dark {\n${cssVars(cached.dark)}}\n`
-}
-
-/** 启动时拉取管理端主题覆盖(未登录/未配置时静默跳过,用默认主题) */
-export async function loadThemeOverrides(): Promise<void> {
-  try {
-    const r = await fetch('/api/theme')
-    if (!r.ok) return
-    const d = await r.json()
-    if (d.code === 0 && d.data) applyThemeOverrides(d.data)
-  } catch {
-    /* 网络或未登录,保持默认主题 */
-  }
-}
-
-/** 读取某主题模式下真实生效的 CSS 变量值(含 variables.scss 默认,未被覆盖时) */
-export function readCssVarSet(mode: ThemeMode): Partial<Record<string, string>> {
-  const root = document.documentElement
-  const wasDark = root.classList.contains('dark')
-  if (mode === 'dark' && !wasDark) root.classList.add('dark')
-  if (mode === 'light' && wasDark) root.classList.remove('dark')
-  const cs = getComputedStyle(root)
-  const keys = ['text', 'muted', 'primary', 'bg', 'panel', 'border', 'sidebar'] as const
-  const out: Partial<Record<string, string>> = {}
-  for (const k of keys) {
-    const v = cs.getPropertyValue(`--bd-${k}`).trim()
-    if (v) out[k] = v
-  }
-  // 恢复原主题状态
-  root.classList.toggle('dark', wasDark)
-  return out
-}
-
-/** 移除主题覆盖 style 标签,完全回退到 scss 默认 */
-export function clearThemeOverrides(): void {
-  cached = null
-  if (overridesStyle) {
-    overridesStyle.textContent = ''
-    overridesStyle.remove()
-    overridesStyle = null
-  }
 }

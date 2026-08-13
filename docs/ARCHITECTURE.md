@@ -61,7 +61,7 @@ src/
 | 文件 | 职责 |
 |---|---|
 | `index.js` | Express 入口:静态托管、API 路由、代理体系、写操作防线、SPA fallback |
-| `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速、**主题设置路由** |
+| `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
 | `users.js` | 用户存储:`data/users.json`(scrypt 加盐)、角色(admin/dev/viewer)、CRUD |
 | `config.js` | 配置统一来源:`server/config.local.json`(gitignore),缺省回退环境变量/默认 |
 | `ds-deps.js` | 海豚调度依赖:项目/工作流/实例列表、依赖树缓存(`data/ds-deps.json`) |

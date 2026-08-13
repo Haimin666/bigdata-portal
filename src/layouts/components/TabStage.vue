@@ -9,7 +9,6 @@ import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
 import HdfsView from '@/views/hdfs/HdfsView.vue'
 import DbQueryView from '@/views/db/QueryView.vue'
 import UserManageView from '@/views/admin/UserManageView.vue'
-import ThemeSettingsView from '@/views/admin/ThemeSettingsView.vue'
 
 defineOptions({ name: 'TabStage' })
 
@@ -32,8 +31,7 @@ const nativeComponents: Record<string, Component> = {
   dsTask: DsTaskMonitor,
   hdfs: HdfsView,
   dbQuery: DbQueryView,
-  userManage: UserManageView,
-  theme: ThemeSettingsView
+  userManage: UserManageView
 }
 
 const activePath = computed(() => route.path)

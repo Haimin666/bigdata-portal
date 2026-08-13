@@ -50,7 +50,7 @@ const auth = setupAuth(app, config)
 // 受保护路径:未登录一律 401(除 /api/auth/* 与静态资源/SPA 页面,由前端路由守卫拦截)。
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 const PROTECTED_PREFIXES = [
-  '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users', '/api/theme',
+  '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/login',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
