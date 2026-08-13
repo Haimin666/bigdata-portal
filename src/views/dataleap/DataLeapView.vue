@@ -9,6 +9,7 @@
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Promotion" :loading="pubLoading" @click="onPublish">发布预览</el-button>
       <el-button size="small" type="danger" plain :icon="VideoPlay" :loading="runAllLoading" @click="onRunAll">按拓扑执行全部</el-button>
+      <el-button size="small" :icon="Clock" @click="openRuns">执行历史</el-button>
       <el-tag v-if="graph.cycles.length" type="danger" size="small">检测到 {{ graph.cycles.length }} 个依赖环</el-tag>
       <span v-else-if="graph.topoOrder.length" class="topo-hint">拓扑序:{{ topoHint }}</span>
     </div>
@@ -195,6 +196,46 @@
       </el-table>
     </el-dialog>
 
+    <!-- 执行历史 -->
+    <el-dialog v-model="runsVisible" title="执行历史(最近 50 条)" width="760px">
+      <div v-loading="runsLoading" class="runs-list">
+        <el-collapse v-if="runRecords.length">
+          <el-collapse-item v-for="r in runRecords" :key="r.id" :name="r.id">
+            <template #title>
+              <div class="run-title">
+                <el-tag size="small" :type="r.ok ? 'success' : 'danger'" effect="plain">{{ r.ok ? '成功' : '失败' }}</el-tag>
+                <el-tag size="small" effect="plain">{{ r.trigger === 'topo' ? '拓扑' : r.trigger === 'cron' ? '定时' : '单节点' }}</el-tag>
+                <span class="run-name">{{ r.nodeName }}</span>
+                <span class="run-summary">{{ r.summary }}</span>
+                <span class="run-ts">{{ fmtTs(r.ts) }}</span>
+              </div>
+            </template>
+            <el-table :data="r.results" border size="small" max-height="260">
+              <el-table-column prop="name" label="节点" min-width="140" show-overflow-tooltip />
+              <el-table-column prop="type" label="类型" width="70" align="center" />
+              <el-table-column label="状态" width="70" align="center">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.ok ? 'success' : 'danger'">{{ row.ok ? '成功' : '失败' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="输出" min-width="180">
+                <template #default="{ row }">
+                  <span v-if="row.stdout" class="cell-out">{{ row.stdout.slice(0, 100) }}</span>
+                  <span v-else-if="row.stderr || row.error" class="cell-err">{{ (row.stderr || row.error || '').slice(0, 100) }}</span>
+                  <span v-else-if="row.rows != null">{{ row.rows }} 行</span>
+                  <span v-else>—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="耗时" width="70" align="right">
+                <template #default="{ row }"><span v-if="row.costMs != null">{{ row.costMs }}ms</span></template>
+              </el-table-column>
+            </el-table>
+          </el-collapse-item>
+        </el-collapse>
+        <div v-else-if="!runsLoading" class="side-empty">暂无执行历史</div>
+      </div>
+    </el-dialog>
+
     <!-- 发布预览结果 -->
     <el-dialog v-model="pubVisible" title="发布预览(序列化,mock 不触发真实操作)" width="720px">
       <el-alert v-if="pubMsg" type="success" :title="pubMsg" show-icon :closable="false" style="margin-bottom: 10px" />
@@ -206,7 +247,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid } from '@element-plus/icons-vue'
+import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock } from '@element-plus/icons-vue'
 import { queryDb, listDataSources, listTables, querySpark, type DbDataSource } from '@/api/db'
 import G6 from '@antv/g6'
 import {
@@ -220,7 +261,9 @@ import {
   publishPreview,
   runShell,
   runAll,
+  fetchRuns,
   type RunAllItem,
+  type RunRecord,
   type DleapNode,
   type DleapNodeDetail,
   type DleapNodeType,
@@ -252,6 +295,9 @@ const pubJson = ref('')
 const runAllVisible = ref(false)
 const runAllLoading = ref(false)
 const runAllResult = ref<RunAllItem[]>([])
+const runsVisible = ref(false)
+const runsLoading = ref(false)
+const runRecords = ref<RunRecord[]>([])
 const datasources = ref<DbDataSource[]>([])
 type RunResult =
   | { kind: 'sql'; columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
@@ -499,6 +545,28 @@ async function onRunAll() {
     ElMessage.error(`执行失败:${e instanceof Error ? e.message : e}`)
   } finally {
     runAllLoading.value = false
+  }
+}
+
+/** 打开执行历史 */
+async function openRuns() {
+  runsVisible.value = true
+  runsLoading.value = true
+  try {
+    const d = await fetchRuns(50)
+    runRecords.value = d.runs || []
+  } catch (e) {
+    ElMessage.error(`加载历史失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    runsLoading.value = false
+  }
+}
+
+function fmtTs(ts: string): string {
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return ts
   }
 }
 
@@ -939,6 +1007,34 @@ onBeforeUnmount(() => {
     margin-left: auto;
     opacity: 0;
     color: var(--bd-primary, #00849c);
+  }
+}
+
+.runs-list {
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.run-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  width: 100%;
+  padding-right: 10px;
+
+  .run-name {
+    font-weight: 600;
+  }
+
+  .run-summary {
+    color: var(--bd-muted, #888);
+  }
+
+  .run-ts {
+    margin-left: auto;
+    color: var(--bd-muted, #888);
+    font-size: 11px;
   }
 }
 

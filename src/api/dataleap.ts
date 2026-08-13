@@ -100,3 +100,18 @@ export interface RunAllItem {
 export function runAll(): Promise<{ results: RunAllItem[]; message: string }> {
   return req('/run/all', { method: 'POST' })
 }
+
+export interface RunRecord {
+  id: string
+  ts: string
+  trigger: 'single' | 'topo' | 'cron'
+  nodeName: string
+  nodeType: string
+  summary: string
+  ok: boolean
+  results: RunAllItem[]
+}
+
+export function fetchRuns(limit = 50): Promise<{ runs: RunRecord[] }> {
+  return req(`/runs?limit=${limit}`)
+}

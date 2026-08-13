@@ -11,6 +11,7 @@ import config from './config.js'
 
 const DLEAP_DIR = path.join(path.dirname(import.meta.dirname), 'data', 'dleap')
 const NODES_FILE = path.join(DLEAP_DIR, 'nodes.json')
+const RUNS_FILE = path.join(DLEAP_DIR, 'runs.json')
 const RUN_DIR = path.join(DLEAP_DIR, 'run')
 
 const NODE_TYPES = ['sql', 'shell', 'spark']
@@ -39,6 +40,22 @@ function saveNodes(nodes) {
 }
 
 /** 返回列表视图(不含 content,减体积) */
+function loadRuns() {
+  ensureStore()
+  try {
+    return JSON.parse(fs.readFileSync(RUNS_FILE, 'utf-8')).runs || []
+  } catch {
+    return []
+  }
+}
+
+function saveRuns(runs) {
+  ensureStore()
+  const tmp = RUNS_FILE + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify({ runs }, null, 2), 'utf-8')
+  fs.renameSync(tmp, RUNS_FILE)
+}
+
 function listView(nodes) {
   return nodes.map((n) => ({
     id: n.id,
@@ -224,16 +241,27 @@ export function dataleapRouter() {
       env: { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' }
     }, (err, stdout, stderr) => {
       const killed = !!err && (err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL')
-      res.json({
-        code: 0,
-        data: {
-          stdout: String(stdout || ''),
-          stderr: String(stderr || ''),
-          exitCode: typeof err?.code === 'number' ? err.code : 0,
-          timedOut: killed,
-          costMs: Date.now() - t0
-        }
+      const data = {
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+        exitCode: typeof err?.code === 'number' ? err.code : 0,
+        timedOut: killed,
+        costMs: Date.now() - t0
+      }
+      // 写入执行历史
+      const runs = loadRuns()
+      runs.unshift({
+        id: randomUUID(),
+        ts: new Date().toISOString(),
+        trigger: 'single',
+        nodeName: n.name,
+        nodeType: n.type,
+        summary: `exit=${data.exitCode}${data.timedOut ? ' 超时' : ''} ${data.costMs}ms`,
+        ok: data.exitCode === 0 && !data.timedOut,
+        results: [{ id: n.id, name: n.name, type: n.type, ok: data.exitCode === 0 && !data.timedOut, stdout: data.stdout, stderr: data.stderr, costMs: data.costMs }]
       })
+      saveRuns(runs.slice(0, 200))
+      res.json({ code: 0, data })
     })
   })
 
@@ -318,7 +346,27 @@ export function dataleapRouter() {
       }
     }
     const okCount = results.filter((r) => r.ok).length
+    // 写入执行历史
+    const runs = loadRuns()
+    runs.unshift({
+      id: randomUUID(),
+      ts: new Date().toISOString(),
+      trigger: 'topo',
+      nodeName: '全部节点(按拓扑)',
+      nodeType: 'topo',
+      summary: `${okCount}/${results.length} 成功`,
+      ok: okCount === results.length,
+      results
+    })
+    saveRuns(runs.slice(0, 200))
     res.json({ code: 0, data: { results, message: `${okCount}/${results.length} 个节点执行成功` } })
+  })
+
+  // 执行历史(最近 100 条,含结果明细)
+  router.get('/runs', (req, res) => {
+    const runs = loadRuns()
+    const limit = Math.min(Number(req.query.limit) || 50, 200)
+    res.json({ code: 0, data: { runs: runs.slice(0, limit) } })
   })
 
   // 发布预览:按依赖拓扑生成 DS 工作流序列化(mock,不触发真实操作)
