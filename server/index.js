@@ -336,6 +336,23 @@ yarnRmProxy.on('proxyRes', (proxyRes, req, res) => {
         'g'
       )
       html = html.replace(fullUrlRe, (m, attr, q, _host, rest, q2) => `${attr}=${q}/yarniframe${rest || '/'}${q2}`)
+      // 指向其他白名单主机(NM hadoop-dn-0x:8042 日志等)的完整 URL → 动态代理。
+      // 否则 iframe 内点击 logs 会直连内网被拒(浏览器无法访问集群网段)。
+      const otherHostRe = new RegExp(
+        '(href|src)\\s*=\\s*(["\'])((?:https?:)?\\/\\/[^/"\']+)((?:\\/[^"\']*)?)(["\'])',
+        'g'
+      )
+      html = html.replace(otherHostRe, (all, attr, q, schemeHost, rest, q2) => {
+        try {
+          const u = new URL(schemeHost.startsWith('//') ? 'http:' + schemeHost : schemeHost)
+          if (rmHosts.includes(u.host)) return all // RM 自身交给 /yarniframe
+          if (!isYarnProxyAllowed(u.hostname)) return all
+          const full = (schemeHost.startsWith('//') ? 'http:' + schemeHost : schemeHost) + (rest || '')
+          return `${attr}=${q}/api/iframe-proxy?url=${encodeURIComponent(full)}${q2}`
+        } catch {
+          return all
+        }
+      })
     }
     delete proxyRes.headers['content-length']
     res.writeHead(proxyRes.statusCode, proxyRes.headers)
