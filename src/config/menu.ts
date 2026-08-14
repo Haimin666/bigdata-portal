@@ -19,6 +19,13 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
+    path: '/assistant',
+    title: '开发助手',
+    name: 'devAssistant',
+    icon: 'MagicStick',
+    kind: 'native'
+  },
+  {
     path: '/dataleap',
     title: 'DataLeap 实验',
     name: 'dataleap',

@@ -1,0 +1,931 @@
+<template>
+  <div class="da">
+    <!-- 左侧会话栏 -->
+    <aside class="da-sidebar">
+      <div class="da-brand">
+        <span class="da-logo">DA</span>
+        <span class="da-name">开发助手</span>
+        <button class="da-new" title="新建会话" @click="onNewSession">
+          <el-icon><Plus /></el-icon>
+        </button>
+      </div>
+      <div class="da-search">
+        <el-icon class="da-search__icon"><Search /></el-icon>
+        <input v-model="sessionQuery" class="da-search__input" type="search" placeholder="搜索会话…" />
+      </div>
+      <div class="da-sessions">
+        <div
+          v-for="s in filteredSessions"
+          :key="s.id"
+          class="da-session"
+          :class="{ 'da-session--active': s.id === activeId }"
+          @click="onSelect(s.id)"
+        >
+          <div class="da-session__main">
+            <span class="da-session__title">{{ s.title }}</span>
+            <span class="da-session__time">{{ relTime(s.updatedAt) }}</span>
+          </div>
+          <button class="da-session__del" title="删除会话" @click.stop="onDelete(s.id)">
+            <el-icon><Delete /></el-icon>
+          </button>
+        </div>
+        <div v-if="!filteredSessions.length" class="da-empty">暂无会话,点击右上角 + 新建</div>
+      </div>
+    </aside>
+
+    <!-- 右侧聊天区 -->
+    <section class="da-main">
+      <!-- 欢迎页 -->
+      <div v-if="!messages.length" class="da-welcome">
+        <div class="da-welcome__logo">DA</div>
+        <h2 class="da-welcome__title">开发助手</h2>
+        <p class="da-welcome__tag">基于大模型的数据平台开发助手 · SQL / 运维 / 排障</p>
+        <div class="da-welcome__ex">
+          <button v-for="ex in examples" :key="ex" class="da-ex" @click="sendExample(ex)">{{ ex }}</button>
+        </div>
+        <div class="da-welcome__hints">
+          <span><kbd>Enter</kbd> 发送</span>
+          <span><kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+        </div>
+      </div>
+
+      <!-- 消息流 -->
+      <div v-else ref="chatBox" class="da-chat" @click="onMainClick">
+        <div
+          v-for="m in messages"
+          :key="m.id"
+          class="da-msg"
+          :class="m.role === 'user' ? 'da-msg--user' : 'da-msg--assistant'"
+        >
+          <div class="da-msg__bubble">
+            <template v-if="m.role === 'assistant'">
+              <div v-if="m.thinking" class="da-think" @click="toggleThink(m)">
+                <span class="da-think__head">
+                  <el-icon class="da-think__icon">
+                    <CaretRight v-if="m.thinkCollapsed" /><CaretBottom v-else />
+                  </el-icon>
+                  思考过程
+                </span>
+                <div v-if="!m.thinkCollapsed" class="da-think__body">{{ m.thinking }}</div>
+              </div>
+              <div class="da-md" v-html="renderMd(m.content)"></div>
+              <span v-if="generating && m.id === lastMsgId" class="da-cursor">▍</span>
+            </template>
+            <template v-else>{{ m.content }}</template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部输入区 -->
+      <footer class="da-composer-wrap">
+        <div class="da-composer" :class="{ 'da-composer--busy': generating }">
+          <span class="da-composer__caret">›</span>
+          <textarea
+            v-model="draft"
+            ref="inputEl"
+            class="da-composer__input"
+            :placeholder="generating ? '正在生成…' : '输入问题,Enter 发送,Shift+Enter 换行'"
+            :disabled="generating"
+            rows="1"
+            @keydown="onKeydown"
+          ></textarea>
+          <button
+            v-if="!generating"
+            class="da-composer__btn da-composer__btn--send"
+            :disabled="!draft.trim()"
+            title="发送 (Enter)"
+            @click="send()"
+          >
+            <el-icon><Position /></el-icon>
+          </button>
+          <button v-else class="da-composer__btn da-composer__btn--stop" title="停止生成" @click="stop()">
+            <el-icon><VideoPause /></el-icon>
+          </button>
+        </div>
+      </footer>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onUnmounted, ref } from 'vue'
+import {
+  CaretBottom,
+  CaretRight,
+  Delete,
+  Plus,
+  Position,
+  Search,
+  VideoPause
+} from '@element-plus/icons-vue'
+import {
+  createSession,
+  deleteSession,
+  listMessages,
+  listSessions,
+  stopChat,
+  streamChat,
+  touchSession,
+  type AssistantSession,
+  type ChatMessage
+} from '@/api/assistant'
+
+const examples = [
+  '写一个 SQL:统计近 7 天各分区记录数',
+  '帮我排查 Spark 任务卡住的问题',
+  '分析这段执行计划有什么优化空间'
+]
+
+const sessions = ref<AssistantSession[]>([])
+const activeId = ref('')
+const messages = ref<ChatMessage[]>([])
+const draft = ref('')
+const sessionQuery = ref('')
+const generating = ref(false)
+const chatBox = ref<HTMLElement | null>(null)
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+
+let abortCtrl: AbortController | null = null
+
+const filteredSessions = computed(() => {
+  const q = sessionQuery.value.trim().toLowerCase()
+  if (!q) return sessions.value
+  return sessions.value.filter((s) => s.title.toLowerCase().includes(q))
+})
+const lastMsgId = computed(() => messages.value[messages.value.length - 1]?.id ?? '')
+
+// ── 会话管理 ─────────────────────────────────────────────
+async function loadSessions() {
+  sessions.value = await listSessions()
+  if (activeId.value && !sessions.value.some((s) => s.id === activeId.value)) {
+    activeId.value = ''
+    messages.value = []
+  }
+}
+
+async function onNewSession() {
+  const s = await createSession()
+  sessions.value.unshift(s)
+  await selectSession(s.id)
+}
+
+async function onSelect(id: string) {
+  if (id !== activeId.value) await selectSession(id)
+}
+
+async function selectSession(id: string) {
+  abort()
+  activeId.value = id
+  messages.value = await listMessages(id)
+  await nextTick()
+  scrollBottom(true)
+}
+
+async function onDelete(id: string) {
+  await deleteSession(id)
+  sessions.value = sessions.value.filter((s) => s.id !== id)
+  if (id === activeId.value) {
+    activeId.value = ''
+    messages.value = []
+    if (sessions.value.length) await selectSession(sessions.value[0].id)
+  }
+}
+
+// ── 发送 / 停止 ──────────────────────────────────────────
+function sendExample(text: string) {
+  draft.value = text
+  void send()
+}
+
+async function send() {
+  const text = draft.value.trim()
+  if (!text || generating.value) return
+  draft.value = ''
+  if (!activeId.value) {
+    const s = await createSession(text.slice(0, 24))
+    sessions.value.unshift(s)
+    activeId.value = s.id
+  }
+  const sid = activeId.value
+  const userMsg: ChatMessage = { id: genId(), role: 'user', content: text, createdAt: Date.now() }
+  const asstMsg: ChatMessage = {
+    id: genId(),
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    createdAt: Date.now()
+  }
+  messages.value.push(userMsg, asstMsg)
+  await touchSession(sid, text.slice(0, 24))
+  const t = sessions.value.find((s) => s.id === sid)
+  if (t) t.title = text.slice(0, 24)
+  // 若用户未输入标题,用首条消息刷新会话标题
+  generating.value = true
+  abortCtrl = new AbortController()
+  await nextTick()
+  scrollBottom(true)
+  try {
+    await streamChat({
+      sessionId: sid,
+      message: text,
+      onDelta: (d) => {
+        asstMsg.content += d
+        scrollBottom()
+      },
+      onThinking: (th) => {
+        asstMsg.thinking = th
+        scrollBottom()
+      },
+      signal: abortCtrl.signal
+    })
+    // 标题未定义时用首条消息前 24 字
+    const s = sessions.value.find((x) => x.id === sid)
+    if (s && (!s.title || s.title === '新会话')) s.title = text.slice(0, 24)
+    await touchSession(sid)
+  } catch {
+    /* abort 或网络错误,保留已生成内容 */
+  } finally {
+    generating.value = false
+    abortCtrl = null
+  }
+}
+
+function stop() {
+  abort()
+  void stopChat(activeId.value)
+}
+
+function abort() {
+  abortCtrl?.abort()
+  abortCtrl = null
+  generating.value = false
+}
+
+// ── 输入区 ───────────────────────────────────────────────
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    void send()
+  }
+  // 输入框自动增高
+  const el = inputEl.value
+  if (el) {
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px'
+  }
+}
+
+// ── 工具 ─────────────────────────────────────────────────
+function genId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function relTime(ts: number): string {
+  const diff = Date.now() - ts
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = new Date(ts)
+  return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+function toggleThink(m: ChatMessage) {
+  m.thinkCollapsed = !m.thinkCollapsed
+}
+
+function scrollBottom(force = false) {
+  const el = chatBox.value
+  if (!el) return
+  // 用户上滑查看历史时不打扰;force(新消息/发送时)强制到底
+  if (!force && el.scrollHeight - el.scrollTop - el.clientHeight > 120) return
+  void nextTick(() => {
+    if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight
+  })
+}
+
+// ── markdown 轻量渲染(先转义 HTML 再解析结构,防 XSS)──────
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+function inlineMd(s: string): string {
+  let t = escapeHtml(s)
+  // 行内代码(code 优先,避免 ** 等被解析)
+  t = t.replace(/`([^`]+)`/g, '<code class="md-ic">$1</code>')
+  // 链接
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+  // 粗体 / 斜体
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+  return t
+}
+
+function renderMd(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let i = 0
+  let codeBuf: string[] = []
+  let inCode = false
+  let codeLang = ''
+
+  const flushCode = () => {
+    if (!codeBuf.length) return
+    out.push(
+      `<div class="md-codeblock"><div class="md-codeblock__head"><span>${escapeHtml(codeLang || 'code')}</span><button class="md-copy-btn" type="button">复制</button></div><pre><code>${codeBuf.join('\n')}</code></pre></div>`
+    )
+    codeBuf = []
+  }
+
+  for (; i < lines.length; i++) {
+    const line = lines[i]
+    const fence = line.match(/^```(\w*)/)
+    if (fence) {
+      if (inCode) {
+        flushCode()
+        inCode = false
+        codeLang = ''
+      } else {
+        inCode = true
+        codeLang = fence[1] || ''
+      }
+      continue
+    }
+    if (inCode) {
+      codeBuf.push(escapeHtml(line))
+      continue
+    }
+    const t = line.trim()
+    if (!t) {
+      out.push('<div class="md-p"></div>')
+      continue
+    }
+    if (/^\|.*\|$/.test(t)) {
+      // 表格(连续行收集)
+      const rows: string[] = [t]
+      while (i + 1 < lines.length && /^\|.*\|$/.test(lines[i + 1].trim())) {
+        rows.push(lines[++i].trim())
+      }
+      const cells = (r: string) =>
+        r
+          .replace(/^\||\|$/g, '')
+          .split('|')
+          .map((c) => inlineMd(c.trim()))
+      const isSep = (r: string) => /^[\s:|-]+$/.test(r.replace(/\|/g, ''))
+      let html = '<table class="md-table">'
+      rows.forEach((r, idx) => {
+        if (idx === 1 && isSep(r)) return
+        const tag = idx === 0 ? 'th' : 'td'
+        html += `<tr>${cells(r).map((c) => `<${tag}>${c}</${tag}>`).join('')}</tr>`
+      })
+      html += '</table>'
+      out.push(html)
+      continue
+    }
+    if (/^#{1,4}\s/.test(t)) {
+      const level = t.match(/^(#{1,4})\s/)![1].length
+      out.push(`<h${Math.min(level + 2, 4)} class="md-h">${inlineMd(t.replace(/^#{1,4}\s/, ''))}</h${Math.min(level + 2, 4)}>`)
+      continue
+    }
+    if (/^>\s?/.test(t)) {
+      out.push(`<blockquote class="md-quote">${inlineMd(t.replace(/^>\s?/, ''))}</blockquote>`)
+      continue
+    }
+    if (/^[-*]\s/.test(t) || /^\d+\.\s/.test(t)) {
+      const ordered = /^\d+\.\s/.test(t)
+      const item = inlineMd(t.replace(/^[-*]\s/, '').replace(/^\d+\.\s/, ''))
+      if (ordered) out.push(`<div class="md-li md-li--o">${item}</div>`)
+      else out.push(`<div class="md-li">${item}</div>`)
+      continue
+    }
+    out.push(`<div class="md-p">${inlineMd(t)}</div>`)
+  }
+  if (inCode) flushCode()
+  return out.join('\n')
+}
+
+// 复制代码块(事件委托:点击 .md-copy-btn 复制同块 pre 内容)
+function onCopyClick(e: MouseEvent) {
+  const btn = (e.target as HTMLElement).closest('.md-copy-btn') as HTMLElement | null
+  if (!btn) return
+  const pre = btn.closest('.md-codeblock')?.querySelector('pre')
+  if (!pre) return
+  void navigator.clipboard.writeText(pre.textContent ?? '').then(() => {
+    const old = btn.textContent
+    btn.textContent = '已复制'
+    setTimeout(() => (btn.textContent = old), 1200)
+  })
+}
+
+// 主区点击委托:代码块复制按钮
+function onMainClick(e: MouseEvent) {
+  onCopyClick(e)
+}
+
+// ── 生命周期 ─────────────────────────────────────────────
+void loadSessions()
+
+onUnmounted(() => {
+  abort()
+})
+</script>
+
+<style scoped>
+.da {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--bd-bg);
+  color: var(--bd-text);
+  font-size: 13px;
+}
+
+/* ── 左侧会话栏 ── */
+.da-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--bd-border);
+  background: var(--bd-sidebar);
+}
+.da-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--bd-border);
+}
+.da-logo {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
+  color: #fff;
+  font-family: var(--bd-font);
+}
+.da-name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 14px;
+}
+.da-new {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--bd-border);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--bd-text);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.da-new:hover {
+  border-color: var(--bd-primary);
+  color: var(--bd-primary);
+}
+.da-search {
+  position: relative;
+  padding: 10px 10px 6px;
+}
+.da-search__icon {
+  position: absolute;
+  left: 19px;
+  top: 50%;
+  transform: translateY(-40%);
+  color: var(--bd-muted);
+  font-size: 13px;
+}
+.da-search__input {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px 0 30px;
+  border: 1px solid var(--bd-border);
+  border-radius: 7px;
+  background: var(--bd-panel);
+  color: var(--bd-text);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.18s ease;
+}
+.da-search__input:focus {
+  border-color: var(--bd-primary);
+}
+.da-sessions {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+}
+.da-session {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.da-session:hover {
+  background: var(--bd-panel-sub);
+}
+.da-session--active {
+  background: color-mix(in srgb, var(--bd-primary) 14%, transparent);
+  color: var(--bd-primary);
+}
+.da-session__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.da-session__title {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-session__time {
+  font-size: 11px;
+  color: var(--bd-muted);
+}
+.da-session__del {
+  display: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--bd-muted);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+.da-session:hover .da-session__del {
+  display: flex;
+}
+.da-session__del:hover {
+  color: #f56c6c;
+  background: color-mix(in srgb, #f56c6c 12%, transparent);
+}
+.da-empty {
+  padding: 20px 10px;
+  text-align: center;
+  color: var(--bd-muted);
+  font-size: 12px;
+}
+
+/* ── 右侧聊天区 ── */
+.da-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.da-welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  text-align: center;
+}
+.da-welcome__logo {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
+  color: #fff;
+  font-family: var(--bd-font);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--bd-primary) 35%, transparent);
+}
+.da-welcome__title {
+  margin: 8px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+.da-welcome__tag {
+  color: var(--bd-muted);
+  font-size: 13px;
+}
+.da-welcome__ex {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 22px;
+  max-width: 620px;
+}
+.da-ex {
+  padding: 9px 14px;
+  border: 1px solid var(--bd-border);
+  border-radius: 9px;
+  background: var(--bd-panel);
+  color: var(--bd-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.da-ex:hover {
+  border-color: var(--bd-primary);
+  color: var(--bd-primary);
+  transform: translateY(-1px);
+}
+.da-welcome__hints {
+  margin-top: 26px;
+  display: flex;
+  gap: 18px;
+  color: var(--bd-muted);
+  font-size: 11px;
+}
+.da-welcome__hints kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--bd-border);
+  border-radius: 4px;
+  background: var(--bd-panel);
+  font-family: var(--bd-font);
+}
+
+/* 消息流 */
+.da-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 18px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.da-msg {
+  display: flex;
+  max-width: 860px;
+  width: 100%;
+}
+.da-msg--user {
+  justify-content: flex-end;
+  align-self: flex-end;
+}
+.da-msg--assistant {
+  justify-content: flex-start;
+  align-self: flex-start;
+}
+.da-msg__bubble {
+  max-width: 100%;
+  border-radius: 12px;
+  padding: 10px 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.da-msg--user .da-msg__bubble {
+  background: var(--bd-primary);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.da-msg--assistant .da-msg__bubble {
+  background: var(--bd-panel);
+  border: 1px solid var(--bd-border);
+  border-bottom-left-radius: 4px;
+  color: var(--bd-text);
+  white-space: normal;
+}
+.da-cursor {
+  display: inline-block;
+  color: var(--bd-primary);
+  animation: da-blink 0.9s steps(1) infinite;
+}
+@keyframes da-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 思考折叠块 */
+.da-think {
+  margin-bottom: 10px;
+  border: 1px dashed var(--bd-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--bd-panel-sub);
+}
+.da-think__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--bd-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.da-think__icon {
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+.da-think__body {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--bd-muted);
+  white-space: pre-wrap;
+  border-top: 1px dashed var(--bd-border);
+  padding-top: 6px;
+}
+
+/* markdown 渲染 */
+.da-md {
+  font-size: 13px;
+}
+.da-md :deep(.md-p) {
+  margin: 4px 0;
+}
+.da-md :deep(.md-h) {
+  margin: 10px 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.da-md :deep(.md-quote) {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--bd-primary);
+  background: var(--bd-panel-sub);
+  color: var(--bd-muted);
+  border-radius: 0 6px 6px 0;
+}
+.da-md :deep(.md-li) {
+  padding-left: 16px;
+  position: relative;
+}
+.da-md :deep(.md-li)::before {
+  content: '•';
+  position: absolute;
+  left: 4px;
+  color: var(--bd-primary);
+}
+.da-md :deep(.md-li--o)::before {
+  content: '›';
+}
+.da-md :deep(.md-ic) {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bd-panel-sub);
+  border: 1px solid var(--bd-border);
+  font-family: var(--bd-font);
+  font-size: 12px;
+}
+.da-md :deep(.md-table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+  font-size: 12px;
+}
+.da-md :deep(.md-table th),
+.da-md :deep(.md-table td) {
+  border: 1px solid var(--bd-border);
+  padding: 5px 10px;
+  text-align: left;
+}
+.da-md :deep(.md-table th) {
+  background: var(--bd-table-header);
+  font-weight: 600;
+}
+.da-md :deep(a) {
+  color: var(--bd-primary);
+}
+.da-md :deep(.md-codeblock) {
+  margin: 8px 0;
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0d1420;
+}
+.da-md :deep(.md-codeblock__head) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: color-mix(in srgb, #0d1420 90%, var(--bd-primary) 8%);
+  border-bottom: 1px solid var(--bd-border);
+  font-size: 11px;
+  color: var(--bd-muted);
+  font-family: var(--bd-font);
+}
+.da-md :deep(.md-copy-btn) {
+  border: 1px solid var(--bd-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--bd-muted);
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.da-md :deep(.md-copy-btn:hover) {
+  color: var(--bd-primary);
+  border-color: var(--bd-primary);
+}
+.da-md :deep(.md-codeblock pre) {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--bd-font);
+  font-size: 12px;
+  line-height: 1.6;
+  color: #d6e6f2;
+}
+
+/* ── 输入区 ── */
+.da-composer-wrap {
+  padding: 10px 18px 14px;
+}
+.da-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 860px;
+  margin: 0 auto;
+  background: var(--bd-panel);
+  border: 1px solid var(--bd-border);
+  border-radius: 14px;
+  padding: 8px 8px 8px 14px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--bd-border) 40%, transparent);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.da-composer:focus-within {
+  border-color: var(--bd-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bd-primary) 18%, transparent);
+}
+.da-composer--busy {
+  border-color: var(--bd-primary);
+}
+.da-composer__caret {
+  color: var(--bd-primary);
+  font-family: var(--bd-font);
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1;
+  padding-bottom: 8px;
+}
+.da-composer__input {
+  flex: 1;
+  border: none;
+  background: none;
+  color: var(--bd-text);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 0;
+  outline: none;
+  resize: none;
+  min-height: 24px;
+  max-height: 140px;
+  font-family: inherit;
+}
+.da-composer__input::placeholder {
+  color: var(--bd-muted);
+}
+.da-composer__btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.da-composer__btn--send {
+  background: var(--bd-primary);
+  color: #fff;
+}
+.da-composer__btn--send:hover:not(:disabled) {
+  transform: scale(1.06);
+}
+.da-composer__btn--send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.da-composer__btn--stop {
+  background: color-mix(in srgb, #f56c6c 15%, var(--bd-panel));
+  color: #f56c6c;
+}
+.da-composer__btn--stop:hover {
+  background: #f56c6c;
+  color: #fff;
+}
+</style>
