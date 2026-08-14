@@ -59,6 +59,11 @@ const router = createRouter({
           name: 'dataleap',
           component: () => import('@/views/dataleap/DataLeapView.vue')
         },
+        {
+          path: 'assistant',
+          name: 'devAssistant',
+          component: () => import('@/views/assistant/DevAssistantView.vue')
+        },
         ...subappRoutes
       ]
     },
