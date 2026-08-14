@@ -475,10 +475,9 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
     return DbError(engine, "DatabaseError", None, msg)
 
 
-def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
-    """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
-    SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
-    timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。"""
+def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None):
+    """解析/校验 SQL,返回 (ds, clean_sql, is_select, limit, q_timeout, start)。
+    供 fetch(同步)与 DbJobManager(异步,需持有连接才能取消)共用。"""
     ds = get_datasource(db)
     clean_sql = sql.strip().rstrip(";").strip()
     # 查询类(可追加行数限制)vs 写语句
@@ -506,9 +505,54 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]
             detail=f"datasource '{ds.name}' is read-only (readOnly:true), write SQL not allowed",
         )
     limit = enforce_limit(clean_sql)
-
-    start = time.time()
     q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
+    return ds, clean_sql, is_select, limit, q_timeout, time.time()
+
+
+def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: int, start: float) -> Dict[str, Any]:
+    """在已建立的连接上执行(连接由调用方管理,以便异步 job 取消时 close 中断)。"""
+    if is_select:
+        # 查询类:追加行数限制并取结果集
+        row_mode = ds.effective_row_limit(conn)
+        if not LIMIT_RE.search(clean_sql):
+            clean_sql = append_row_limit(clean_sql, limit, row_mode)
+        cur = conn.cursor()
+        cur.execute(clean_sql)
+        if ds.type == "mysql":
+            rows = cur.fetchall()  # DictCursor → list[dict]
+            truncated = len(rows) > limit
+            rows = rows[:limit]
+            columns = list(rows[0].keys()) if rows else []
+        else:
+            fetched = cur.fetchmany(limit + 1)
+            truncated = len(fetched) > limit
+            rows = _rows_to_dicts(fetched[:limit], cur.description)
+            columns = list(rows[0].keys()) if rows else []
+        cur.close()
+        return {
+            "columns": columns,
+            "rows": rows,
+            "costMs": int((time.time() - start) * 1000),
+            "truncated": truncated,
+        }
+    # 写语句(INSERT/UPDATE/DELETE):执行并返回受影响行数
+    cur = conn.cursor()
+    affected = cur.execute(clean_sql)
+    conn.commit()
+    cur.close()
+    return {
+        "columns": ["affected_rows"],
+        "rows": [{"affected_rows": affected}],
+        "costMs": int((time.time() - start) * 1000),
+        "truncated": False,
+    }
+
+
+def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
+    """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
+    SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
+    timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。"""
+    ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(sql, db, timeout_ms)
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -517,36 +561,7 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]
             de = DbError(ds.type, "ConnectError", de.error_code, de.message)
         raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}")
     try:
-        # 查询类:追加行数限制并取结果集;写语句:直接执行取受影响行数
-        if is_select:
-            row_mode = ds.effective_row_limit(conn)
-            if not LIMIT_RE.search(clean_sql):
-                clean_sql = append_row_limit(clean_sql, limit, row_mode)
-            cur = conn.cursor()
-            cur.execute(clean_sql)
-            if ds.type == "mysql":
-                rows = cur.fetchall()  # DictCursor → list[dict]
-                truncated = len(rows) > limit
-                rows = rows[:limit]
-                columns = list(rows[0].keys()) if rows else []
-            else:
-                fetched = cur.fetchmany(limit + 1)
-                truncated = len(fetched) > limit
-                rows = _rows_to_dicts(fetched[:limit], cur.description)
-                columns = list(rows[0].keys()) if rows else []
-            cur.close()
-        else:
-            # 写语句(INSERT/UPDATE/DELETE):执行并返回受影响行数
-            cur = conn.cursor()
-            affected = cur.execute(clean_sql)
-            conn.commit()
-            cur.close()
-            return {
-                "columns": ["affected_rows"],
-                "rows": [{"affected_rows": affected}],
-                "costMs": int((time.time() - start) * 1000),
-                "truncated": False,
-            }
+        return _execute_query(ds, conn, clean_sql, is_select, limit, start)
     except Exception as e:
         de = _extract_sql_error(e, ds.type)
         raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}")
@@ -555,14 +570,6 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]
             conn.close()
         except Exception:
             pass
-
-    cost_ms = int((time.time() - start) * 1000)
-    return {
-        "columns": columns,
-        "rows": rows,
-        "costMs": cost_ms,
-        "truncated": truncated,
-    }
 
 
 # ── 接口 ──────────────────────────────────────────────────────
@@ -609,7 +616,7 @@ class DbJobManager:
                 "id": job_id, "state": "queued", "db": db, "sql": sql,
                 "timeout_ms": timeout_ms, "created_at": time.time(),
                 "started_at": None, "finished_at": None,
-                "result": None, "error": None,
+                "result": None, "error": None, "conn": None, "cancel_requested": False,
             }
         threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
         return job_id
@@ -618,16 +625,35 @@ class DbJobManager:
         j = self._jobs.get(job_id)
         if not j:
             return
+        if j.get("cancel_requested"):  # 提交后未开始即被取消
+            j["state"] = "cancelled"
+            j["finished_at"] = time.time()
+            return
         j["state"] = "running"
         j["started_at"] = time.time()
+        conn = None
         try:
             # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
-            result = fetch(j["sql"], j["db"], j["timeout_ms"])
+            ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"])
+            conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+            j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
+            try:
+                result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
+            finally:
+                j["conn"] = None
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             j["result"] = result
             j["state"] = "done"
         except Exception as e:
-            j["error"] = str(e)[:2000]
-            j["state"] = "failed"
+            if j.get("cancel_requested") or (conn is not None and str(e).find("closed") >= 0):
+                # 取消导致连接关闭抛异常 → 视为用户主动停止
+                j["state"] = "cancelled"
+            else:
+                j["error"] = str(e)[:2000]
+                j["state"] = "failed"
         finally:
             j["finished_at"] = time.time()
             self._gc()
@@ -644,15 +670,22 @@ class DbJobManager:
             }
 
     def cancel(self, job_id: str) -> bool:
-        """取消 queued/running 的 job。运行中的底层查询无法强制 kill(只读,
-        继续跑完无害),标记 cancelled 后前端停止轮询、结果丢弃。"""
+        """取消 queued/running 的 job:标记 cancelled 并关闭底层连接中断查询(真停止)。
+
+        pymysql/oracledb 连接可在其他线程 close,执行线程的 read/execute 会抛异常,
+        _run 捕获后判定为 cancelled(用户主动停止),而非 failed。"""
         with self._lock:
             j = self._jobs.get(job_id)
             if not j or j["state"] not in ("queued", "running"):
                 return False
-            j["state"] = "cancelled"
-            j["finished_at"] = time.time()
-            return True
+            j["cancel_requested"] = True
+            conn = j.get("conn")
+        if conn is not None:
+            try:
+                conn.close()  # 中断正在执行的查询
+            except Exception:
+                pass
+        return True
 
     def _gc(self) -> None:
         with self._lock:
