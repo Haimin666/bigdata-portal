@@ -523,6 +523,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopSparkLogPolling()
+  logResizeObserver?.disconnect()
+  logResizeObserver = null
   if (cm) {
     const el = cm.getWrapperElement()
     el.remove()
@@ -534,8 +536,31 @@ onUnmounted(() => {
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 const sparkLogBox = ref<HTMLElement | null>(null)
+const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度动态计算,填满即滚动打印
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
+let logResizeObserver: ResizeObserver | null = null
+const LOG_LINE_HEIGHT = 20 // 12px 字体 × 1.55 行高 ≈ 18.6px,取整留余量
+
+// 日志面板大小变化 → 重算保留行数:可视区能显示多少行就保留多少行(终端式滚动打印),
+// 容器被拖高/放大时能看到更多历史,缩小/折叠时自动收敛内存。
+function updateMaxLogLines() {
+  const el = sparkLogBox.value
+  if (!el) return
+  const visible = Math.floor((el.clientHeight - 24) / LOG_LINE_HEIGHT) // 减 padding 上下 12px×2
+  maxLogLines.value = Math.max(50, Math.min(500, visible))
+}
+
+// 引擎日志按布局高度自动贴底滚动:只要日志面板处于激活态,内容增量/切换/挂载后
+// 都自动滚到最底部让最新日志始终可见,无需手动拖拽滚动条到底。
+// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚才能精确到底。
+function scrollLogToBottom() {
+  const el = sparkLogBox.value
+  if (!el) return
+  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
+  })))
+}
 
 // 引擎日志按布局高度自动贴底滚动:只要日志面板处于激活态,内容增量/切换/挂载后
 // 都自动滚到最底部让最新日志始终可见,无需手动拖拽滚动条到底。
@@ -552,9 +577,16 @@ function scrollLogToBottom() {
 watch(() => activePane.value, (pane) => {
   if (pane === 0) scrollLogToBottom()
 })
-// 日志容器挂载(首次渲染)后滚到底
+// 日志容器挂载(首次渲染)后滚到底,并挂 ResizeObserver 跟踪容器尺寸变化
 watch(sparkLogBox, (el) => {
-  if (el && activePane.value === 0) scrollLogToBottom()
+  logResizeObserver?.disconnect()
+  logResizeObserver = null
+  if (el) {
+    updateMaxLogLines()
+    logResizeObserver = new ResizeObserver(() => updateMaxLogLines())
+    logResizeObserver.observe(el)
+    if (activePane.value === 0) scrollLogToBottom()
+  }
 })
 // 日志内容增量/清空/裁剪时跟随最新(仅日志面板激活时)
 watch(sparkLogText, () => {
@@ -569,9 +601,9 @@ async function pollSparkLogs() {
     if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
     if (data.content) {
       sparkLogText.value += data.content
-      // 只保留最近 200 行(引擎日志默认 tail 200 条,一直滚动展示最新)
+      // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
       const lines = sparkLogText.value.split('\n')
-      if (lines.length > 200) sparkLogText.value = lines.slice(-200).join('\n')
+      if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
     }
     sparkLogOffsets.value = data.offsets
   } catch {
