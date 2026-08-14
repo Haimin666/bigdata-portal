@@ -13,7 +13,7 @@
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD |
-| 网关 | `server/index.js` | `/api/db*` 透传、`/api/dbquery/query`(X-Spark-Token)、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway)、`/api/scripts` |
+| 网关 | `server/index.js` | `/api/db*` 透传(不含 `/jobs`,提交走专用路由)、`/api/dbquery/query` 与 `/api/db/jobs`(X-Spark-Token)、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway)、`/api/scripts` |
 | 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发) |
 | 服务 | `services/db-proxy/spark_engine.py` | 常驻 SparkSession 执行 |
 | 服务 | `services/db-proxy/flink_engine.py` / `flink_prejob.py` / `flink_connectors.py` | Flink 三通道 |
@@ -22,7 +22,7 @@
 
 | 引擎 | 通道 | 写权限 | 超时 | 备注 |
 |---|---|---|---|---|
-| mysql/oracle/doris | db-proxy `/query` | 需写解锁(网关校验 + db-proxy 只读白名单) | db-proxy `queryTimeout` | 直连 |
+| mysql/oracle/doris | db-proxy `/query`(同步)/ `/jobs`(异步任务) | 需写解锁(网关 `/api/dbquery/query` 与 `/api/db/jobs` 均校验 `X-Spark-Token`;db-proxy 异步路径补多语句/表白名单) | db-proxy `queryTimeout`;异步默认 1h 可配 | 直连;异步任务提交由网关专用路由处理(非透传),EXEC_GATES 拦 viewer |
 | sparksql | db-proxy `/spark/query`(常驻 client session) | 需 `X-Spark-Token`(isSparkWriteSql 检测) | **前端/门户/db-proxy 统一 120s**,超时自动 cancelJobGroup | 串行锁;FileNotFound 自动 REFRESH 重试一次 |
 | pyspark | 同上 `kind=pyspark` | 必须解锁 | 同上 | 前端已移除入口,后端保留给 Jupyter |
 | flinksql | db-proxy `/flink/query` | 必须解锁(所有 flink 任务) | `queryTimeout`(默认 300s) | 流/批双模式;流查询 collect 到 limit 行返回 |
@@ -31,6 +31,7 @@
 
 - **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink` 取消当前引擎 job
 - **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab
+- **结果复制**:单元格(含 NULL)点击复制;表头列名 hover 显示 ⧉ 图标点击复制列名
 - **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停
 - **解锁体系**:写 SQL 时若未解锁,弹密码框(`/api/spark/auth` 校验 `sparkWritePassword`,签发 12h token,存 sessionStorage)
 - **编辑器**:CodeMirror 5,自实现括号补全/Tab 缩进/Shift+Tab,主题跟随全局

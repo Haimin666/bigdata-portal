@@ -90,11 +90,14 @@ export async function queryDb(db: string, sql: string, writeToken?: string): Pro
 }
 
 // ── mysql/oracle 异步任务(慢查询/大查询,规避公司网关 60s 超时)──
-/** 异步提交 mysql/oracle 查询:立即返回 jobId(不阻塞等结果) */
-export async function submitDbJob(db: string, sql: string, timeoutMs = 3600000): Promise<{ jobId: string }> {
+/** 异步提交 mysql/oracle 查询:立即返回 jobId(不阻塞等结果)
+ *  写 SQL 需 X-Spark-Token 解锁(网关 /api/db/jobs 校验,与 /api/dbquery/query 同防线) */
+export async function submitDbJob(db: string, sql: string, timeoutMs = 3600000, writeToken?: string): Promise<{ jobId: string }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
   const res = await fetch('/api/db/jobs', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ db, sql, timeoutMs })
   })
   if (!res.ok) {

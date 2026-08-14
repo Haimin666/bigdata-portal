@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import G6 from '@antv/g6'
 import {
   fetchWorkflowTree,
@@ -363,6 +363,22 @@ async function doRerun() {
   if (!nodes.length) {
     ElMessage.warning('未勾选可重跑节点')
     return
+  }
+  // 操作确认:级联重跑会真实触发实例重跑/新建(无实例自动新建),误触影响生产工作流
+  const newCount = nodes.filter((n) => !n.instanceId).length
+  const list = nodes.map((n) =>
+    `· ${n.processName}${n.instanceId ? `(实例 ${n.instanceId})` : '(将新建实例)'}`
+  )
+  const preview = list.length > 10 ? [...list.slice(0, 10), `… 等共 ${list.length} 个`] : list
+  try {
+    await ElMessageBox.confirm(
+      `确定对以下 ${nodes.length} 个工作流执行级联重跑吗?\n${preview.join('\n')}` +
+        (newCount ? `\n(其中 ${newCount} 个无近期实例,将自动新建)` : ''),
+      '级联重跑确认',
+      { confirmButtonText: '确认重跑', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return // 用户取消
   }
   try {
     const results = await rerunCascade(nodes)

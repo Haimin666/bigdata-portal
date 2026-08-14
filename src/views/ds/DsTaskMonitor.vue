@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Refresh, View } from '@element-plus/icons-vue'
@@ -19,7 +19,7 @@ import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import DsDepsDialog from './DsDepsDialog.vue'
-import { searchWorkflows, rerunInstances } from '@/api/dsDeps'
+import { searchWorkflows, rerunInstances, rerunFromNode } from '@/api/dsDeps'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -267,6 +267,10 @@ function instProject<T>(row: T): string {
 }
 
 /** 展开工作流实例行:加载任务列表 + 并发解析 YARN appId(限 4 路,避免日志接口并发过高卡顿) */
+let alive = true // 组件存活标记:关闭 tab 后丢弃在途解析结果
+onUnmounted(() => {
+  alive = false
+})
 async function onExpandChange(row: DsProcessInstance, expanded: boolean) {
   const r = row as unknown as { _tasks?: DsTaskInstance[]; _tasksLoading?: boolean }
   if (!expanded || r._tasks) return
@@ -284,6 +288,7 @@ async function onExpandChange(row: DsProcessInstance, expanded: boolean) {
   let cursor = 0
   const worker = async () => {
     while (cursor < tasks.length) {
+      if (!alive) return // 组件已卸载,丢弃剩余解析
       const t = tasks[cursor++] as DsTaskInstance & { _yarnAppId?: string }
       t._yarnAppId = (await resolveYarnAppId(t.id)) ?? undefined
     }
@@ -425,12 +430,21 @@ async function rerunAllFailed() {
 }
 
 // ── 任务节点级操作(单任务重跑 / 从节点级联)─────────────────
-/** 从任务实例提取节点定义 id(taskJson.id,如 tasks-41739) */
+/** 从任务实例提取节点定义 id(taskJson.id,如 tasks-41739);taskJson 非法时返回 null */
 function taskNodeId(t: DsTaskInstance): string | null {
   const tj = t.taskJson
   if (!tj) return null
-  const id = typeof tj === 'string' ? (JSON.parse(tj)?.id ?? null) : (tj.id ?? null)
-  return id ? String(id) : null
+  try {
+    const id = typeof tj === 'string' ? (JSON.parse(tj)?.id ?? null) : (tj.id ?? null)
+    return id ? String(id) : null
+  } catch {
+    return null // taskJson 非法 JSON,视为无节点 id
+  }
+}
+
+/** 仅放行 http(s) 链接(海豚返回的 appLink 等外部数据,防 javascript: 等协议注入) */
+function safeHttpUrl(u: unknown): string {
+  return typeof u === 'string' && /^https?:\/\//i.test(u) ? u : ''
 }
 
 /** 单任务重跑 / 从节点级联:start-process-instance + startNodeList=该节点 */
@@ -451,17 +465,11 @@ async function onRerunFromTask(t: DsTaskInstance, cascade: boolean) {
     return
   }
   try {
-    const res = await fetch('/api/ds-deps/rerun-from-node', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectName: instProject(t),
-        processInstanceId: t.processInstanceId,
-        startNodeId: nodeId
-      })
+    await rerunFromNode({
+      projectName: instProject(t),
+      processInstanceId: t.processInstanceId,
+      startNodeId: nodeId
     })
-    const body = (await res.json()) as { code?: number; msg?: string }
-    if (body.code !== 0) throw new Error(body.msg || '重跑失败')
     ElMessage.success(`${label}成功`)
     load()
   } catch (e) {
@@ -702,9 +710,9 @@ onMounted(async () => {
             <el-icon><Document /></el-icon>&nbsp;日志
           </el-button>
           <el-link
-            v-if="row.appLink && row.appLink !== 'null'"
+            v-if="safeHttpUrl(row.appLink)"
             type="primary"
-            :href="row.appLink"
+            :href="safeHttpUrl(row.appLink)"
             target="_blank"
             class="app-link"
           >

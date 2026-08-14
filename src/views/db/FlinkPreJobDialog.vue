@@ -109,14 +109,19 @@ function statusInfo(s: string) {
   return STATUS_MAP[s] || { label: s || '未知', cls: 'info' }
 }
 
+let loadSeq = 0 // 轮询请求序号:丢弃慢响应,防旧数据覆盖新响应
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
   try {
-    jobs.value = await flinkPrejobJobs()
+    const data = await flinkPrejobJobs()
+    if (seq !== loadSeq) return
+    jobs.value = data
   } catch (e) {
+    if (seq !== loadSeq) return
     ElMessage.error(`加载 PreJob 列表失败:${e instanceof Error ? e.message : e}`)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

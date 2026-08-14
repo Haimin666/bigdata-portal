@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { ColumnHeader, StatusColor, YarnApp } from '@/types/yarn'
 import { formatElapsed, formatTimestamp, yarnStateColor, yarnStateHex } from '@/utils/format'
@@ -11,6 +12,20 @@ const props = defineProps<{
   header: ColumnHeader
   humanize: boolean
 }>()
+
+/** 应用 ID 列:点击复制(表格行点击展开互不干扰,用 .stop 阻断) */
+const isId = computed(() => props.header.value === 'id')
+
+async function copyId() {
+  const id = String(props.item.id || '')
+  if (!id) return
+  try {
+    await navigator.clipboard.writeText(id)
+    ElMessage.success('已复制应用 ID')
+  } catch {
+    ElMessage.error('复制失败,请手动选择复制')
+  }
+}
 
 const NUMERIC_HEADERS = new Set<keyof YarnApp>([
   'elapsedTime',
@@ -84,7 +99,12 @@ const barPct = computed(() => {
     </span>
     <span class="bar-value">{{ display.value }}</span>
   </span>
-  <span v-else :class="{ 'cell-numeric': display.numeric }">{{ display.text }}</span>
+  <span
+    v-else
+    :class="{ 'cell-numeric': display.numeric, 'cell-copy': isId }"
+    :title="isId ? '点击复制应用 ID' : undefined"
+    @click.stop="isId ? copyId() : undefined"
+  >{{ display.text }}</span>
 </template>
 
 <style scoped lang="scss">
@@ -117,5 +137,16 @@ const barPct = computed(() => {
 .cell-numeric {
   font-variant-numeric: tabular-nums;
   display: inline-block;
+}
+
+/* 应用 ID:点击复制提示(悬停下划线 + 复制光标) */
+.cell-copy {
+  cursor: copy;
+  color: $primary;
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+
+  &:hover {
+    text-decoration: underline dotted;
+  }
 }
 </style>

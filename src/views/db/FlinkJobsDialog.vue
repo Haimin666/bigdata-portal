@@ -26,14 +26,19 @@ function statusInfo(s: string) {
   return STATUS_MAP[s] || { label: s || '未知', cls: 'info' }
 }
 
+let loadSeq = 0 // 轮询请求序号:丢弃慢响应,防旧数据覆盖新响应
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
   try {
-    jobs.value = await flinkJobs()
+    const data = await flinkJobs()
+    if (seq !== loadSeq) return
+    jobs.value = data
   } catch (e) {
+    if (seq !== loadSeq) return
     ElMessage.error(`加载流任务失败:${e instanceof Error ? e.message : e}`)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

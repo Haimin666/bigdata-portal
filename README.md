@@ -95,6 +95,8 @@ scripts/npmctl.sh build     # 仅构建前端
 | `dbProxyToken` | — | db-proxy 鉴权 token(与客户机 `datasources.json` 的 `authToken` 一致) |
 | `livy` | `hadoop-task-1.bigdata.shiqiao.com:8998` | Livy(Spark SQL)地址,`{scheme, host, port}` |
 | `sparkWritePassword` | — | Spark SQL 写操作解锁密码;空则写语句一律禁止(只读) |
+| `loginTlsInsecure` | `false` | 自动登录上游 HTTPS 证书校验(OMD 等);默认开启校验,内网自签名系统可置 `true` |
+| `trustProxy` | `0` | 反代层数。**网关直连部署(无 nginx)保持 0**(登录/解锁限速按真实 IP);若前置 nginx 反代必须设 `1`,否则全公司共享反代 IP,限速会互相影响 |
 | `accounts.dsWeb/omd/stingray/streamx` | — | 各子系统自动登录凭证(`{user, pass}`) |
 
 凭证只放 `config.local.json`(gitignore),不入库;前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先。

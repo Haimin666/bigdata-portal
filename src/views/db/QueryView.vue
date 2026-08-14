@@ -620,13 +620,14 @@ function getSql(): string {
   return cm ? cm.getValue() : ''
 }
 
-/** 按分号切分 SQL 段(跳过字符串/注释内的分号) */
+/** 按分号切分 SQL 段(跳过字符串/反引号/注释内的分号) */
 function splitSqlSegments(text: string): { start: number; end: number; sql: string }[] {
   const segs: { start: number; end: number; sql: string }[] = []
   let segStart = 0
   let i = 0
   let inSingle = false
   let inDouble = false
+  let inBacktick = false
   let inLineComment = false
   let inBlockComment = false
   while (i < text.length) {
@@ -646,6 +647,9 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
       }
     } else if (inDouble) {
       if (ch === '"') inDouble = false
+    } else if (inBacktick) {
+      // MySQL 反引号标识符(可含分号,如 `a;b`),遇到闭合反引号退出
+      if (ch === '`') inBacktick = false
     } else {
       if (ch === '-' && next === '-') {
         inLineComment = true
@@ -657,6 +661,8 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
         inSingle = true
       } else if (ch === '"') {
         inDouble = true
+      } else if (ch === '`') {
+        inBacktick = true
       } else if (ch === ';') {
         segs.push({ start: segStart, end: i + 1, sql: text.slice(segStart, i + 1) })
         segStart = i + 1
@@ -701,11 +707,21 @@ function formatSql() {
   }
   const s = cm.getValue().trim()
   if (!s) return
+  // 先屏蔽字符串字面量/注释(替换为占位符),避免关键字误替换破坏字面量内容
+  const protectedParts: string[] = []
+  const masked = s.replace(
+    /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|--[^\n]*|\/\*[\s\S]*?\*\//g,
+    (m) => {
+      protectedParts.push(m)
+      return `\u0000${protectedParts.length - 1}\u0000`
+    }
+  )
   const keywords = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'UNION', 'FETCH', 'OFFSET']
-  let out = s
+  let out = masked
   for (const kw of keywords) {
     out = out.replace(new RegExp(`\\b${kw}\\b`, 'gi'), (m: string) => `\n${m.toUpperCase()}`)
   }
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => protectedParts[Number(i)] ?? '')
   cm.setValue(out.replace(/\n{2,}/g, '\n').trim())
 }
 
@@ -803,7 +819,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   }
   let jobId = ''
   const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
-    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
+    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000, sparkToken.value || undefined)
     jobId = jid
     currentDbJobId.value = jid
     const deadline = Date.now() + 3600000 // 上限 1 小时
@@ -1237,6 +1253,14 @@ function isNumeric(val: unknown): boolean {
                 sortable
                 show-overflow-tooltip
               >
+                <!-- 表头:点击复制列名 -->
+                <template #header>
+                  <span
+                    class="col-header-copy"
+                    :title="`点击复制列名: ${c}`"
+                    @click.stop="copyCell(c)"
+                  >{{ c }}</span>
+                </template>
                 <template #default="{ row }">
                   <span
                     v-if="row[c] == null"
@@ -1846,6 +1870,32 @@ function isNumeric(val: unknown): boolean {
     position: sticky;
     top: 0;
     z-index: 1;
+  }
+
+  /* 表头列名:点击复制 */
+  :deep(.col-header-copy) {
+    cursor: copy;
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    gap: 4px;
+
+    &:hover {
+      color: $primary;
+      text-decoration: underline dotted;
+    }
+
+    /* 复制图标(仅 hover 显示,提示可点击) */
+    &::after {
+      content: '⧉';
+      font-size: 11px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    &:hover::after {
+      opacity: 1;
+    }
   }
 
   :deep(.cell-null) {

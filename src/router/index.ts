@@ -83,6 +83,13 @@ router.beforeEach(async (to) => {
   }
   if (to.path === '/login') return '/'
   if (to.meta.adminOnly && !auth.isAdmin) return '/'
+  // 模块白名单:菜单 name 不在用户可访问模块内 → 回首页(后端有执行门禁兜底,前端配合隐藏)
+  // admin 的 modules 为 null(全部),跳过校验
+  const mods = auth.modules
+  const name = String(to.name || '')
+  if (mods && Array.isArray(mods) && mods.length > 0 && name && !mods.includes(name)) {
+    return '/'
+  }
   return true
 })
 
