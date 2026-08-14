@@ -9,6 +9,13 @@
           <el-icon><Plus /></el-icon>
         </button>
       </div>
+      <div class="da-actions">
+        <button class="da-act" title="压缩当前会话" @click="doCompact"><el-icon><Minus /></el-icon></button>
+        <button class="da-act" title="回退到检查点" @click="doRewind"><el-icon><RefreshLeft /></el-icon></button>
+        <button class="da-act" title="分支" @click="openBranches"><el-icon><Share /></el-icon></button>
+        <button class="da-act" title="模型" @click="openModels"><el-icon><Cpu /></el-icon></button>
+        <button class="da-act" title="统计" @click="openStats"><el-icon><DataAnalysis /></el-icon></button>
+      </div>
       <div class="da-search">
         <el-icon class="da-search__icon"><Search /></el-icon>
         <input v-model="sessionQuery" class="da-search__input" type="search" placeholder="搜索会话…" />
@@ -104,6 +111,63 @@
         </div>
       </footer>
     </section>
+
+    <!-- 分支面板 -->
+    <el-dialog v-model="branchOpen" title="分支" width="540px" append-to-body>
+      <div v-if="branchTree" class="da-tree">{{ branchTree }}</div>
+      <div class="da-list">
+        <div v-for="b in branches" :key="b.id" class="da-li" :class="{ 'da-li--active': b.current }">
+          <div class="da-li__main">
+            <div class="da-li__title">{{ b.title }}</div>
+            <div class="da-li__meta">{{ b.turns ?? 0 }} turns{{ b.model ? ' · ' + b.model : '' }}</div>
+            <div v-if="b.preview" class="da-li__prev">{{ b.preview }}</div>
+          </div>
+          <el-button size="small" :disabled="b.current || generating" @click="switchBranch(b.id)">
+            {{ b.current ? '当前' : '切换' }}
+          </el-button>
+        </div>
+        <div v-if="!branches.length" class="da-empty">暂无分支</div>
+      </div>
+    </el-dialog>
+
+    <!-- 模型面板 -->
+    <el-dialog v-model="modelOpen" title="模型" width="480px" append-to-body>
+      <div class="da-list">
+        <div v-for="m in models" :key="m.ref" class="da-li" :class="{ 'da-li--active': m.ref === currentModel || m.active }">
+          <div class="da-li__main">
+            <div class="da-li__title">{{ m.ref }}</div>
+            <div class="da-li__meta">{{ m.provider }} · {{ m.model }}</div>
+          </div>
+          <el-button size="small" :disabled="(m.ref === currentModel || m.active) || generating" @click="switchModel(m.ref)">
+            {{ m.ref === currentModel || m.active ? '当前' : '切换' }}
+          </el-button>
+        </div>
+        <div v-if="!models.length" class="da-empty">暂无模型</div>
+      </div>
+    </el-dialog>
+
+    <!-- 统计面板 -->
+    <el-dialog v-model="statOpen" title="统计" width="440px" append-to-body>
+      <div class="da-stats">
+        <div class="da-stat-card">
+          <div class="da-stat-card__label">模型</div>
+          <div class="da-stat-card__val">{{ stats.label || '—' }}</div>
+        </div>
+        <div class="da-stat-card">
+          <div class="da-stat-card__label">上下文</div>
+          <div class="da-stat-card__val">{{ fmtTok(stats.used) }}<span class="da-stat-card__sub"> / {{ fmtTok(stats.window) }}</span></div>
+          <div class="da-ctx-bar"><div class="da-ctx-bar__fill" :style="{ width: ctxPct + '%' }"></div></div>
+        </div>
+        <div class="da-stat-card">
+          <div class="da-stat-card__label">缓存命中</div>
+          <div class="da-stat-card__val">{{ cachePct }}%</div>
+        </div>
+        <div class="da-stat-card">
+          <div class="da-stat-card__label">状态</div>
+          <div class="da-stat-card__val">{{ stats.running ? '运行中' : '空闲' }}</div>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -112,22 +176,34 @@ import { computed, nextTick, onUnmounted, ref } from 'vue'
 import {
   CaretBottom,
   CaretRight,
+  Cpu,
+  DataAnalysis,
   Delete,
+  Minus,
   Plus,
   Position,
+  RefreshLeft,
   Search,
+  Share,
   VideoPause
 } from '@element-plus/icons-vue'
 import {
   connectAssistantEvents,
   createSession,
   deleteSession,
+  getBranches,
+  getModels,
+  getStatus,
   listMessages,
   listSessions,
+  runCommand,
   stopChat,
   submitChat,
   type AssistantSession,
-  type ChatMessage
+  type AssistantStatus,
+  type BranchInfo,
+  type ChatMessage,
+  type ModelInfo
 } from '@/api/assistant'
 
 const examples = [
@@ -219,6 +295,88 @@ async function send() {
 function stop() {
   generating.value = false
   void stopChat()
+}
+
+// ── 侧栏操作:压缩/回退/分支/模型/统计 ────────────────────
+const branchOpen = ref(false)
+const branchTree = ref('')
+const branches = ref<BranchInfo[]>([])
+const modelOpen = ref(false)
+const models = ref<ModelInfo[]>([])
+const currentModel = ref('')
+const statOpen = ref(false)
+const stats = ref<AssistantStatus>({})
+
+const ctxPct = computed(() => {
+  const w = stats.value.window || 0
+  if (!w) return 0
+  return Math.min(100, Math.round(((stats.value.used || 0) / w) * 100))
+})
+const cachePct = computed(() => {
+  const hit = stats.value.cacheHit || 0
+  const miss = stats.value.cacheMiss || 0
+  if (!hit && !miss) return 0
+  return Math.round((hit / (hit + miss)) * 100)
+})
+
+function fmtTok(n?: number): string {
+  if (n == null) return '0'
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+/** 命令执行后刷新当前会话消息 + 会话列表 */
+async function refreshAfterCommand() {
+  await new Promise((r) => setTimeout(r, 600))
+  if (activeId.value) messages.value = await listMessages(activeId.value).catch(() => messages.value)
+  void loadSessions()
+}
+
+async function doCompact() {
+  if (generating.value) return
+  await runCommand('/compact')
+  await refreshAfterCommand()
+}
+async function doRewind() {
+  if (generating.value) return
+  await runCommand('/rewind')
+  await refreshAfterCommand()
+}
+
+async function openBranches() {
+  branchOpen.value = true
+  try {
+    const d = await getBranches()
+    branchTree.value = d.tree || ''
+    branches.value = d.branches
+  } catch {
+    /* 忽略 */
+  }
+}
+async function switchBranch(id: string) {
+  await runCommand(`/switch ${id}`)
+  branchOpen.value = false
+  await refreshAfterCommand()
+}
+
+async function openModels() {
+  modelOpen.value = true
+  try {
+    const d = await getModels()
+    models.value = d.models
+    currentModel.value = d.current || ''
+  } catch {
+    /* 忽略 */
+  }
+}
+async function switchModel(ref: string) {
+  await runCommand(`/model ${ref}`)
+  modelOpen.value = false
+  void loadSessions()
+}
+
+async function openStats() {
+  statOpen.value = true
+  stats.value = await getStatus().catch(() => ({}))
 }
 
 // ── 输入区 ───────────────────────────────────────────────
@@ -922,5 +1080,132 @@ onUnmounted(() => {
 .da-composer__btn--stop:hover {
   background: #f56c6c;
   color: #fff;
+}
+
+/* ── 侧栏操作按钮行 ── */
+.da-actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px 10px 2px;
+}
+.da-act {
+  flex: 1;
+  height: 30px;
+  border: 1px solid var(--bd-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--bd-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+.da-act:hover {
+  border-color: var(--bd-primary);
+  color: var(--bd-primary);
+  background: color-mix(in srgb, var(--bd-primary) 8%, transparent);
+}
+.da-act .el-icon {
+  font-size: 14px;
+}
+
+/* ── 面板(dialog 内容,teleport 到 body → :global) ── */
+.da-tree {
+  max-height: 140px;
+  overflow: auto;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--bd-border);
+  border-radius: 8px;
+  background: var(--bd-panel-sub);
+  font-family: var(--bd-font);
+  font-size: 11px;
+  color: var(--bd-muted);
+  white-space: pre-wrap;
+}
+.da-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.da-li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  background: var(--bd-panel);
+}
+.da-li--active {
+  border-color: var(--bd-primary);
+  background: color-mix(in srgb, var(--bd-primary) 10%, var(--bd-panel));
+}
+.da-li__main {
+  flex: 1;
+  min-width: 0;
+}
+.da-li__title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-li__meta {
+  font-size: 11px;
+  color: var(--bd-muted);
+  margin-top: 2px;
+}
+.da-li__prev {
+  font-size: 11px;
+  color: var(--bd-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.da-stat-card {
+  padding: 12px 14px;
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  background: var(--bd-panel);
+}
+.da-stat-card__label {
+  font-size: 11px;
+  color: var(--bd-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.da-stat-card__val {
+  font-size: 16px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.da-stat-card__sub {
+  font-size: 11px;
+  color: var(--bd-muted);
+  font-weight: 400;
+}
+.da-ctx-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bd-table-hover);
+  margin-top: 8px;
+  overflow: hidden;
+}
+.da-ctx-bar__fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--bd-primary);
+  transition: width 0.3s ease;
 }
 </style>

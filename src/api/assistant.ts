@@ -136,6 +136,75 @@ export async function stopChat(): Promise<void> {
   await fetch('/api/assistant/cancel', { method: 'POST' }).catch(() => {})
 }
 
+// ── 增强能力(侧栏操作:压缩/回退/分支/模型/统计)─────────
+/** 直接执行斜杠命令(压缩/回退/分支切换/模型切换等) */
+export async function runCommand(cmd: string): Promise<void> {
+  const res = await fetch('/api/assistant/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: cmd })
+  })
+  if (!res.ok && res.status !== 202) throw new Error(`command failed ${res.status}`)
+}
+
+export interface BranchInfo {
+  id: string
+  title?: string
+  model?: string
+  turns?: number
+  preview?: string
+  current?: boolean
+}
+
+export async function getBranches(): Promise<{ tree?: string; branches: BranchInfo[] }> {
+  const data = await j(await fetch('/api/assistant/branches'))
+  const list: BranchInfo[] = Array.isArray(data?.branches)
+    ? data.branches.map((b: any) => ({
+        id: b.id || '',
+        title: b.custom_title || b.CustomTitle || b.name || b.Name || b.topic_title || b.id,
+        model: b.model || '',
+        turns: b.turns ?? b.Turns,
+        preview: b.preview || b.Preview || '',
+        current: !!b.active || b.id === data.current
+      }))
+    : []
+  return { tree: data?.tree, branches: list }
+}
+
+export interface ModelInfo {
+  ref: string
+  provider?: string
+  model?: string
+  active?: boolean
+}
+
+export async function getModels(): Promise<{ current?: string; models: ModelInfo[] }> {
+  const data = await j(await fetch('/api/assistant/models'))
+  return {
+    current: data?.current,
+    models: Array.isArray(data?.models)
+      ? data.models.map((m: any) => ({ ref: m.ref, provider: m.provider, model: m.model, active: !!m.active }))
+      : []
+  }
+}
+
+export interface AssistantStatus {
+  label?: string
+  cwd?: string
+  used?: number
+  window?: number
+  cacheHit?: number
+  cacheMiss?: number
+  running?: boolean
+  plan?: boolean
+  balance?: any
+  lastUsage?: any
+}
+
+export async function getStatus(): Promise<AssistantStatus> {
+  return j(await fetch('/api/assistant/status'))
+}
+
 // ── SSE 事件流(全局广播,一个连接驱动当前会话渲染)─────────
 export interface AssistantEventHandlers {
   onTurnStart?: () => void
