@@ -189,6 +189,15 @@ class SparkEngine:
         串行队列语义下多请求同时到达时,后续请求等第一个建完即可复用)。
         """
         with self._init_lock:
+            # 兜底:context 被外部 stop(异常中断/YARN 回收)→ 置空走重建,避免
+            # "Cannot call methods on a stopped SparkContext" 卡死后续查询
+            if self._spark is not None:
+                try:
+                    if self._spark.sparkContext.isStopped:
+                        log.warning("spark context is stopped, rebuilding session")
+                        self._spark = None
+                except Exception:
+                    pass
             if self._spark is not None:
                 return
             self._session_state = "starting"
