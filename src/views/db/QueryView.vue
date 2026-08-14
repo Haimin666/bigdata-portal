@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryDb, querySpark, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryDb, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
@@ -143,14 +143,49 @@ function isSparkWriteSql(sql: string): boolean {
   return true
 }
 
-/** Spark 执行:SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行 */
+/** 当前 Spark 异步任务的 jobId(供停止按钮精确取消) */
+const currentSparkJobId = ref('')
+
+/** Spark 执行:异步任务模式 —— 提交即返回 jobId,前端轮询结果。
+ *  动机:公司网关固定 60s 读超时,同步长请求(大查询可能跑数十分钟/小时)
+ *  必被掐断 504;异步化后提交/查状态都是秒级往返,永不撞超时。
+ *  SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行。 */
 async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
   const needsAuth = kind === 'pyspark' || (kind === 'sql' && isSparkWriteSql(sql))
   if (needsAuth && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写权限未解锁')
   }
-  return querySpark(sql, sparkToken.value || undefined, kind)
+  const { jobId } = await submitSparkJob(sql, sparkToken.value || undefined, kind, 7200000)
+  currentSparkJobId.value = jobId
+  const deadline = Date.now() + 7200000 // 上限 2 小时
+  while (Date.now() < deadline) {
+    if (batchCancelled) {
+      try {
+        await cancelSparkJob(jobId)
+      } catch {
+        /* 忽略 */
+      }
+      throw new Error('已取消')
+    }
+    const j = await getSparkJob(jobId)
+    if (j.state === 'done') {
+      currentSparkJobId.value = ''
+      return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
+    }
+    if (j.state === 'failed') {
+      currentSparkJobId.value = ''
+      throw new Error(j.error || '任务执行失败')
+    }
+    await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
+  }
+  try {
+    await cancelSparkJob(jobId)
+  } catch {
+    /* 忽略 */
+  }
+  currentSparkJobId.value = ''
+  throw new Error('任务超时(2 小时),已自动取消')
 }
 
 // ── 多文件 tab(最多 10 个)──────────────────────────────────
@@ -887,6 +922,14 @@ async function stopQuery() {
     if (engine.value === 'flinksql') {
       await cancelFlink()
     } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
+      // 异步任务:优先精确取消当前 job,再兜底取消引擎当前 job group
+      if (currentSparkJobId.value) {
+        try {
+          await cancelSparkJob(currentSparkJobId.value)
+        } catch {
+          /* 忽略 */
+        }
+      }
       await cancelSpark()
     }
     // mysql/oracle:无引擎 job 可取消,置位后批循环自行停止

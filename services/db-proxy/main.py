@@ -100,6 +100,8 @@ SPARK_CFG = CONFIG.get("spark") or {}
 SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SPARK_ENGINE = init_engine(SPARK_CFG, SPARK_BASE_DIR)
 if SPARK_ENGINE.enabled:
+    from spark_engine import SparkJobManager
+    SPARK_JOBS = SparkJobManager(SPARK_ENGINE)
     log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
              SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
 
@@ -710,6 +712,14 @@ def _check_spark_write_creds(write_unlocked: bool, req_token: Optional[str]) -> 
         )
 
 
+class SparkJobSubmitReq(BaseModel):
+    sql: str = ""
+    code: str = ""  # kind=pyspark 用
+    kind: str = "sql"
+    writeUnlocked: bool = False
+    timeoutMs: int = 600000  # 异步任务默认 10 分钟(大查询可传更久,不撞网关超时)
+
+
 @app.post("/spark/query")
 def spark_query(
     req: SparkQueryReq,
@@ -763,6 +773,45 @@ def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
     return {"code": 0, "data": SPARK_ENGINE.status()}
+
+
+@app.post("/spark/jobs")
+def spark_job_submit(
+    req: SparkJobSubmitReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_spark_write: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """异步提交 spark 任务:立即返回 jobId,后台线程执行(网关 60s 超时安全)。"""
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    kind = "pyspark" if req.kind == "pyspark" else "sql"
+    _check_spark_write_creds(req.writeUnlocked, x_spark_write)
+    sql = req.code if kind == "pyspark" else req.sql
+    if not sql or not str(sql).strip():
+        raise HTTPException(status_code=400, detail="sql is required")
+    job_id = SPARK_JOBS.submit(str(sql), kind, req.writeUnlocked, req.timeoutMs)
+    log.info("spark job submitted: %s kind=%s", job_id, kind)
+    return {"code": 0, "data": {"jobId": job_id}}
+
+
+@app.get("/spark/jobs/{job_id}")
+def spark_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    j = SPARK_JOBS.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
+    return {"code": 0, "data": j}
+
+
+@app.post("/spark/jobs/{job_id}/cancel")
+def spark_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_JOBS.cancel(job_id):
+        raise HTTPException(status_code=404, detail="job not found or already finished: %s" % job_id)
+    return {"code": 0, "data": {"cancelled": True}}
 
 
 @app.post("/spark/cancel")

@@ -642,3 +642,95 @@ def get_engine() -> SparkEngine:
     if _engine is None:
         raise RuntimeError("spark engine not initialized")
     return _engine
+
+
+# ── 异步任务管理 ─────────────────────────────────────────────
+class SparkJobManager:
+    """异步任务管理:提交即返回 jobId,后台线程执行,状态可查询/取消。
+
+    动机:公司网关固定 60s 读超时,同步 HTTP 长请求(大查询可能跑数十分钟)
+    必然被网关掐断返回 504。异步化后提交/查询/取消都是秒级往返,永不撞超时。
+    同一 SparkSession 串行执行(引擎 _lock),多 job 天然排队,state 反映 queued。
+    """
+
+    def __init__(self, engine: Any, max_jobs: int = 200, ttl: int = 3600) -> None:
+        self._engine = engine
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._max_jobs = max_jobs
+        self._ttl = ttl  # 完成后保留秒数
+
+    def submit(self, sql: str, kind: str = "sql", write_unlocked: bool = False, timeout_ms: int = 600000) -> str:
+        with self._lock:
+            self._seq += 1
+            job_id = "spk_%d_%04d" % (int(time.time()), self._seq)
+            self._jobs[job_id] = {
+                "id": job_id, "state": "queued", "sql": sql, "kind": kind,
+                "write_unlocked": write_unlocked, "timeout_ms": timeout_ms,
+                "created_at": time.time(), "started_at": None, "finished_at": None,
+                "result": None, "error": None,
+            }
+        threading.Thread(target=self._run, args=(job_id,), daemon=True, name="spark-job-%s" % job_id).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        j = self._jobs.get(job_id)
+        if not j:
+            return
+        j["state"] = "running"
+        j["started_at"] = time.time()
+        try:
+            if j["kind"] == "pyspark":
+                result = self._engine.execute_code(j["sql"], j["timeout_ms"], j["write_unlocked"])
+            else:
+                result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
+            j["result"] = result
+            j["state"] = "done"
+        except Exception as e:
+            j["error"] = str(e)[:2000]
+            j["state"] = "failed"
+        finally:
+            j["finished_at"] = time.time()
+            self._gc()
+
+    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j:
+                return None
+            return {
+                "id": j["id"], "state": j["state"], "sql": j["sql"][:500],
+                "kind": j["kind"], "createdAt": j["created_at"],
+                "startedAt": j["started_at"], "finishedAt": j["finished_at"],
+                "result": j["result"], "error": j["error"],
+            }
+
+    def cancel(self, job_id: str) -> bool:
+        """取消 queued/running 的 job。取消的是引擎当前执行中的 jobGroup
+        (同 session 串行,同一时刻只有一个 job 在 execute,故 cancel 命中正在跑的 job)。"""
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j or j["state"] not in ("queued", "running"):
+                return False
+        try:
+            self._engine.cancel()
+            return True
+        except Exception:
+            return False
+
+    def _gc(self) -> None:
+        """清理:完成后超 ttl 的旧 job + 超上限时淘汰最旧完成项。"""
+        with self._lock:
+            now = time.time()
+            stale = [
+                i for i, j in self._jobs.items()
+                if j["state"] in ("done", "failed") and (now - (j["finished_at"] or 0)) > self._ttl
+            ]
+            for i in stale:
+                del self._jobs[i]
+            done_ids = [i for i, j in self._jobs.items() if j["state"] in ("done", "failed")]
+            overflow = len(done_ids) - self._max_jobs
+            if overflow > 0:
+                for i in sorted(done_ids, key=lambda x: self._jobs[x]["finished_at"] or 0)[:overflow]:
+                    del self._jobs[i]

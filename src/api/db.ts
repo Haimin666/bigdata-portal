@@ -171,6 +171,81 @@ export async function cancelSpark(): Promise<{ cancelled: boolean }> {
   return body.data as { cancelled: boolean }
 }
 
+// ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
+export interface SparkJobInfo {
+  id: string
+  state: 'queued' | 'running' | 'done' | 'failed'
+  sql?: string
+  kind?: string
+  createdAt?: number
+  startedAt?: number
+  finishedAt?: number
+  result?: DbQueryResult
+  error?: string
+}
+
+/** 异步提交 Spark 任务,立即返回 jobId(不阻塞等结果) */
+export async function submitSparkJob(
+  sql: string,
+  writeToken?: string,
+  kind: 'sql' | 'pyspark' = 'sql',
+  timeoutMs = 600000
+): Promise<{ jobId: string }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (writeToken) headers['X-Spark-Token'] = writeToken
+  const payload = kind === 'pyspark' ? { kind, code: sql, timeoutMs } : { kind, sql, timeoutMs }
+  const res = await fetch('/api/spark/jobs', { method: 'POST', headers, body: JSON.stringify(payload) })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ jobId: string }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '提交失败')
+  return body.data as { jobId: string }
+}
+
+/** 查询异步任务状态 */
+export async function getSparkJob(jobId: string): Promise<SparkJobInfo> {
+  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}`)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<SparkJobInfo>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '查询失败')
+  return body.data as SparkJobInfo
+}
+
+/** 取消异步任务(大查询中途停止) */
+export async function cancelSparkJob(jobId: string): Promise<{ cancelled: boolean }> {
+  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ cancelled: boolean }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '取消失败')
+  return body.data as { cancelled: boolean }
+}
+
 /** Flink 专用请求:走网关 /api/flink/*(不经 /api/db 透传,网关统一鉴权) */
 async function flinkRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api/flink${path}`, init)

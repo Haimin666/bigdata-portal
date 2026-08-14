@@ -47,8 +47,46 @@ export async function query(sql, { kind = 'sql', writeUnlocked = false, timeoutM
   return res.data
 }
 
-/** 读取 spark 引擎日志增量(driver JVM 日志 + 审计),供前端日志面板透传 */
-export async function readLogs(offsets = { jvm: 0, audit: 0 }) {
+/**
+ * 异步提交 spark 任务:立即返回 jobId,后台线程执行。
+ * 动机:公司网关固定 60s 读超时,大查询同步挂起会被掐断 504;异步化后
+ * 提交/查状态/取消都是秒级往返,永不撞超时。
+ */
+export async function submitJob(
+  sql,
+  { kind = 'sql', writeUnlocked = false, timeoutMs = 600000 } = {}
+) {
+  const payload =
+    kind === 'pyspark'
+      ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
+      : { kind: 'sql', sql, writeUnlocked, timeoutMs }
+  const headers = {}
+  if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
+  const res = await proxy('/spark/jobs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers,
+    timeoutMs: 30000
+  })
+  return res.data // { jobId }
+}
+
+/** 查询异步任务状态(queued|running|done|failed) */
+export async function jobStatus(jobId, timeoutMs = 30000) {
+  const res = await proxy(`/spark/jobs/${encodeURIComponent(jobId)}`, { timeoutMs })
+  return res.data
+}
+
+/** 取消异步任务(大查询中途停止) */
+export async function cancelJob(jobId, timeoutMs = 30000) {
+  const res = await proxy(`/spark/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+    timeoutMs
+  })
+  return res.data
+}
+
+/** 读取 spark 引擎日志增量(driver JVM 日志 + 审计),供前端日志面板透传 */export async function readLogs(offsets = { jvm: 0, audit: 0 }) {
   const q = new URLSearchParams({
     jvm: String(offsets.jvm || 0),
     audit: String(offsets.audit || 0)

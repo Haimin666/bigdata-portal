@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
-import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, cancel as sparkCancel } from './spark-gateway.js'
+import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, cancel as sparkCancel, submitJob as sparkSubmitJob, jobStatus as sparkJobStatus, cancelJob as sparkCancelJob } from './spark-gateway.js'
 import {
   query as flinkQuery, cancel as flinkCancel, status as flinkStatus,
   connectors as flinkConnectors, probeSchema as flinkProbeSchema, generateDdl as flinkGenerateDdl,
@@ -830,6 +830,56 @@ if (config.dbProxyUrl) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[spark/query]', msg)
       res.status(502).json({ code: 502, msg: `spark 查询失败: ${msg.slice(0, 300)}` })
+    }
+  })
+
+  // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
+  // 写拦截与 /api/spark/query 一致:写语句必须解锁(X-Spark-Token)
+  function sparkWriteAllowed(req) {
+    const tk = req.get('X-Spark-Token')
+    return !!(tk && sparkTokenValid(tk))
+  }
+
+  app.post('/api/spark/jobs', async (req, res) => {
+    try {
+      const { sql, code, kind } = req.body || {}
+      const k = kind === 'pyspark' ? 'pyspark' : 'sql'
+      const body = String(k === 'pyspark' ? code : sql || '')
+      if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
+      let writeUnlocked = false
+      if ((k === 'sql' && isSparkWriteSql(body)) || k === 'pyspark') {
+        if (!sparkWriteAllowed(req)) {
+          return res.status(403).json({ code: 403, msg: '写操作/PySpark 需要解锁,请先输入 Spark 写权限密码' })
+        }
+        writeUnlocked = true
+      }
+      const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
+      const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
+      res.json({ code: 0, data })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[spark/jobs]', msg)
+      res.status(502).json({ code: 502, msg: `spark 提交失败: ${msg.slice(0, 300)}` })
+    }
+  })
+
+  app.get('/api/spark/jobs/:jobId', async (req, res) => {
+    try {
+      const data = await sparkJobStatus(String(req.params.jobId))
+      res.json({ code: 0, data })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      res.status(404).json({ code: 404, msg: `job not found: ${msg.slice(0, 200)}` })
+    }
+  })
+
+  app.post('/api/spark/jobs/:jobId/cancel', async (req, res) => {
+    try {
+      const data = await sparkCancelJob(String(req.params.jobId))
+      res.json({ code: 0, data })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      res.status(404).json({ code: 404, msg: `取消失败: ${msg.slice(0, 200)}` })
     }
   })
 
