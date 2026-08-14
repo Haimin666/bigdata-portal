@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus, type MenuItem } from '@/config/menu'
 import { getEnabledModules } from '@/api/db'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 defineOptions({ name: 'SideBar' })
@@ -31,7 +31,8 @@ const icons: Record<string, Component> = {
   Cpu,
   Coin,
   Notebook,
-  User: UserFilled
+  User: UserFilled,
+  MagicStick
 }
 
 // 当前激活菜单(直接按路由路径)

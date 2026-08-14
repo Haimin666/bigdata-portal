@@ -19,13 +19,6 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
-    path: '/assistant',
-    title: '开发助手',
-    name: 'devAssistant',
-    icon: 'MagicStick',
-    kind: 'native'
-  },
-  {
     path: '/dataleap',
     title: 'DataLeap 实验',
     name: 'dataleap',
@@ -109,5 +102,12 @@ export const menus: MenuItem[] = [
     // 跨源 iframe 直连(OpenMetadata 无 X-Frame-Options 限制,认证为 localStorage token 非 cookie)
     url: 'https://omd.corp.shiqiao.com/',
     iframe: true
+  },
+  {
+    path: '/assistant',
+    title: '开发助手',
+    name: 'devAssistant',
+    icon: 'MagicStick',
+    kind: 'native'
   }
 ]

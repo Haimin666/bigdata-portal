@@ -81,7 +81,8 @@ start() {
   nohup npm run serve >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
   for _ in $(seq 1 30); do
-    if curl -sf -o /dev/null "http://127.0.0.1:${PORT}/api/config"; then
+    # 健康检查用公开端点 /(静态首页 200);/api/config 在登录门禁内会 401 误报超时
+    if curl -sf -o /dev/null "http://127.0.0.1:${PORT}/"; then
       echo "[npmctl] 网关已启动:http://localhost:${PORT}(日志:$LOG_FILE)"
       return 0
     fi
@@ -113,8 +114,8 @@ status() {
   pids="$(gateway_pids)"
   if [[ -n "$pids" ]]; then
     echo "[npmctl] 状态:运行中(进程:$pids)"
-    curl -s -o /dev/null -w "[npmctl] 健康:HTTP %{http_code} http://localhost:${PORT}/api/config\n" \
-      "http://127.0.0.1:${PORT}/api/config" || echo "[npmctl] 健康:不可达"
+    curl -s -o /dev/null -w "[npmctl] 健康:HTTP %{http_code} http://localhost:${PORT}/\n" \
+      "http://127.0.0.1:${PORT}/" || echo "[npmctl] 健康:不可达"
   else
     echo "[npmctl] 状态:未运行"
   fi
