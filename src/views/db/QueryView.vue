@@ -1936,6 +1936,7 @@ async function copyAllTsv() {
 .result-content {
   flex: 1;
   min-width: 0;
+  min-height: 0; /* 关键:允许在 .results-wrap 高度内收缩,否则日志/结果会撑高整页 */
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2150,6 +2151,7 @@ async function copyAllTsv() {
 }
 .spark-logs-body {
   flex: 1;
+  min-height: 0; /* 关键:日志容器按布局高度收缩并在内部滚动,而不是撑高整页 */
   margin: 0;
   padding: 10px 14px;
   overflow: auto;
