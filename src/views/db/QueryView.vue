@@ -562,16 +562,6 @@ function scrollLogToBottom() {
   })))
 }
 
-// 引擎日志按布局高度自动贴底滚动:只要日志面板处于激活态,内容增量/切换/挂载后
-// 都自动滚到最底部让最新日志始终可见,无需手动拖拽滚动条到底。
-// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚才能精确到底。
-function scrollLogToBottom() {
-  const el = sparkLogBox.value
-  if (!el) return
-  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
-  })))
-}
 // 激活日志面板(切回/首次显示)时滚到底,避免面板停在上方需手动下拖
 // 用 getter 形式避免在 activePane 声明(见下)之前同步读取导致 TDZ 报错
 watch(() => activePane.value, (pane) => {
