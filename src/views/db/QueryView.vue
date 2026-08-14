@@ -538,11 +538,26 @@ let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
 
 // 引擎日志一直默认滚动到底部(展示最新 200 条)
+// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚,才能精确到底;
+// 若用户手动上翻阅读旧日志,则不强制拽回底部(等其回到最底部附近再接着自动跟)。
+let logFollow = true
 watch(sparkLogText, () => {
-  void nextTick(() => {
-    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
-  })
+  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    const el = sparkLogBox.value
+    if (!el) return
+    const nearBottom = logFollow || el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight // 两帧后 scrollHeight 已含本次追加内容,必达底部
+      logFollow = true
+    }
+  })))
 })
+function onLogScroll() {
+  const el = sparkLogBox.value
+  if (!el) return
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  logFollow = atBottom
+}
 
 /** 拉取 spark 日志增量并追加 */
 async function pollSparkLogs() {
@@ -1282,19 +1297,22 @@ async function copyAllTsv() {
       <div class="result-content">
         <!-- 日志面板(第一个 tab) -->
         <template v-if="activePane === 0">
-          <div class="spark-logs-head">
-            <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
-            <span class="spark-logs-actions">
-              <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
-              <el-button text size="small" @click="clearSparkLogs">清空</el-button>
-            </span>
+          <div class="result-card log-card">
+            <div class="spark-logs-head">
+              <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
+              <span class="spark-logs-actions">
+                <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
+                <el-button text size="small" @click="clearSparkLogs">清空</el-button>
+              </span>
+            </div>
+            <pre ref="sparkLogBox" class="spark-logs-body" @scroll="onLogScroll">{{ sparkLogText || logEmptyHint }}</pre>
           </div>
-          <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
         </template>
         <!-- 结果内容 -->
         <template v-else-if="currentResult">
           <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
-          <div v-else v-loading="loading" class="result-table-wrap">
+          <div v-else class="result-card">
+            <div v-loading="loading" class="result-table-wrap">
             <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''">
               <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
               <el-table-column
@@ -1374,6 +1392,7 @@ async function copyAllTsv() {
             layout="total, sizes, prev, pager, next"
             small
           />
+            </div>
         </template>
       </div>
     </div>
@@ -1924,13 +1943,22 @@ async function copyAllTsv() {
   gap: 6px;
 }
 
+/* 结果区整体卡片:表格 + 底部工具条 + 翻页 合成一个整体,消除三张独立卡片的分割感 */
+.result-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 .result-table-wrap {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
 }
 
 .result-table {
@@ -2027,8 +2055,7 @@ async function copyAllTsv() {
   gap: 12px;
   flex-wrap: wrap;
   background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
+  border-top: 1px solid $border;
   padding: 6px 12px;
   font-size: 12px;
   color: $muted;
@@ -2093,9 +2120,8 @@ async function copyAllTsv() {
   display: flex;
   justify-content: flex-end;
   background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-top: 1px solid $border;
+  padding: 6px 12px;
   flex-shrink: 0;
 }
 
