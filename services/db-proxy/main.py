@@ -609,19 +609,36 @@ class DbJobManager:
         self._ttl = ttl
 
     def submit(self, db: str, sql: str, timeout_ms: int = 3600000) -> str:
-        with self._lock:
-            self._seq += 1
-            job_id = "dbj_%d_%04d" % (int(time.time()), self._seq)
-            self._jobs[job_id] = {
-                "id": job_id, "state": "queued", "db": db, "sql": sql,
-                "timeout_ms": timeout_ms, "created_at": time.time(),
-                "started_at": None, "finished_at": None,
-                "result": None, "error": None, "conn": None, "cancel_requested": False,
-            }
-        threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
-        return job_id
+        # 与同步 /query 共享并发信号量 + QPS 限制,防止异步 job 无限并发打爆数据库连接
+        if not _query_semaphore.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
+            )
+        _check_qps()
+        try:
+            with self._lock:
+                self._seq += 1
+                job_id = "dbj_%d_%04d" % (int(time.time()), self._seq)
+                self._jobs[job_id] = {
+                    "id": job_id, "state": "queued", "db": db, "sql": sql,
+                    "timeout_ms": timeout_ms, "created_at": time.time(),
+                    "started_at": None, "finished_at": None,
+                    "result": None, "error": None, "conn": None, "cancel_requested": False,
+                }
+            threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
+            return job_id
+        except Exception:
+            _query_semaphore.release()
+            raise
 
     def _run(self, job_id: str) -> None:
+        try:
+            self._run_inner(job_id)
+        finally:
+            # 无论成功/失败/取消,释放并发信号量(submit 已 acquire)
+            _query_semaphore.release()
+
+    def _run_inner(self, job_id: str) -> None:
         j = self._jobs.get(job_id)
         if not j:
             return
