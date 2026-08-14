@@ -497,8 +497,16 @@ onUnmounted(() => {
 // ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
+const sparkLogBox = ref<HTMLElement | null>(null)
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
+
+// 引擎日志一直默认滚动到底部(展示最新 200 条)
+watch(sparkLogText, () => {
+  void nextTick(() => {
+    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
+  })
+})
 
 /** 拉取 spark 日志增量并追加 */
 async function pollSparkLogs() {
@@ -508,9 +516,9 @@ async function pollSparkLogs() {
     if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
     if (data.content) {
       sparkLogText.value += data.content
-      // 只保留最近 500 行(引擎日志 tail 500 条)
+      // 只保留最近 200 行(引擎日志默认 tail 200 条,一直滚动展示最新)
       const lines = sparkLogText.value.split('\n')
-      if (lines.length > 500) sparkLogText.value = lines.slice(-500).join('\n')
+      if (lines.length > 200) sparkLogText.value = lines.slice(-200).join('\n')
     }
     sparkLogOffsets.value = data.offsets
   } catch {
@@ -1113,7 +1121,7 @@ function isNumeric(val: unknown): boolean {
               <el-button text size="small" @click="clearSparkLogs">清空</el-button>
             </span>
           </div>
-          <pre class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
+          <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
         </template>
         <!-- 结果内容 -->
         <template v-else-if="currentResult">
