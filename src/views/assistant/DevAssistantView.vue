@@ -146,8 +146,20 @@
           </div>
           <div v-if="!slashFiltered.length" class="da-slash__empty">无匹配命令</div>
         </div>
+        <div v-if="uploadedFiles.length" class="da-files">
+          <span v-for="f in uploadedFiles" :key="f.name" class="da-file-chip">
+            <el-icon class="da-file-chip__icon"><Document /></el-icon>
+            {{ f.name }}
+            <span class="da-file-chip__del" title="移除" @click="uploadedFiles = uploadedFiles.filter((x) => x.name !== f.name)">×</span>
+          </span>
+        </div>
+        <div v-if="uploadMsg" class="da-upload-msg">{{ uploadMsg }}</div>
         <div class="da-composer" :class="{ 'da-composer--busy': generating }">
           <span class="da-composer__caret">›</span>
+          <label class="da-upload" :class="{ 'da-upload--disabled': generating }" title="上传文件到当前项目目录">
+            <input type="file" class="da-upload__input" @change="onUploadFile" />
+            <el-icon><Paperclip /></el-icon>
+          </label>
           <textarea
             v-model="draft"
             ref="inputEl"
@@ -201,9 +213,11 @@ import {
   CaretBottom,
   CaretRight,
   Delete,
+  Document,
   Folder,
   FolderOpened,
   Minus,
+  Paperclip,
   Plus,
   Position,
   RefreshLeft,
@@ -224,6 +238,7 @@ import {
   listMessages,
   listProjects,
   listSessions,
+  uploadToProject,
   runCommand,
   stopChat,
   submitChat,
@@ -327,6 +342,44 @@ function withWorkdir(text: string): string {
 请在本项目工作目录下操作文件。
 ${text}`
 }
+
+// ── 上传文件到当前项目目录 ────────────────────────────────
+const uploadedFiles = ref<{ name: string; path: string }[]>([])
+const uploadMsg = ref('')
+
+async function onUploadFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // 允许重复选同一文件
+  if (!file) return
+  if (!curProject.value) {
+    uploadMsg.value = '请先选择项目'
+    setTimeout(() => (uploadMsg.value = ''), 3000)
+    return
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    uploadMsg.value = '文件超过 10MB 限制'
+    setTimeout(() => (uploadMsg.value = ''), 3000)
+    return
+  }
+  try {
+    const b64 = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader()
+      r.onload = () => {
+        const str = String(r.result || '')
+        resolve(str.slice(str.indexOf(',') + 1)) // 去 data: 前缀
+      }
+      r.onerror = () => reject(r.error)
+      r.readAsDataURL(file)
+    })
+    const up = await uploadToProject(curProject.value.id, file.name, b64)
+    uploadedFiles.value.push({ name: file.name, path: up.path })
+    uploadMsg.value = `已上传: ${up.path}`
+  } catch (err) {
+    uploadMsg.value = `上传失败: ${err instanceof Error ? err.message : String(err)}`
+  }
+  setTimeout(() => (uploadMsg.value = ''), 4000)
+}
 const lastMsgId = computed(() => messages.value[messages.value.length - 1]?.id ?? '')
 
 // ── 会话管理 ─────────────────────────────────────────────
@@ -388,8 +441,12 @@ async function send() {
   }
   const sid = activeId.value
   await bindActiveSession()
-  const payload = withWorkdir(text)
+  let payload = withWorkdir(text)
+  if (uploadedFiles.value.length) {
+    payload += `\n\n[项目目录已有文件: ${uploadedFiles.value.map((f) => f.path).join(', ')}] 可读取参考。`
+  }
   messages.value.push({ id: genId(), role: 'user', content: payload, createdAt: Date.now() })
+  uploadedFiles.value = []
   await nextTick()
   scrollBottom(true)
   // 提交后内容由全局 SSE 事件流推送(onTurnStart 建助手消息 / onText·onReasoning 增量 / onTurnDone 结束)
@@ -1288,6 +1345,64 @@ onUnmounted(() => {
 }
 .da-composer--busy {
   border-color: var(--bd-primary);
+}
+.da-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 860px;
+  margin: 0 auto 6px;
+}
+.da-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--bd-border);
+  border-radius: 6px;
+  background: var(--bd-panel);
+  font-size: 11px;
+}
+.da-file-chip__icon {
+  color: var(--bd-primary);
+  font-size: 12px;
+}
+.da-file-chip__del {
+  cursor: pointer;
+  color: var(--bd-muted);
+  padding: 0 2px;
+}
+.da-file-chip__del:hover {
+  color: #f56c6c;
+}
+.da-upload-msg {
+  max-width: 860px;
+  margin: 0 auto 6px;
+  font-size: 11px;
+  color: var(--bd-primary);
+}
+.da-upload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--bd-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.da-upload:hover {
+  color: var(--bd-primary);
+  background: color-mix(in srgb, var(--bd-primary) 10%, transparent);
+}
+.da-upload--disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.da-upload__input {
+  display: none;
 }
 .da-composer__caret {
   color: var(--bd-primary);

@@ -107,7 +107,7 @@ export const menus: MenuItem[] = [
     path: '/assistant',
     title: '开发助手',
     name: 'devAssistant',
-    icon: 'MagicStick',
+    icon: 'Robot',
     kind: 'native'
   }
 ]

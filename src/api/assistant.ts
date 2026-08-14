@@ -236,6 +236,22 @@ export async function deleteProject(id: string): Promise<void> {
   await fetch(`/api/assistant/projects/${id}`, { method: 'DELETE' })
 }
 
+/** 上传文件到项目目录(经门户写入 workspace/projects/<dir>/),返回 {path, size} */
+export async function uploadToProject(
+  projectId: string,
+  name: string,
+  contentBase64: string
+): Promise<{ path: string; size: number }> {
+  const res = await fetch(`/api/assistant/projects/${projectId}/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, contentBase64 })
+  })
+  const body = await j(res)
+  if (body.code !== 0) throw new Error(body.msg || '上传失败')
+  return body.data
+}
+
 /** 会话归属项目(projectId 空 = 解绑) */
 export async function bindSessionProject(sessionId: string, projectId: string | null): Promise<void> {
   await fetch('/api/assistant/projects/session', {
