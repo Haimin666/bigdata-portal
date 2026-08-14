@@ -83,6 +83,19 @@
 
       <!-- 底部输入区 -->
       <footer class="da-composer-wrap">
+        <div v-if="slashOpen" class="da-slash">
+          <div
+            v-for="(c, i) in slashFiltered"
+            :key="c.cmd"
+            class="da-slash__item"
+            :class="{ 'da-slash__item--sel': i === slashIndex }"
+            @mousedown.prevent="acceptSlash(c)"
+          >
+            <span class="da-slash__sig">{{ c.sig }}</span>
+            <span class="da-slash__desc">{{ c.desc }}</span>
+          </div>
+          <div v-if="!slashFiltered.length" class="da-slash__empty">无匹配命令</div>
+        </div>
         <div class="da-composer" :class="{ 'da-composer--busy': generating }">
           <span class="da-composer__caret">›</span>
           <textarea
@@ -132,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import {
   CaretBottom,
   CaretRight,
@@ -174,6 +187,17 @@ const sessionQuery = ref('')
 const generating = ref(false)
 const chatBox = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
+
+// 输入 / 时弹出命令菜单
+watch(draft, (v) => {
+  const t = v.trim()
+  if (t.startsWith('/') && !t.includes(' ')) {
+    slashOpen.value = true
+    slashIndex.value = 0
+  } else if (slashOpen.value && (t === '' || t.includes(' '))) {
+    closeSlash()
+  }
+})
 
 const filteredSessions = computed(() => {
   const q = sessionQuery.value.trim().toLowerCase()
@@ -290,8 +314,78 @@ async function switchBranch(id: string) {
   await refreshAfterCommand()
 }
 
+// ── 斜杠命令菜单(输入 / 弹出,方向键选择,Enter 执行)──────
+interface SlashCmd {
+  cmd: string
+  sig: string
+  desc: string
+  /** true = 需要参数(选择后填入输入框由用户补全) */
+  needsArg?: boolean
+}
+const SLASH_CMDS: SlashCmd[] = [
+  { cmd: 'new', sig: '/new', desc: '新会话' },
+  { cmd: 'compact', sig: '/compact', desc: '压缩当前会话' },
+  { cmd: 'rewind', sig: '/rewind', desc: '回退到检查点' },
+  { cmd: 'tree', sig: '/tree', desc: '查看分支树' },
+  { cmd: 'branch', sig: '/branch <名称>', desc: '创建分支', needsArg: true },
+  { cmd: 'switch', sig: '/switch <id>', desc: '切换分支', needsArg: true },
+  { cmd: 'model', sig: '/model <ref>', desc: '切换模型', needsArg: true },
+  { cmd: 'effort', sig: '/effort <level>', desc: '推理强度', needsArg: true },
+  { cmd: 'goal', sig: '/goal <任务>', desc: '设置目标', needsArg: true },
+  { cmd: 'memory', sig: '/memory', desc: '查看记忆' },
+  { cmd: 'mcp', sig: '/mcp', desc: 'MCP 工具状态' },
+  { cmd: 'skill', sig: '/skill', desc: '技能列表' },
+  { cmd: 'help', sig: '/help', desc: '帮助' }
+]
+const slashOpen = ref(false)
+const slashIndex = ref(0)
+const slashFiltered = computed(() => {
+  const q = draft.value.trim()
+  if (!q.startsWith('/')) return []
+  const kw = q.slice(1).toLowerCase()
+  if (!kw) return SLASH_CMDS
+  return SLASH_CMDS.filter((c) => c.cmd.includes(kw) || c.sig.includes(kw))
+})
+
+function closeSlash() {
+  slashOpen.value = false
+  slashIndex.value = 0
+}
+/** 选择命令:无参直接执行;需参数则把 sig 填入输入框让用户补全 */
+function acceptSlash(c: SlashCmd) {
+  if (c.needsArg) {
+    draft.value = c.sig.replace(/<[^>]*>/g, '').trim() + ' '
+    inputEl.value?.focus()
+  } else {
+    draft.value = ''
+    void runCommand('/' + c.cmd).then(() => refreshAfterCommand())
+  }
+  closeSlash()
+}
+
 // ── 输入区 ───────────────────────────────────────────────
 function onKeydown(e: KeyboardEvent) {
+  if (slashOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      slashIndex.value = Math.min(slashIndex.value + 1, slashFiltered.value.length - 1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      slashIndex.value = Math.max(slashIndex.value - 1, 0)
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      if (slashFiltered.value[slashIndex.value]) acceptSlash(slashFiltered.value[slashIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      closeSlash()
+      return
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
     void send()
@@ -915,6 +1009,51 @@ onUnmounted(() => {
 /* ── 输入区 ── */
 .da-composer-wrap {
   padding: 10px 18px 14px;
+  position: relative;
+}
+.da-slash {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(520px, 92%);
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  background: var(--bd-panel);
+  border: 1px solid var(--bd-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+  padding: 4px;
+  z-index: 20;
+}
+.da-slash__item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.da-slash__item--sel {
+  background: color-mix(in srgb, var(--bd-primary) 14%, transparent);
+  color: var(--bd-primary);
+}
+.da-slash__sig {
+  font-family: var(--bd-font);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.da-slash__desc {
+  color: var(--bd-muted);
+  font-size: 11px;
+}
+.da-slash__empty {
+  padding: 10px;
+  text-align: center;
+  color: var(--bd-muted);
+  font-size: 12px;
 }
 .da-composer {
   display: flex;
