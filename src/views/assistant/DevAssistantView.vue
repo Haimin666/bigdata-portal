@@ -119,13 +119,13 @@ import {
   VideoPause
 } from '@element-plus/icons-vue'
 import {
+  connectAssistantEvents,
   createSession,
   deleteSession,
   listMessages,
   listSessions,
   stopChat,
-  streamChat,
-  touchSession,
+  submitChat,
   type AssistantSession,
   type ChatMessage
 } from '@/api/assistant'
@@ -144,8 +144,6 @@ const sessionQuery = ref('')
 const generating = ref(false)
 const chatBox = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
-
-let abortCtrl: AbortController | null = null
 
 const filteredSessions = computed(() => {
   const q = sessionQuery.value.trim().toLowerCase()
@@ -174,7 +172,7 @@ async function onSelect(id: string) {
 }
 
 async function selectSession(id: string) {
-  abort()
+  stop()
   activeId.value = id
   messages.value = await listMessages(id)
   await nextTick()
@@ -202,63 +200,25 @@ async function send() {
   if (!text || generating.value) return
   draft.value = ''
   if (!activeId.value) {
-    const s = await createSession(text.slice(0, 24))
+    const s = await createSession()
     sessions.value.unshift(s)
     activeId.value = s.id
   }
   const sid = activeId.value
-  const userMsg: ChatMessage = { id: genId(), role: 'user', content: text, createdAt: Date.now() }
-  const asstMsg: ChatMessage = {
-    id: genId(),
-    role: 'assistant',
-    content: '',
-    thinking: '',
-    createdAt: Date.now()
-  }
-  messages.value.push(userMsg, asstMsg)
-  await touchSession(sid, text.slice(0, 24))
-  const t = sessions.value.find((s) => s.id === sid)
-  if (t) t.title = text.slice(0, 24)
-  // 若用户未输入标题,用首条消息刷新会话标题
-  generating.value = true
-  abortCtrl = new AbortController()
+  messages.value.push({ id: genId(), role: 'user', content: text, createdAt: Date.now() })
   await nextTick()
   scrollBottom(true)
+  // 提交后内容由全局 SSE 事件流推送(onTurnStart 建助手消息 / onText·onReasoning 增量 / onTurnDone 结束)
   try {
-    await streamChat({
-      sessionId: sid,
-      message: text,
-      onDelta: (d) => {
-        asstMsg.content += d
-        scrollBottom()
-      },
-      onThinking: (th) => {
-        asstMsg.thinking = th
-        scrollBottom()
-      },
-      signal: abortCtrl.signal
-    })
-    // 标题未定义时用首条消息前 24 字
-    const s = sessions.value.find((x) => x.id === sid)
-    if (s && (!s.title || s.title === '新会话')) s.title = text.slice(0, 24)
-    await touchSession(sid)
+    await submitChat(sid, text)
   } catch {
-    /* abort 或网络错误,保留已生成内容 */
-  } finally {
     generating.value = false
-    abortCtrl = null
   }
 }
 
 function stop() {
-  abort()
-  void stopChat(activeId.value)
-}
-
-function abort() {
-  abortCtrl?.abort()
-  abortCtrl = null
   generating.value = false
+  void stopChat()
 }
 
 // ── 输入区 ───────────────────────────────────────────────
@@ -423,11 +383,46 @@ function onMainClick(e: MouseEvent) {
   onCopyClick(e)
 }
 
+// ── SSE 事件流(全局广播驱动当前会话渲染)──────────────────
+let disconnectEvents: (() => void) | null = null
+
+function handleTurnStart() {
+  generating.value = true
+  messages.value.push({ id: genId(), role: 'assistant', content: '', thinking: '', createdAt: Date.now() })
+  scrollBottom(true)
+}
+function handleReasoning(delta: string) {
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant') {
+    last.thinking = (last.thinking || '') + delta
+    scrollBottom()
+  }
+}
+function handleText(delta: string) {
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant') {
+    last.content += delta
+    scrollBottom()
+  }
+}
+function handleTurnDone() {
+  generating.value = false
+  // 标题/轮次由服务端生成,静默刷新列表(保留 activeId 选中态)
+  void listSessions().then((list) => { sessions.value = list }).catch(() => {})
+}
+
 // ── 生命周期 ─────────────────────────────────────────────
 void loadSessions()
+disconnectEvents = connectAssistantEvents({
+  onTurnStart: handleTurnStart,
+  onReasoning: handleReasoning,
+  onText: handleText,
+  onTurnDone: handleTurnDone
+})
 
 onUnmounted(() => {
-  abort()
+  disconnectEvents?.()
+  disconnectEvents = null
 })
 </script>
 

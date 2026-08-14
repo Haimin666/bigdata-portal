@@ -160,6 +160,29 @@ function iframeProxy(targetUrl, prefix) {
   })
 }
 
+// ── 开发助手:转发到本地 Reasonix serve(8787),注入 auth cookie ──
+// 8787 为 token 模式(/auth/token 换取 HttpOnly cookie reasonix_token,
+// 且 cookie 值就是 token 本身),网关持有 token 直接附加,浏览器同源无感。
+// /events SSE 由 http-proxy 流式透传,EventSource 指向门户同源路径。
+if (config.assistantUrl) {
+  app.use('/api/assistant', createProxyMiddleware({
+    target: config.assistantUrl,
+    changeOrigin: true,
+    pathRewrite: { '^/api/assistant': '' },
+    logLevel: 'warn',
+    on: {
+      proxyReq(proxyReq) {
+        if (config.assistantToken) {
+          proxyReq.setHeader('Cookie', `reasonix_token=${config.assistantToken}`)
+        }
+      },
+      proxyRes(proxyRes) {
+        delete proxyRes.headers['x-frame-options']
+      }
+    }
+  }))
+}
+
 // 自动登录端点(凭证:请求体 > config.accounts 配置)
 // transport: 'json' 请求体 JSON | 'form' 请求体表单 | 'query' 凭证放 URL query
 // passwordEncode: 'base64' 密码先 base64 编码再发送(OMD)
