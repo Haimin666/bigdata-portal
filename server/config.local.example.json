@@ -35,5 +35,9 @@
   "dsDepsRefreshInterval": 3600000,
   "_enabledModules说明": "前端模块显隐白名单(菜单 name):yarn/dsTask/hdfs/dbQuery/stingray/ds/streamx/jupyter/omd。留空 [] 或省略 = 全部展示;配置后仅展示名单内模块。",
   "enabledModules": [],
-  "dbProxyWriteToken": ""
+  "dbProxyWriteToken": "",
+  "_assistant说明": "开发助手:转发到本地 Reasonix serve(8787)。assistantToken 与 8787 的 REASONIX_SERVE_TOKEN 一致;assistantWorkspace 为门户可写的 workspace 宿主目录(生产:门户容器挂载 8787 的 workspace 卷后填容器内路径,如 /app/assistant-workspace;本地非 docker:填 8787 挂载的宿主目录)。不配 assistantWorkspace 时新建项目/上传会降级为 503 提示,agent 按注入指令自建目录。",
+  "assistantUrl": "http://host.docker.internal:8787",
+  "assistantToken": "",
+  "assistantWorkspace": ""
 }
