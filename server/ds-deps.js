@@ -41,6 +41,9 @@ let cache = {
 }
 
 // ── HTTP 工具(直连海豚,带 token)────────────────────────────
+// 响应体大小上限(防异常大响应耗尽内存)
+const MAX_RESP_BYTES = 10 * 1024 * 1024
+
 function request(method, url, body) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https://') ? https : http
@@ -56,7 +59,16 @@ function request(method, url, body) {
       },
       (res) => {
         let data = ''
-        res.on('data', (c) => (data += c))
+        let size = 0
+        res.on('data', (c) => {
+          size += c.length
+          if (size > MAX_RESP_BYTES) {
+            res.destroy(new Error(`DS 响应过大(>${MAX_RESP_BYTES} bytes),已中止`))
+            return
+          }
+          data += c
+        })
+        res.on('error', (e) => reject(e))
         res.on('end', () => {
           try {
             resolve(JSON.parse(data))
@@ -165,7 +177,7 @@ async function collect() {
   try {
     // 1. 项目列表
     const projRes = await dsApi('/projects/query-project-list')
-  const projects = projRes?.data || []
+    const projects = projRes?.data || []
   console.log(`[ds-deps] 项目数: ${projects.length}`)
   // 2. 每项目的工作流列表(收集 processId + 名称)
   const allWorkflows = [] // {projectId, projectName, id, name}
@@ -511,9 +523,9 @@ export function dsDepsRouter() {
     res.json({ code: 0, msg: '全量刷新已触发' })
   })
 
-  // 缓存状态
+  // 缓存状态(不暴露服务器绝对路径)
   router.get('/status', (req, res) => {
-    res.json({ code: 0, data: { updatedAt: cache.updatedAt, count: cache.nodes.size, cacheFile: CACHE_FILE } })
+    res.json({ code: 0, data: { updatedAt: cache.updatedAt, count: cache.nodes.size } })
   })
 
   // 跨项目搜索工作流(按工作流名/任务名/项目名,基于缓存)

@@ -86,7 +86,8 @@ export async function cancelJob(jobId, timeoutMs = 30000) {
   return res.data
 }
 
-/** 读取 spark 引擎日志增量(driver JVM 日志 + 审计),供前端日志面板透传 */export async function readLogs(offsets = { jvm: 0, audit: 0 }) {
+/** 读取 spark 引擎日志增量(driver JVM 日志 + 审计),供前端日志面板透传 */
+export async function readLogs(offsets = { jvm: 0, audit: 0 }) {
   const q = new URLSearchParams({
     jvm: String(offsets.jvm || 0),
     audit: String(offsets.audit || 0)

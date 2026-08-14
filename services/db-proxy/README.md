@@ -152,7 +152,7 @@ SQL 与 PySpark 代码共用同一 session,支持临时视图跨请求保留。
 - **懒加载**:首次 `/spark/query` 才创建 SparkSession;未配 spark 或未装 pyspark 不影响
   MySQL/Oracle 查询(db-proxy 启动即用)。
 - **串行执行**:同一时刻只跑一个请求(threading.Lock),避免 SparkSession 并发串扰。
-- **SQL 写限制**:默认只读——`SELECT/SHOW/DESC/EXPLAIN/SET/USE` 放行;写语句
+- **SQL 写限制**:只读关键字(`SELECT/SHOW/DESC/EXPLAIN/SET/USE`)放行;写语句
   (INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等)需 `allowWrite: true` 且请求带
   `writeUnlocked: true`(由门户网关在 X-Spark-Token 校验通过后置位)。
 - **PySpark 代码**:信任模式(执行于 `{spark, sc}` 命名空间),完整审计日志;

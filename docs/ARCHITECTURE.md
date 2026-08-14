@@ -51,7 +51,7 @@ src/
 
 - **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁
 - **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
-- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin
+- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)
 - **字体**:全局等宽字体栈 `--bd-font`,管理端可覆盖
 
 ## 3. 网关架构(server/)
@@ -78,7 +78,9 @@ src/
 ### 3.3 认证与写操作防线
 
 - 会话:`portal_session` cookie(httpOnly),`requireAuth`/`requireAdmin` 守卫;`PROTECTED_PREFIXES` 内未登录一律 401
-- **写操作解锁**:Spark/Flink 写 SQL 必须带 `X-Spark-Token`(由 `/api/spark/auth` 校验 `sparkWritePassword` 签发,12h);`isSparkWriteSql` 白名单检测(去注释 + 拒绝多语句 + 防 `/*!` 走私)
+- **WebSocket 鉴权**:upgrade 请求不经过 Express 中间件,网关在 `server.on('upgrade')` 手动解析 `portal_session` cookie 校验,未登录/未初始化一律断开(`/__/stingray`、`/apps/jupyter` 的 WS 同样受控)
+- **写操作解锁**:Spark/Flink 写 SQL 必须带 `X-Spark-Token`(由 `/api/spark/auth` 校验 `sparkWritePassword` 签发,12h);`isSparkWriteSql` 白名单检测(去注释 + 拒绝多语句 + 防 `/*!` 走私 + `SET GLOBAL` 视为写);**token 绑定签发用户**——仅本人会话可用,跨用户复用立即失效删除(防 XSS 窃取复用)
+- **MySQL/Oracle 同防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` + token 校验;db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线);`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束,GET 状态查询放行
 - 未配置 `sparkWritePassword` → 写操作一律禁止(默认只读)
 
 ## 4. db-proxy(数据服务,Python FastAPI)
@@ -116,7 +118,7 @@ QueryView.vue
 - 服务:`port`(默认 3000)、`enabledModules`(空=全量)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`
 - 数据:`dbProxyUrl`/`dbProxyToken`、`dbScriptsDir`、`dsDepsCacheFile`
-- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`
+- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`loginTlsInsecure`(自动登录上游 TLS 证书校验,默认开启)、`trustProxy`(反代层数,直连部署保持 0)
 - 各子应用账号 `accounts.*`
 
 ## 7. 部署拓扑

@@ -78,6 +78,7 @@ const EXEC_GATES = [
   { re: /^\/api\/spark\//, module: 'dbQuery' }, // SQL/PySpark 执行、解锁、停止
   { re: /^\/api\/flink\//, module: 'dbQuery' }, // Flink 查询/PreJob 提交/停止
   { re: /^\/api\/dbquery\//, module: 'dbQuery' }, // MySQL/Oracle 查询
+  { re: /^\/api\/db\/jobs/, module: 'dbQuery', onlyWrite: true }, // MySQL/Oracle 异步任务提交/取消(GET 状态查询放行)
   { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
   { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
   { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
@@ -210,7 +211,8 @@ function createLoginEndpoint({
       fullPath,
       {
         method: 'POST',
-        rejectUnauthorized: false,
+        // 默认校验证书(防中间人截获子系统登录密码);内网自签名系统可配 loginTlsInsecure:true 关闭
+        rejectUnauthorized: !config.loginTlsInsecure,
         headers
       },
       (resp) => {
@@ -632,6 +634,47 @@ app.get('/api/config/modules', (req, res) => {
 // ── DB 代理(客户机侧 services/db-proxy)─────────────────────────
 // 平台无法直连数据库,经客户机的只读 HTTP 代理执行查询。
 // 安全:目标必须命中配置的 DB_PROXY_URL(SSRF 防护);未配置时代理不可用。
+// MySQL/Oracle 异步任务提交:与 /api/dbquery/query 同防线 —— 写 SQL 必须 X-Spark-Token 解锁。
+// 该路径落在 PROXY_PATHS('/api/db/')内,全局 express.json 被跳过,此处路由级挂载 json 解析。
+// 必须在 dbProxy 透传中间件之前注册,否则被 createProxyMiddleware 直接转发(绕过写检测)。
+app.post('/api/db/jobs', express.json(), async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  const sql = String(req.body?.sql || '')
+  const dbName = String(req.body?.db || '').trim()
+  if (!dbName) {
+    return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
+  if (isSparkWriteSql(sql)) {
+    const tk = req.get('X-Spark-Token')
+    if (!tk || !sparkTokenValid(tk)) {
+      return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入密码(与 Spark 同一密码)' })
+    }
+  }
+  // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
+  const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 3600000, 7200000)
+  try {
+    const r = await fetch(config.dbProxyUrl + '/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
+      body: JSON.stringify({ db: dbName, sql, timeoutMs }),
+      signal: AbortSignal.timeout(30000)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) {
+      const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      err.status = r.status
+      throw err
+    }
+    res.json({ code: 0, data: body.data })
+  } catch (e) {
+    console.error('[db/jobs]', e instanceof Error ? e.message : e)
+    const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+  }
+})
+
 if (config.dbProxyUrl) {
   const dbProxy = createProxyMiddleware({
     target: config.dbProxyUrl,
@@ -649,9 +692,10 @@ if (config.dbProxyUrl) {
     // 敏感路径不走透传:
     //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
     //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
+    //  - /jobs 异步任务提交由上方专用路由鉴权(写检测 + token);此处兜底拦非 POST 变体
     //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
     //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path)) {
+    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path) || /^\/jobs\/?$/i.test(req.path)) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
@@ -669,7 +713,8 @@ if (config.dbProxyUrl) {
 // 必须携带 POST /api/spark/auth 签发的 X-Spark-Token(密码解锁,类似 Jupyter 登录),
 // 未配置 SPARK_WRITE_PASSWORD 时写操作一律禁止(默认只读)。
 const SPARK_WRITE_TOKEN_TTL = 12 * 60 * 60 * 1000 // 12h
-const sparkTokens = new Map() // token -> expiresAt
+// token -> { username, expiresAt }:绑定签发用户,防跨用户复用(XSS 窃取的 token 仅本人会话可用)
+const sparkTokens = new Map()
 
 // 判定 SQL 是否可能为写操作(服务端权威校验,采用「白名单读 + 显式拒绝」策略):
 // 1) 去掉注释后,若以只读关键字开头(SELECT/SHOW/DESC/DESCRIBE/EXPLAIN/SET/USE/WITH 且无写关键字),
@@ -736,24 +781,36 @@ function isSparkWriteSql(sql) {
   // SELECT 前缀走私(INTO OUTFILE/DUMPFILE、LOAD_FILE)视为写
   if (SPARK_SELECT_SMUGGLE.test(s)) return true
   // 只读关键字开头 → 放行(但要排除 WITH ... INSERT 的 CTE-DML)
-  if (SPARK_READONLY_KW.test(s)) return false
+  if (SPARK_READONLY_KW.test(s)) {
+    // SET GLOBAL / SET @@global.* 会修改服务器全局配置,视为写(需解锁);SET SESSION/普通 SET 会话级放行
+    if (/^SET\b/i.test(s) && (/\bGLOBAL\b/i.test(s) || /@@global\./i.test(s))) return true
+    return false
+  }
   if (/^WITH\b/i.test(s) && !SPARK_WRITE_KW.test(s)) return false
   // 其余(含 CTE 前缀 DML、CACHE/ANALYZE 等)一律视为写
   return true
 }
 
-function issueSparkToken() {
+function issueSparkToken(username) {
   const token = randomBytes(24).toString('hex')
-  sparkTokens.set(token, Date.now() + SPARK_WRITE_TOKEN_TTL)
+  sparkTokens.set(token, { username: username || null, expiresAt: Date.now() + SPARK_WRITE_TOKEN_TTL })
   return token
 }
 
-function sparkTokenValid(token) {
-  const exp = sparkTokens.get(token)
-  if (!exp) return false
-  if (Date.now() > exp) {
+function sparkTokenValid(token, req) {
+  const rec = sparkTokens.get(token)
+  if (!rec) return false
+  if (Date.now() > rec.expiresAt) {
     sparkTokens.delete(token)
     return false
+  }
+  // 绑定签发用户:认证开启时仅签发者本人可用,他人复用一律无效并删除(防重放)
+  if (rec.username != null) {
+    const cur = req?.user?.username || null
+    if (cur !== rec.username) {
+      sparkTokens.delete(token)
+      return false
+    }
   }
   return true
 }
@@ -796,7 +853,7 @@ if (config.dbProxyUrl) {
       return res.status(401).json({ code: 401, msg: '密码错误' })
     }
     authFails.delete(ip)
-    res.json({ code: 0, data: { token: issueSparkToken(), expiresIn: SPARK_WRITE_TOKEN_TTL } })
+    res.json({ code: 0, data: { token: issueSparkToken(req.user?.username), expiresIn: SPARK_WRITE_TOKEN_TTL } })
   })
 
   app.post('/api/spark/query', async (req, res) => {
@@ -810,14 +867,14 @@ if (config.dbProxyUrl) {
       let writeUnlocked = false
       if (k === 'sql' && isSparkWriteSql(sql)) {
         const tk = req.get('X-Spark-Token')
-        if (!tk || !sparkTokenValid(tk)) {
+        if (!tk || !sparkTokenValid(tk, req)) {
           return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入 Spark 写权限密码' })
         }
         writeUnlocked = true
       }
       if (k === 'pyspark') {
         const tk = req.get('X-Spark-Token')
-        if (!tk || !sparkTokenValid(tk)) {
+        if (!tk || !sparkTokenValid(tk, req)) {
           return res.status(403).json({ code: 403, msg: 'PySpark 为任意代码执行,请先解锁 Spark 写权限' })
         }
         writeUnlocked = true
@@ -837,7 +894,7 @@ if (config.dbProxyUrl) {
   // 写拦截与 /api/spark/query 一致:写语句必须解锁(X-Spark-Token)
   function sparkWriteAllowed(req) {
     const tk = req.get('X-Spark-Token')
-    return !!(tk && sparkTokenValid(tk))
+    return !!(tk && sparkTokenValid(tk, req))
   }
 
   app.post('/api/spark/jobs', async (req, res) => {
@@ -919,7 +976,7 @@ if (config.dbProxyUrl) {
   // 周期清理过期 spark token 与解锁失败计数,防止内存无限增长(G2)
   setInterval(() => {
     const now = Date.now()
-    for (const [tk, exp] of sparkTokens) if (exp < now) sparkTokens.delete(tk)
+    for (const [tk, rec] of sparkTokens) if (rec.expiresAt < now) sparkTokens.delete(tk)
     for (const [ip, rec] of authFails) if (rec.lockUntil > 0 && rec.lockUntil < now) authFails.delete(ip)
   }, 30 * 60 * 1000).unref()
 } else {
@@ -1198,6 +1255,20 @@ const server = app.listen(config.port, () => {
 })
 
 server.on('upgrade', (req, socket, head) => {
+  // WS 鉴权:upgrade 请求不经过 Express 中间件(PROTECTED_PREFIXES 登录门禁对其失效),
+  // 这里手动解析 portal_session cookie 校验;未登录/未初始化一律断开。
+  if (auth.enabled) {
+    const cookies = {}
+    for (const part of String(req.headers.cookie || '').split(';')) {
+      const i = part.indexOf('=')
+      if (i > 0) cookies[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+    }
+    const user = auth.currentUser({ cookies })
+    if (!user) {
+      socket.destroy()
+      return
+    }
+  }
   if (req.url.startsWith('/__/stingray')) {
     wsProxy.ws(req, socket, head)
   } else if (req.url.startsWith('/apps/jupyter')) {

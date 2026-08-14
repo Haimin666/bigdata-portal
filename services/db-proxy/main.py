@@ -504,6 +504,13 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None):
             status_code=403,
             detail=f"datasource '{ds.name}' is read-only (readOnly:true), write SQL not allowed",
         )
+    # 与同步 /query 对齐:异步任务路径(/jobs)此前缺失多语句走私防护与表级白名单,
+    # 必须在此补齐(网关 /api/db/jobs 已做写解锁校验,此处为第二道防线)
+    if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", clean_sql, re.IGNORECASE):
+        pass  # 过程块内多分号属正常语法,放行
+    else:
+        check_single_statement(clean_sql)
+    check_tables_allowed(clean_sql)
     limit = enforce_limit(clean_sql)
     q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
     return ds, clean_sql, is_select, limit, q_timeout, time.time()
