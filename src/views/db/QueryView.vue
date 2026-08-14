@@ -1313,7 +1313,7 @@ async function copyAllTsv() {
           <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
           <div v-else class="result-card">
             <div v-loading="loading" class="result-table-wrap">
-            <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''">
+              <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''">
               <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
               <el-table-column
                 v-for="c in currentResult.columns"
@@ -1352,7 +1352,18 @@ async function copyAllTsv() {
               </el-table-column>
             </el-table>
           </div>
-          <!-- 底部工具条:统计 + 复制 + 选择模式 -->
+          <!-- 翻页(紧贴数据集下方) -->
+          <el-pagination
+            v-if="currentResult.rows.length > pageSize"
+            v-model:current-page="pageCurrent"
+            v-model:page-size="pageSize"
+            class="result-pagination"
+            :page-sizes="[15, 50, 100, 200]"
+            :total="currentResult.rows.length"
+            layout="total, sizes, prev, pager, next"
+            small
+          />
+          <!-- 底部信息条:统计 + 复制 + 选择模式(最底部) -->
           <div class="result-toolbar">
             <span class="stats">
               <template v-if="currentResult.error">{{ currentResult.error }}</template>
@@ -1365,9 +1376,6 @@ async function copyAllTsv() {
                 <span class="stats-num">{{ currentResult.columns.length }} 列</span>
                 <template v-if="currentResult.truncated"><span class="footer-muted">(已截断)</span></template>
                 <span class="footer-muted">· {{ currentResult.costMs }}ms</span>
-                <template v-if="currentResult.rows.length > pageSize">
-                  <span class="footer-muted">· 分页 {{ pageCurrent }}/{{ Math.ceil(currentResult.rows.length / pageSize) }}</span>
-                </template>
               </template>
             </span>
             <span class="tools">
@@ -1381,17 +1389,6 @@ async function copyAllTsv() {
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
             </span>
           </div>
-          <!-- 翻页(默认 15 条/页) -->
-          <el-pagination
-            v-if="currentResult.rows.length > pageSize"
-            v-model:current-page="pageCurrent"
-            v-model:page-size="pageSize"
-            class="result-pagination"
-            :page-sizes="[15, 50, 100, 200]"
-            :total="currentResult.rows.length"
-            layout="total, sizes, prev, pager, next"
-            small
-          />
             </div>
         </template>
       </div>
@@ -1971,36 +1968,51 @@ async function copyAllTsv() {
   }
 
   /* 表头:左侧列名(点击排序)+ 右侧复制按钮 */
+  /* 表头:列名占满并预留右侧空间(放复制按钮+排序箭头),避免复制按钮与排序重叠 */
   :deep(.col-header) {
+    flex: 1;
+    min-width: 0;
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    max-width: 100%;
+    padding-right: 26px; /* 为右侧 hover 的复制按钮 + 排序箭头预留 */
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* 复制按钮:绝对定位在排序箭头左侧,悬停表头才显现,始终不遮排序 */
   :deep(.col-header-copy) {
+    position: absolute;
+    right: 24px;
+    top: 50%;
+    transform: translateY(-50%);
     cursor: copy;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     color: $muted;
-    margin-left: 4px;
     font-size: 13px;
+    padding: 2px 3px;
+    border-radius: 4px;
+    background: var(--el-table-header-bg-color);
     opacity: 0;
     transition: opacity 0.15s;
 
     &:hover {
       color: $primary;
+      background: var(--el-fill-color);
     }
   }
-  :deep(th:hover .col-header-copy) {
+  :deep(th.el-table__cell:hover .col-header-copy) {
     opacity: 1;
   }
-  /* 表头排序箭头与复制按钮同排 */
+  /* 排序箭头保持在最右侧,与复制按钮分隔,互不重叠 */
   :deep(.caret-wrapper) {
-    right: 8px;
+    right: 6px;
+  }
+  /* 表头 cell 需要定位上下文(供复制按钮 absolute) */
+  :deep(.result-table th .cell) {
+    position: relative;
   }
 
   /* NULL 单元格:低饱和胶囊,醒目但不过度突出 */
