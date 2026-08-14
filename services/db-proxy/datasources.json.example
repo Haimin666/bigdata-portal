@@ -38,6 +38,7 @@
     "maxSqlLen": 65536,
     "allowWrite": false,
     "logDir": "spark-logs",
+    "keepaliveInterval": 300,
     "sparkConf": {}
   },
   "flink": {

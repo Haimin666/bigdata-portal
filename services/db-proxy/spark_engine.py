@@ -146,12 +146,49 @@ class SparkEngine:
         self._last_error: Optional[str] = None
         self._current_job_group: Optional[str] = None  # 当前执行中的 Spark jobGroup(可取消)
         self._cancel_flag = threading.Event()  # 手动/超时取消标记
+        self._keepalive_thread: Optional[threading.Thread] = None
         self._log_dir = os.path.join(base_dir, str(cfg.get("logDir", "spark-logs")))
         os.makedirs(self._log_dir, exist_ok=True)
         self._audit_file = os.path.join(self._log_dir, "spark-audit.log")
         self._jvm_log = os.path.join(self._log_dir, "spark-jvm.log")
         self._log4j_props = os.path.join(self._log_dir, "log4j.properties")
         self._write_log4j_props()
+    # ── 保活 ──────────────────────────────────────────────────
+    def _start_keepalive(self) -> None:
+        """后台保活线程:周期执行轻量 SQL(select 1),维持常驻 session 存活。
+
+        解决:公司网关固定 60s 读超时,首次查询冷启动(30~90s)会被网关掐断返回 504;
+        且 YARN 空闲回收会停掉 SparkContext。保活后 session 一直就绪,用户查询秒回。
+        若 context 已被外部 stop,execute 触发 isStopped 自动重建(见 _ensure_initialized)。
+        """
+        if self._keepalive_thread is not None:
+            return
+        interval = int(self.cfg.get("keepaliveInterval", 300))  # 秒;0=关闭
+        if interval <= 0:
+            return
+
+        def loop() -> None:
+            while True:
+                time.sleep(interval)
+                try:
+                    if self._spark is None:
+                        continue  # 尚未初始化,等待首次使用
+                    # 轻量保活查询;context 死时 collect 抛异常 → 走 except 重建
+                    self._spark.sql("select 1").collect()
+                    self._audit("spark keepalive ok")
+                except Exception as e:
+                    self._audit("spark keepalive failed: %s" % str(e)[:200])
+                    try:
+                        if self._spark is not None:
+                            self._spark.stop()
+                    except Exception:
+                        pass
+                    self._spark = None  # 下次查询/保活自动重建
+
+        self._keepalive_thread = threading.Thread(target=loop, daemon=True, name="spark-keepalive")
+        self._keepalive_thread.start()
+        log.info("spark keepalive started (interval=%ss)", interval)
+
     # ── 初始化 ────────────────────────────────────────────────
     def _write_log4j_props(self) -> None:
         """生成 log4j.properties:driver JVM 日志(含 INFO 级)写入 spark-jvm.log。"""
@@ -205,6 +242,7 @@ class SparkEngine:
             try:
                 self._spark = self._build_session()
                 self._session_state = "idle"
+                self._start_keepalive()
                 self._audit(
                     "spark session created in %.1fs (appName=%s, master=%s)"
                     % (time.time() - t0, self.cfg.get("appName", "db-proxy-spark"), self.cfg.get("master", "yarn"))
