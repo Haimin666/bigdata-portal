@@ -13,8 +13,6 @@
         <button class="da-act" title="压缩当前会话" @click="doCompact"><el-icon><Minus /></el-icon></button>
         <button class="da-act" title="回退到检查点" @click="doRewind"><el-icon><RefreshLeft /></el-icon></button>
         <button class="da-act" title="分支" @click="openBranches"><el-icon><Share /></el-icon></button>
-        <button class="da-act" title="模型" @click="openModels"><el-icon><Cpu /></el-icon></button>
-        <button class="da-act" title="统计" @click="openStats"><el-icon><DataAnalysis /></el-icon></button>
       </div>
       <div class="da-search">
         <el-icon class="da-search__icon"><Search /></el-icon>
@@ -130,44 +128,6 @@
       </div>
     </el-dialog>
 
-    <!-- 模型面板 -->
-    <el-dialog v-model="modelOpen" title="模型" width="480px" append-to-body>
-      <div class="da-list">
-        <div v-for="m in models" :key="m.ref" class="da-li" :class="{ 'da-li--active': m.ref === currentModel || m.active }">
-          <div class="da-li__main">
-            <div class="da-li__title">{{ m.ref }}</div>
-            <div class="da-li__meta">{{ m.provider }} · {{ m.model }}</div>
-          </div>
-          <el-button size="small" :disabled="(m.ref === currentModel || m.active) || generating" @click="switchModel(m.ref)">
-            {{ m.ref === currentModel || m.active ? '当前' : '切换' }}
-          </el-button>
-        </div>
-        <div v-if="!models.length" class="da-empty">暂无模型</div>
-      </div>
-    </el-dialog>
-
-    <!-- 统计面板 -->
-    <el-dialog v-model="statOpen" title="统计" width="440px" append-to-body>
-      <div class="da-stats">
-        <div class="da-stat-card">
-          <div class="da-stat-card__label">模型</div>
-          <div class="da-stat-card__val">{{ stats.label || '—' }}</div>
-        </div>
-        <div class="da-stat-card">
-          <div class="da-stat-card__label">上下文</div>
-          <div class="da-stat-card__val">{{ fmtTok(stats.used) }}<span class="da-stat-card__sub"> / {{ fmtTok(stats.window) }}</span></div>
-          <div class="da-ctx-bar"><div class="da-ctx-bar__fill" :style="{ width: ctxPct + '%' }"></div></div>
-        </div>
-        <div class="da-stat-card">
-          <div class="da-stat-card__label">缓存命中</div>
-          <div class="da-stat-card__val">{{ cachePct }}%</div>
-        </div>
-        <div class="da-stat-card">
-          <div class="da-stat-card__label">状态</div>
-          <div class="da-stat-card__val">{{ stats.running ? '运行中' : '空闲' }}</div>
-        </div>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -176,8 +136,6 @@ import { computed, nextTick, onUnmounted, ref } from 'vue'
 import {
   CaretBottom,
   CaretRight,
-  Cpu,
-  DataAnalysis,
   Delete,
   Minus,
   Plus,
@@ -192,18 +150,14 @@ import {
   createSession,
   deleteSession,
   getBranches,
-  getModels,
-  getStatus,
   listMessages,
   listSessions,
   runCommand,
   stopChat,
   submitChat,
   type AssistantSession,
-  type AssistantStatus,
   type BranchInfo,
-  type ChatMessage,
-  type ModelInfo
+  type ChatMessage
 } from '@/api/assistant'
 
 const examples = [
@@ -301,28 +255,6 @@ function stop() {
 const branchOpen = ref(false)
 const branchTree = ref('')
 const branches = ref<BranchInfo[]>([])
-const modelOpen = ref(false)
-const models = ref<ModelInfo[]>([])
-const currentModel = ref('')
-const statOpen = ref(false)
-const stats = ref<AssistantStatus>({})
-
-const ctxPct = computed(() => {
-  const w = stats.value.window || 0
-  if (!w) return 0
-  return Math.min(100, Math.round(((stats.value.used || 0) / w) * 100))
-})
-const cachePct = computed(() => {
-  const hit = stats.value.cacheHit || 0
-  const miss = stats.value.cacheMiss || 0
-  if (!hit && !miss) return 0
-  return Math.round((hit / (hit + miss)) * 100)
-})
-
-function fmtTok(n?: number): string {
-  if (n == null) return '0'
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
 
 /** 命令执行后刷新当前会话消息 + 会话列表 */
 async function refreshAfterCommand() {
@@ -356,27 +288,6 @@ async function switchBranch(id: string) {
   await runCommand(`/switch ${id}`)
   branchOpen.value = false
   await refreshAfterCommand()
-}
-
-async function openModels() {
-  modelOpen.value = true
-  try {
-    const d = await getModels()
-    models.value = d.models
-    currentModel.value = d.current || ''
-  } catch {
-    /* 忽略 */
-  }
-}
-async function switchModel(ref: string) {
-  await runCommand(`/model ${ref}`)
-  modelOpen.value = false
-  void loadSessions()
-}
-
-async function openStats() {
-  statOpen.value = true
-  stats.value = await getStatus().catch(() => ({}))
 }
 
 // ── 输入区 ───────────────────────────────────────────────
@@ -1167,45 +1078,5 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.da-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.da-stat-card {
-  padding: 12px 14px;
-  border: 1px solid var(--bd-border);
-  border-radius: 8px;
-  background: var(--bd-panel);
-}
-.da-stat-card__label {
-  font-size: 11px;
-  color: var(--bd-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.da-stat-card__val {
-  font-size: 16px;
-  font-weight: 600;
-  margin-top: 4px;
-}
-.da-stat-card__sub {
-  font-size: 11px;
-  color: var(--bd-muted);
-  font-weight: 400;
-}
-.da-ctx-bar {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bd-table-hover);
-  margin-top: 8px;
-  overflow: hidden;
-}
-.da-ctx-bar__fill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--bd-primary);
-  transition: width 0.3s ease;
 }
 </style>
