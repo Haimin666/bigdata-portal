@@ -173,6 +173,27 @@ app.post('/api/assistant/projects', express.json(), (req, res) => {
   }
 })
 app.delete('/api/assistant/projects/:id', (req, res) => res.json(assistantProjects.remove(req.params.id)))
+app.get('/api/assistant/projects/:id/files', (req, res) => {
+  try {
+    res.json(assistantProjects.listFiles(req.params.id, req.query.rel || ''))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
+app.post('/api/assistant/projects/:id/dir', express.json(), (req, res) => {
+  try {
+    res.json(assistantProjects.mkdir(req.params.id, req.body?.rel || '', req.body?.name || ''))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
+app.post('/api/assistant/projects/:id/file', express.json(), (req, res) => {
+  try {
+    res.json(assistantProjects.createFile(req.params.id, req.body?.rel || '', req.body?.name || '', req.body?.content))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
 app.post('/api/assistant/projects/:id/upload', express.json({ limit: '20mb' }), (req, res) => {
   try {
     res.json(assistantProjects.upload(req.params.id, req.body?.name, req.body?.contentBase64))

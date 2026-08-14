@@ -89,6 +89,74 @@ export function createAssistantProjectsRoutes({ workspaceRoot }) {
       return { code: 0, data: { id: removed.id } }
     },
 
+    /** 项目目录绝对路径 + 相对路径安全校验 */
+    _base(id) {
+      const data = load()
+      const proj = data.projects.find((p) => p.id === id)
+      if (!proj) throw Object.assign(new Error('项目不存在'), { status: 404 })
+      if (!workspaceRoot) throw Object.assign(new Error('未配置 assistantWorkspace,无法操作项目文件'), { status: 503 })
+      return { proj, base: path.join(workspaceRoot, 'projects', proj.dir) }
+    },
+    /** 相对路径安全:禁止 .. 与绝对路径 */
+    _safeRel(rel) {
+      const clean = String(rel || '').replace(/\\/g, '/').replace(/^\//, '')
+      const parts = clean.split('/').filter((x) => x && x !== '.')
+      if (parts.some((x) => x === '..')) throw Object.assign(new Error('非法路径'), { status: 400 })
+      return parts
+    },
+
+    /** GET /api/assistant/projects/:id/files 列出项目目录树 */
+    listFiles(id, rel = '') {
+      const { base } = this._base(id)
+      const parts = this._safeRel(rel)
+      const dir = path.join(base, ...parts)
+      const entries = []
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          const abs = path.join(dir, name)
+          let st
+          try {
+            st = fs.statSync(abs)
+          } catch {
+            continue
+          }
+          entries.push({
+            name,
+            path: [...parts, name].join('/'),
+            type: st.isDirectory() ? 'dir' : 'file',
+            size: st.isDirectory() ? 0 : st.size
+          })
+        }
+      } catch {
+        /* 目录不存在返回空 */
+      }
+      return { code: 0, data: { entries } }
+    },
+
+    /** POST /api/assistant/projects/:id/dir {rel, name} 新建文件夹 */
+    mkdir(id, rel, name) {
+      const { base } = this._base(id)
+      const parts = this._safeRel(rel)
+      const n = this._safeRel(name).join('')
+      if (!n) throw Object.assign(new Error('名称不能为空'), { status: 400 })
+      const target = path.join(base, ...parts, n)
+      if (!target.startsWith(base)) throw Object.assign(new Error('非法路径'), { status: 400 })
+      fs.mkdirSync(target, { recursive: false })
+      return { code: 0, data: { path: [...parts, n].join('/') } }
+    },
+
+    /** POST /api/assistant/projects/:id/file {rel, name, content?} 新建文件 */
+    createFile(id, rel, name, content = '') {
+      const { base } = this._base(id)
+      const parts = this._safeRel(rel)
+      const n = this._safeRel(name).join('')
+      if (!n) throw Object.assign(new Error('名称不能为空'), { status: 400 })
+      const target = path.join(base, ...parts, n)
+      if (!target.startsWith(base)) throw Object.assign(new Error('非法路径'), { status: 400 })
+      fs.writeFileSync(target, String(content ?? ''))
+      return { code: 0, data: { path: [...parts, n].join('/') } }
+    },
+
     /** POST /api/assistant/projects/:id/upload {name, contentBase64} 上传文件到项目目录 */
     upload(id, name, contentBase64) {
       const data = load()

@@ -236,6 +236,39 @@ export async function deleteProject(id: string): Promise<void> {
   await fetch(`/api/assistant/projects/${id}`, { method: 'DELETE' })
 }
 
+/** 项目文件条目 */
+export interface ProjectFileEntry {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  size: number
+}
+
+export async function listProjectFiles(projectId: string, rel = ''): Promise<ProjectFileEntry[]> {
+  const body = await j(await fetch(`/api/assistant/projects/${projectId}/files?rel=${encodeURIComponent(rel)}`))
+  return body?.data?.entries ?? []
+}
+
+export async function mkdirProject(projectId: string, rel: string, name: string): Promise<void> {
+  const res = await fetch(`/api/assistant/projects/${projectId}/dir`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rel, name })
+  })
+  const body = await j(res)
+  if (body.code !== 0) throw new Error(body.msg || '新建文件夹失败')
+}
+
+export async function createProjectFile(projectId: string, rel: string, name: string, content = ''): Promise<void> {
+  const res = await fetch(`/api/assistant/projects/${projectId}/file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rel, name, content })
+  })
+  const body = await j(res)
+  if (body.code !== 0) throw new Error(body.msg || '新建文件失败')
+}
+
 /** 上传文件到项目目录(经门户写入 workspace/projects/<dir>/),返回 {path, size} */
 export async function uploadToProject(
   projectId: string,

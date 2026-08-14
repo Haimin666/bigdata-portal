@@ -45,6 +45,7 @@
         <button class="da-act" title="压缩当前会话" @click="doCompact"><el-icon><Minus /></el-icon></button>
         <button class="da-act" title="回退到检查点" @click="doRewind"><el-icon><RefreshLeft /></el-icon></button>
         <button class="da-act" title="分支" @click="openBranches"><el-icon><Share /></el-icon></button>
+        <button v-if="curProject" class="da-act" title="项目文件" @click="openFiles"><el-icon><Files /></el-icon></button>
       </div>
       <div class="da-search">
         <el-icon class="da-search__icon"><Search /></el-icon>
@@ -203,6 +204,52 @@
       </div>
     </el-dialog>
 
+    <!-- 项目文件面板 -->
+    <el-dialog v-model="filesOpen" :title="'项目文件 · ' + (curProject?.name || '')" width="560px" append-to-body>
+      <div class="da-files-bar">
+        <div class="da-files-path">
+          <span class="da-files-path__crumb" :class="{ 'da-files-path__crumb--cur': !fileCurPath }" @click="fileCurPath = ''; reloadFiles()">根目录</span>
+          <template v-for="(seg, i) in fileCrumb" :key="i">
+            <span class="da-files-path__sep">/</span>
+            <span
+              class="da-files-path__crumb"
+              :class="{ 'da-files-path__crumb--cur': i === fileCrumb.length - 1 }"
+              @click="fileCurPath = fileCrumb.slice(0, i + 1).join('/'); reloadFiles()"
+            >{{ seg }}</span>
+          </template>
+        </div>
+        <div class="da-files-actions">
+          <el-button size="small" :icon="FolderAdd" :disabled="!curProject" @click="fileNew = 'dir'; newName = ''; newContent = ''">新建文件夹</el-button>
+          <el-button size="small" :icon="DocumentAdd" :disabled="!curProject" @click="fileNew = 'file'; newName = ''; newContent = ''">新建文件</el-button>
+          <el-button size="small" :icon="Refresh" @click="reloadFiles()">刷新</el-button>
+        </div>
+      </div>
+      <div class="da-files-list">
+        <div v-for="f in fileEntries" :key="f.path" class="da-file-row" :class="{ 'da-file-row--dir': f.type === 'dir' }" @click="f.type === 'dir' && (fileCurPath = f.path, reloadFiles())">
+          <el-icon class="da-file-row__icon">
+            <FolderOpened v-if="f.type === 'dir'" /><Document v-else />
+          </el-icon>
+          <span class="da-file-row__name">{{ f.name }}</span>
+          <span v-if="f.type === 'file'" class="da-file-row__size">{{ fmtSize(f.size) }}</span>
+        </div>
+        <div v-if="!fileEntries.length" class="da-empty">空目录</div>
+      </div>
+      <div v-if="fileErr" class="da-upload-msg" style="color: #f56c6c">{{ fileErr }}</div>
+      <div v-if="fileNew" class="da-files-new">
+        <input
+          v-model="newName"
+          class="da-proj__input"
+          :placeholder="fileNew === 'dir' ? '文件夹名称' : '文件名(含扩展名)'"
+          @keydown.enter="onNewEntry"
+        />
+        <textarea v-if="fileNew === 'file'" v-model="newContent" class="da-files-new__content" placeholder="文件内容(可选)"></textarea>
+        <div class="da-files-new__btns">
+          <el-button size="small" type="primary" @click="onNewEntry">创建</el-button>
+          <el-button size="small" @click="fileNew = ''; fileErr = ''">取消</el-button>
+        </div>
+      </div>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -214,11 +261,15 @@ import {
   CaretRight,
   Delete,
   Document,
+  DocumentAdd,
+  Files,
   Folder,
+  FolderAdd,
   FolderOpened,
   Minus,
   Paperclip,
   Plus,
+  Refresh,
   Position,
   RefreshLeft,
   Search,
@@ -231,13 +282,16 @@ import {
   bindSessionProject,
   connectAssistantEvents,
   createProject,
+  createProjectFile,
   createSession,
   deleteProject,
   deleteSession,
   getBranches,
   listMessages,
+  listProjectFiles,
   listProjects,
   listSessions,
+  mkdirProject,
   uploadToProject,
   runCommand,
   stopChat,
@@ -379,6 +433,55 @@ async function onUploadFile(e: Event) {
     uploadMsg.value = `上传失败: ${err instanceof Error ? err.message : String(err)}`
   }
   setTimeout(() => (uploadMsg.value = ''), 4000)
+}
+
+// ── 项目文件管理(新建文件夹/文件)─────────────────────────
+const filesOpen = ref(false)
+const fileCurPath = ref('')
+const fileEntries = ref<{ name: string; path: string; type: 'dir' | 'file'; size: number }[]>([])
+const fileNew = ref<'dir' | 'file' | ''>('')
+const newName = ref('')
+const newContent = ref('')
+const fileErr = ref('')
+
+const fileCrumb = computed(() => fileCurPath.value.split('/').filter(Boolean))
+
+async function openFiles() {
+  if (!curProject.value) return
+  filesOpen.value = true
+  fileCurPath.value = ''
+  await reloadFiles()
+}
+
+async function reloadFiles() {
+  if (!curProject.value) return
+  fileEntries.value = await listProjectFiles(curProject.value.id, fileCurPath.value).catch(() => [])
+}
+
+async function onNewEntry() {
+  if (!curProject.value || !fileNew.value) return
+  const name = newName.value.trim()
+  if (!name) return
+  fileErr.value = ''
+  try {
+    if (fileNew.value === 'dir') {
+      await mkdirProject(curProject.value.id, fileCurPath.value, name)
+    } else {
+      await createProjectFile(curProject.value.id, fileCurPath.value, name, newContent.value)
+    }
+    fileNew.value = ''
+    newName.value = ''
+    newContent.value = ''
+    await reloadFiles()
+  } catch (err) {
+    fileErr.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 const lastMsgId = computed(() => messages.value[messages.value.length - 1]?.id ?? '')
 
@@ -1403,6 +1506,105 @@ onUnmounted(() => {
 }
 .da-upload__input {
   display: none;
+}
+
+/* 项目文件面板 */
+.da-files-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.da-files-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.da-files-path__crumb {
+  color: var(--bd-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.da-files-path__crumb:hover {
+  color: var(--bd-primary);
+}
+.da-files-path__crumb--cur {
+  color: var(--bd-primary);
+  font-weight: 600;
+}
+.da-files-path__sep {
+  color: var(--bd-border);
+}
+.da-files-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.da-files-list {
+  min-height: 160px;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  padding: 4px;
+}
+.da-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: default;
+}
+.da-file-row--dir {
+  cursor: pointer;
+}
+.da-file-row--dir:hover {
+  background: var(--bd-panel-sub);
+}
+.da-file-row__icon {
+  color: var(--bd-primary);
+  font-size: 15px;
+}
+.da-file-row__name {
+  flex: 1;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-file-row__size {
+  font-size: 11px;
+  color: var(--bd-muted);
+}
+.da-files-new {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.da-files-new__content {
+  min-height: 80px;
+  border: 1px solid var(--bd-border);
+  border-radius: 6px;
+  background: var(--bd-panel-sub);
+  color: var(--bd-text);
+  font-size: 12px;
+  padding: 8px;
+  font-family: var(--bd-font);
+  outline: none;
+  resize: vertical;
+}
+.da-files-new__btns {
+  display: flex;
+  gap: 6px;
 }
 .da-composer__caret {
   color: var(--bd-primary);
