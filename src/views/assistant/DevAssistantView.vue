@@ -9,6 +9,38 @@
           <el-icon><Plus /></el-icon>
         </button>
       </div>
+      <div class="da-proj">
+        <button class="da-proj__cur" title="切换项目" @click="projOpen = !projOpen">
+          <el-icon class="da-proj__icon"><FolderOpened /></el-icon>
+          <span class="da-proj__name">{{ curProject ? curProject.name : '全部会话' }}</span>
+          <el-icon class="da-proj__caret"><ArrowDown /></el-icon>
+        </button>
+        <div v-if="projOpen" class="da-proj__menu">
+          <div class="da-proj__item" :class="{ 'da-proj__item--sel': !curProject }" @click="selectProject(null)">
+            <el-icon><Folder /></el-icon> 全部会话
+          </div>
+          <div
+            v-for="p in projects"
+            :key="p.id"
+            class="da-proj__item"
+            :class="{ 'da-proj__item--sel': curProject?.id === p.id }"
+            @click="selectProject(p)"
+          >
+            <el-icon><FolderOpened /></el-icon>
+            <span class="da-proj__item-name">{{ p.name }}</span>
+            <span class="da-proj__item-del" title="删除项目(保留文件)" @click.stop="onDeleteProject(p)">×</span>
+          </div>
+          <div class="da-proj__new">
+            <input
+              v-model="newProjName"
+              class="da-proj__input"
+              placeholder="新项目名称…"
+              @keydown.enter="onCreateProject"
+            />
+            <button class="da-proj__add" title="创建项目" @click="onCreateProject">+</button>
+          </div>
+        </div>
+      </div>
       <div class="da-actions">
         <button class="da-act" title="压缩当前会话" @click="doCompact"><el-icon><Minus /></el-icon></button>
         <button class="da-act" title="回退到检查点" @click="doRewind"><el-icon><RefreshLeft /></el-icon></button>
@@ -20,7 +52,7 @@
       </div>
       <div class="da-sessions">
         <div
-          v-for="s in filteredSessions"
+          v-for="s in visibleSessions"
           :key="s.id"
           class="da-session"
           :class="{ 'da-session--active': s.id === activeId }"
@@ -34,7 +66,9 @@
             <el-icon><Delete /></el-icon>
           </button>
         </div>
-        <div v-if="!filteredSessions.length" class="da-empty">暂无会话,点击右上角 + 新建</div>
+        <div v-if="!visibleSessions.length" class="da-empty">
+          {{ curProject ? '该项目下暂无会话' : '暂无会话,点击右上角 + 新建' }}
+        </div>
       </div>
     </aside>
 
@@ -147,9 +181,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import {
+  ArrowDown,
   CaretBottom,
   CaretRight,
   Delete,
+  Folder,
+  FolderOpened,
   Minus,
   Plus,
   Position,
@@ -159,15 +196,20 @@ import {
   VideoPause
 } from '@element-plus/icons-vue'
 import {
+  bindSessionProject,
   connectAssistantEvents,
+  createProject,
   createSession,
+  deleteProject,
   deleteSession,
   getBranches,
   listMessages,
+  listProjects,
   listSessions,
   runCommand,
   stopChat,
   submitChat,
+  type AssistantProject,
   type AssistantSession,
   type BranchInfo,
   type ChatMessage
@@ -204,6 +246,69 @@ const filteredSessions = computed(() => {
   if (!q) return sessions.value
   return sessions.value.filter((s) => s.title.toLowerCase().includes(q))
 })
+
+// ── 项目制:项目分组 + 会话归属 + 工作目录注入 ──────────────
+const projects = ref<AssistantProject[]>([])
+const sessionProjects = ref<Record<string, string>>({})
+const projOpen = ref(false)
+const newProjName = ref('')
+const curProjectId = ref<string | null>(null)
+
+const curProject = computed(() => projects.value.find((p) => p.id === curProjectId.value) || null)
+/** 当前项目下的会话(未选项目 = 全部) */
+const visibleSessions = computed(() => {
+  const list = filteredSessions.value
+  if (!curProjectId.value) return list
+  return list.filter((s) => sessionProjects.value[s.id] === curProjectId.value)
+})
+
+async function loadProjects() {
+  const d = await listProjects().catch(() => ({ projects: [], sessionProjects: {} }))
+  projects.value = d.projects
+  sessionProjects.value = d.sessionProjects
+  if (curProjectId.value && !projects.value.some((p) => p.id === curProjectId.value)) {
+    curProjectId.value = null
+  }
+}
+
+function selectProject(p: AssistantProject | null) {
+  curProjectId.value = p?.id ?? null
+  projOpen.value = false
+}
+
+async function onCreateProject() {
+  const name = newProjName.value.trim()
+  if (!name) return
+  const p = await createProject(name)
+  projects.value.push(p)
+  newProjName.value = ''
+  curProjectId.value = p.id
+  projOpen.value = false
+}
+
+async function onDeleteProject(p: AssistantProject) {
+  await deleteProject(p.id)
+  projects.value = projects.value.filter((x) => x.id !== p.id)
+  if (curProjectId.value === p.id) curProjectId.value = null
+}
+
+/** 会话归属当前项目 */
+async function bindActiveSession() {
+  if (!activeId.value) return
+  const pid = curProjectId.value
+  await bindSessionProject(activeId.value, pid)
+  sessionProjects.value[activeId.value] = pid || ''
+  // 归属变化后若当前项目过滤不包含该会话,自动清除选中
+  if (pid && sessionProjects.value[activeId.value] !== pid) curProjectId.value = null
+}
+
+/** 发消息注入工作目录指令(让 agent 在项目目录下操作文件) */
+function withWorkdir(text: string): string {
+  if (!curProject.value) return text
+  return `[项目: ${curProject.value.name} · 工作目录: /workspace/projects/${curProject.value.dir}/]
+请在本项目工作目录下操作文件。
+${text}`
+}
 const lastMsgId = computed(() => messages.value[messages.value.length - 1]?.id ?? '')
 
 // ── 会话管理 ─────────────────────────────────────────────
@@ -257,14 +362,21 @@ async function send() {
     const s = await createSession()
     sessions.value.unshift(s)
     activeId.value = s.id
+    // 新会话归属当前项目
+    if (curProjectId.value) {
+      await bindSessionProject(s.id, curProjectId.value)
+      sessionProjects.value[s.id] = curProjectId.value
+    }
   }
   const sid = activeId.value
-  messages.value.push({ id: genId(), role: 'user', content: text, createdAt: Date.now() })
+  await bindActiveSession()
+  const payload = withWorkdir(text)
+  messages.value.push({ id: genId(), role: 'user', content: payload, createdAt: Date.now() })
   await nextTick()
   scrollBottom(true)
   // 提交后内容由全局 SSE 事件流推送(onTurnStart 建助手消息 / onText·onReasoning 增量 / onTurnDone 结束)
   try {
-    await submitChat(sid, text)
+    await submitChat(sid, payload)
   } catch {
     generating.value = false
   }
@@ -576,6 +688,7 @@ function handleTurnDone() {
 
 // ── 生命周期 ─────────────────────────────────────────────
 void loadSessions()
+void loadProjects()
 disconnectEvents = connectAssistantEvents({
   onTurnStart: handleTurnStart,
   onReasoning: handleReasoning,
@@ -1130,6 +1243,124 @@ onUnmounted(() => {
 .da-composer__btn--stop:hover {
   background: #f56c6c;
   color: #fff;
+}
+
+/* ── 项目选择器 ── */
+.da-proj {
+  position: relative;
+  padding: 6px 10px 0;
+}
+.da-proj__cur {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--bd-border);
+  border-radius: 7px;
+  background: var(--bd-panel);
+  color: var(--bd-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.da-proj__cur:hover {
+  border-color: var(--bd-primary);
+}
+.da-proj__icon {
+  color: var(--bd-primary);
+  font-size: 14px;
+}
+.da-proj__name {
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-proj__caret {
+  font-size: 12px;
+  color: var(--bd-muted);
+}
+.da-proj__menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 10px;
+  right: 10px;
+  z-index: 30;
+  background: var(--bd-panel);
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  padding: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.da-proj__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.da-proj__item:hover {
+  background: var(--bd-panel-sub);
+}
+.da-proj__item--sel {
+  background: color-mix(in srgb, var(--bd-primary) 14%, transparent);
+  color: var(--bd-primary);
+}
+.da-proj__item-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.da-proj__item-del {
+  color: var(--bd-muted);
+  font-size: 14px;
+  padding: 0 2px;
+}
+.da-proj__item-del:hover {
+  color: #f56c6c;
+}
+.da-proj__new {
+  display: flex;
+  gap: 4px;
+  padding: 6px 4px 2px;
+  border-top: 1px dashed var(--bd-border);
+  margin-top: 2px;
+}
+.da-proj__input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--bd-border);
+  border-radius: 5px;
+  background: var(--bd-panel-sub);
+  color: var(--bd-text);
+  font-size: 12px;
+  padding: 0 8px;
+  outline: none;
+}
+.da-proj__input:focus {
+  border-color: var(--bd-primary);
+}
+.da-proj__add {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--bd-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--bd-text);
+  cursor: pointer;
+}
+.da-proj__add:hover {
+  border-color: var(--bd-primary);
+  color: var(--bd-primary);
 }
 
 /* ── 侧栏操作按钮行 ── */

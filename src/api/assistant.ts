@@ -205,6 +205,46 @@ export async function getStatus(): Promise<AssistantStatus> {
   return j(await fetch('/api/assistant/status'))
 }
 
+// ── 项目制(A+B:门户项目分组 + workspace 目录 + 指令注入)──
+export interface AssistantProject {
+  id: string
+  name: string
+  dir: string
+  createdAt: number
+}
+
+export async function listProjects(): Promise<{ projects: AssistantProject[]; sessionProjects: Record<string, string> }> {
+  const body = await j(await fetch('/api/assistant/projects'))
+  return {
+    projects: body?.data?.projects ?? [],
+    sessionProjects: body?.data?.sessionProjects ?? {}
+  }
+}
+
+export async function createProject(name: string): Promise<AssistantProject> {
+  const res = await fetch('/api/assistant/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  })
+  const body = await j(res)
+  if (body.code !== 0) throw new Error(body.msg || '创建项目失败')
+  return body.data
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  await fetch(`/api/assistant/projects/${id}`, { method: 'DELETE' })
+}
+
+/** 会话归属项目(projectId 空 = 解绑) */
+export async function bindSessionProject(sessionId: string, projectId: string | null): Promise<void> {
+  await fetch('/api/assistant/projects/session', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, projectId })
+  })
+}
+
 // ── SSE 事件流(全局广播,一个连接驱动当前会话渲染)─────────
 export interface AssistantEventHandlers {
   onTurnStart?: () => void

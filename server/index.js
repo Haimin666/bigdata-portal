@@ -160,6 +160,27 @@ function iframeProxy(targetUrl, prefix) {
   })
 }
 
+// ── 开发助手:项目制(元数据 + workspace 目录创建)─────────
+// 注意:/api/assistant/* 全量走 8787 代理,项目路由必须先挂载,代理按前缀精确转发剩余路径。
+import { createAssistantProjectsRoutes } from './assistant-projects.js'
+const assistantProjects = createAssistantProjectsRoutes({ workspaceRoot: config.assistantWorkspace })
+app.get('/api/assistant/projects', (req, res) => res.json(assistantProjects.list()))
+app.post('/api/assistant/projects', express.json(), (req, res) => {
+  try {
+    res.json(assistantProjects.create(req.body?.name || ''))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
+app.delete('/api/assistant/projects/:id', (req, res) => res.json(assistantProjects.remove(req.params.id)))
+app.put('/api/assistant/projects/session', express.json(), (req, res) => {
+  try {
+    res.json(assistantProjects.bindSession(req.body?.sessionId, req.body?.projectId || null))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
+
 // ── 开发助手:转发到本地 Reasonix serve(8787),注入 auth cookie ──
 // 8787 为 token 模式(/auth/token 换取 HttpOnly cookie reasonix_token,
 // 且 cookie 值就是 token 本身),网关持有 token 直接附加,浏览器同源无感。
