@@ -35,3 +35,13 @@ tmp/
 # doubao-chat 持久化浏览器 profile（含登录态 cookie，不入库）
 .doubao_profile/
 .doubao_chrome_profile/
+
+# DSH 技能目录(工具安装产物,非项目源码)
+.dsh/
+# 本地 UI demo(可敲定参考,非交付物)
+demo-query-ui/
+# MCP 本地配置(含本机绝对路径)
+.mcp.json
+# Python 编译缓存
+__pycache__/
+*.pyc
