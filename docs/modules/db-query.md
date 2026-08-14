@@ -31,7 +31,7 @@
 
 - **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink` 取消当前引擎 job
 - **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab
-- **结果复制**:单元格(含 NULL)点击复制;表头列名 hover 显示 ⧉ 图标点击复制列名
+- **结果复制**:单元格(含 NULL)点击复制;表头列名 hover 显示 ⧉ 图标点击复制列名。复制走 src/utils/clipboard.ts 的 copyText(优先 navigator.clipboard,非安全上下文 HTTP 下自动降级 execCommand),失败提示手动复制
 - **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停
 - **解锁体系**:写 SQL 时若未解锁,弹密码框(`/api/spark/auth` 校验 `sparkWritePassword`,签发 12h token,存 sessionStorage)
 - **编辑器**:CodeMirror 5,自实现括号补全/Tab 缩进/Shift+Tab,主题跟随全局

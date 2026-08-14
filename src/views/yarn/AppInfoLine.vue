@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { ColumnHeader, StatusColor, YarnApp } from '@/types/yarn'
 import { formatElapsed, formatTimestamp, yarnStateColor, yarnStateHex } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 
 defineOptions({ name: 'AppInfoLine' })
 
@@ -19,12 +20,10 @@ const isId = computed(() => props.header.value === 'id')
 async function copyId() {
   const id = String(props.item.id || '')
   if (!id) return
-  try {
-    await navigator.clipboard.writeText(id)
-    ElMessage.success('已复制应用 ID')
-  } catch {
-    ElMessage.error('复制失败,请手动选择复制')
-  }
+  // 用带降级的 copyText,规避 HTTP 非安全上下文下 navigator.clipboard 不可用导致的复制失败
+  const ok = await copyText(id)
+  if (ok) ElMessage.success('已复制应用 ID')
+  else ElMessage.error('复制失败,请手动选择复制')
 }
 
 const NUMERIC_HEADERS = new Set<keyof YarnApp>([

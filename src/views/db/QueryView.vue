@@ -25,6 +25,7 @@ import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
 import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
+import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkJobsDialog from './FlinkJobsDialog.vue'
@@ -1039,14 +1040,12 @@ function exportCsv(idx?: number) {
   URL.revokeObjectURL(a.href)
 }
 
-// ── 单元格点击复制 ──────────────────────────────────────────
+// ── 单元格/列名点击复制 ────────────────────────────────────
+// 统一走带降级的 copyText,规避 HTTP 非安全上下文下 navigator.clipboard 不可用导致的复制失败
 async function copyCell(val: unknown) {
-  try {
-    await navigator.clipboard.writeText(val == null ? '' : String(val))
-    ElMessage.success('已复制')
-  } catch {
-    /* 忽略剪贴板权限 */
-  }
+  const ok = await copyText(val)
+  if (ok) ElMessage.success('已复制')
+  else ElMessage.warning('复制失败,请手动选择复制')
 }
 
 // ── 初始化 ───────────────────────────────────────────────────
