@@ -113,6 +113,22 @@
             <template v-else>{{ m.content }}</template>
           </div>
         </div>
+        <!-- 工具审批卡片(agent 调用工具等待审批) -->
+        <div v-for="ap in approvals" :key="ap.id" class="da-approval">
+          <div class="da-approval__head">
+            <el-icon class="da-approval__icon"><Warning /></el-icon>
+            <span class="da-approval__title">工具审批</span>
+          </div>
+          <div class="da-approval__subject">
+            <span class="da-approval__tool">{{ ap.tool }}</span>
+            <span v-if="ap.subject" class="da-approval__desc">{{ ap.subject }}</span>
+          </div>
+          <div class="da-approval__actions">
+            <button class="da-approval__btn da-approval__btn--allow" @click="resolveApproval(ap, { allow: true })">允许</button>
+            <button class="da-approval__btn" @click="resolveApproval(ap, { allow: true, session: true })">本次会话</button>
+            <button class="da-approval__btn da-approval__btn--deny" @click="resolveApproval(ap, { allow: false })">拒绝</button>
+          </div>
+        </div>
       </div>
 
       <!-- 底部输入区 -->
@@ -193,9 +209,11 @@ import {
   RefreshLeft,
   Search,
   Share,
-  VideoPause
+  VideoPause,
+  Warning
 } from '@element-plus/icons-vue'
 import {
+  approveTool,
   bindSessionProject,
   connectAssistantEvents,
   createProject,
@@ -658,6 +676,14 @@ function onMainClick(e: MouseEvent) {
   onCopyClick(e)
 }
 
+// ── 工具审批 ──────────────────────────────────────────────
+const approvals = ref<{ id: string; tool: string; subject?: string }[]>([])
+
+async function resolveApproval(ap: { id: string }, payload: { allow: boolean; session?: boolean }) {
+  await approveTool(ap.id, payload)
+  approvals.value = approvals.value.filter((x) => x.id !== ap.id)
+}
+
 // ── SSE 事件流(全局广播驱动当前会话渲染)──────────────────
 let disconnectEvents: (() => void) | null = null
 
@@ -682,8 +708,13 @@ function handleText(delta: string) {
 }
 function handleTurnDone() {
   generating.value = false
+  approvals.value = []
   // 标题/轮次由服务端生成,静默刷新列表(保留 activeId 选中态)
   void listSessions().then((list) => { sessions.value = list }).catch(() => {})
+}
+function handleApproval(ap: { id: string; tool: string; subject?: string }) {
+  approvals.value.push(ap)
+  scrollBottom(true)
 }
 
 // ── 生命周期 ─────────────────────────────────────────────
@@ -693,7 +724,8 @@ disconnectEvents = connectAssistantEvents({
   onTurnStart: handleTurnStart,
   onReasoning: handleReasoning,
   onText: handleText,
-  onTurnDone: handleTurnDone
+  onTurnDone: handleTurnDone,
+  onApproval: handleApproval
 })
 
 onUnmounted(() => {
@@ -985,6 +1017,75 @@ onUnmounted(() => {
   50% {
     opacity: 0;
   }
+}
+
+/* 工具审批卡片 */
+.da-approval {
+  align-self: flex-start;
+  width: 100%;
+  max-width: 860px;
+  border: 1px solid color-mix(in srgb, #e6a23c 55%, var(--bd-border));
+  border-radius: 10px;
+  background: var(--bd-panel);
+  padding: 10px 14px;
+}
+.da-approval__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.da-approval__icon {
+  color: #e6a23c;
+  font-size: 15px;
+}
+.da-approval__title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.da-approval__subject {
+  font-family: var(--bd-font);
+  font-size: 12px;
+  color: var(--bd-muted);
+  background: var(--bd-panel-sub);
+  border: 1px solid var(--bd-border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  word-break: break-all;
+  max-height: 90px;
+  overflow-y: auto;
+}
+.da-approval__tool {
+  color: var(--bd-text);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.da-approval__actions {
+  display: flex;
+  gap: 6px;
+}
+.da-approval__btn {
+  padding: 5px 14px;
+  border: 1px solid var(--bd-border);
+  border-radius: 6px;
+  background: var(--bd-panel-sub);
+  color: var(--bd-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.da-approval__btn--allow {
+  background: color-mix(in srgb, var(--bd-primary) 16%, transparent);
+  border-color: var(--bd-primary);
+  color: var(--bd-primary);
+}
+.da-approval__btn--deny:hover {
+  border-color: #f56c6c;
+  color: #f56c6c;
+}
+.da-approval__btn:hover {
+  border-color: var(--bd-primary);
 }
 
 /* 思考折叠块 */

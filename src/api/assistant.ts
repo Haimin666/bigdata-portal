@@ -246,6 +246,12 @@ export async function bindSessionProject(sessionId: string, projectId: string | 
 }
 
 // ── SSE 事件流(全局广播,一个连接驱动当前会话渲染)─────────
+export interface ApprovalInfo {
+  id: string
+  tool: string
+  subject?: string
+}
+
 export interface AssistantEventHandlers {
   onTurnStart?: () => void
   /** 思考增量 */
@@ -257,6 +263,20 @@ export interface AssistantEventHandlers {
   onTurnDone?: (err?: string) => void
   onNotice?: (text: string, level?: string) => void
   onTool?: (evt: any) => void
+  /** 工具调用审批请求 */
+  onApproval?: (approval: ApprovalInfo) => void
+}
+
+/** 响应工具审批(allow/session/persist/scope 对齐官方 /approve) */
+export async function approveTool(
+  id: string,
+  payload: { allow: boolean; session?: boolean; persist?: boolean; scope?: string }
+): Promise<void> {
+  await fetch('/api/assistant/approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, ...payload })
+  }).catch(() => {})
 }
 
 export function connectAssistantEvents(handlers: AssistantEventHandlers): () => void {
@@ -291,6 +311,9 @@ export function connectAssistantEvents(handlers: AssistantEventHandlers): () => 
       case 'tool_result':
       case 'tool_progress':
         handlers.onTool?.(e)
+        break
+      case 'approval_request':
+        if (e.approval) handlers.onApproval?.(e.approval)
         break
       default:
         break
