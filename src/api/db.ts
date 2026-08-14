@@ -100,14 +100,16 @@ export async function querySpark(
 ): Promise<DbQueryResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
-  let res: Response
-  try {
-    res = await fetch('/api/spark/query', {
+  const run = (t: number) =>
+    fetch('/api/spark/query', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ sql, kind, timeoutMs }),
-      signal: AbortSignal.timeout(timeoutMs)
+      body: JSON.stringify({ sql, kind, timeoutMs: t }),
+      signal: AbortSignal.timeout(t)
     })
+  let res: Response
+  try {
+    res = await run(timeoutMs)
   } catch (e) {
     // 前端/网关超时:尝试取消后端 job,避免 collect 挂起占住 db-proxy 串行锁
     try {
@@ -116,6 +118,25 @@ export async function querySpark(
       /* 忽略取消失败 */
     }
     throw new Error(`执行超时(${Math.round(timeoutMs / 1000)}s),已自动取消后端任务,请缩小数据量或简化 SQL 后重试`)
+  }
+  // 504 冷启动补偿:网关/代理超时(nginx 60s)但 db-proxy 可能仍在执行(session 冷启动),
+  // 自动重试一次 —— 第二次 session 已就绪,通常秒回;重试超时给更长(180s)
+  if (res.status === 504) {
+    try {
+      await fetch('/api/spark/cancel', { method: 'POST' })
+    } catch {
+      /* 忽略 */
+    }
+    try {
+      res = await run(Math.max(timeoutMs, 180000))
+    } catch (e) {
+      try {
+        await fetch('/api/spark/cancel', { method: 'POST' })
+      } catch {
+        /* 忽略 */
+      }
+      throw new Error(`执行超时,已自动取消后端任务,请缩小数据量或简化 SQL 后重试`)
+    }
   }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
