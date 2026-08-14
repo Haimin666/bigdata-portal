@@ -537,27 +537,29 @@ const sparkLogBox = ref<HTMLElement | null>(null)
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
 
-// 引擎日志一直默认滚动到底部(展示最新 200 条)
-// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚,才能精确到底;
-// 若用户手动上翻阅读旧日志,则不强制拽回底部(等其回到最底部附近再接着自动跟)。
-let logFollow = true
-watch(sparkLogText, () => {
-  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
-    const el = sparkLogBox.value
-    if (!el) return
-    const nearBottom = logFollow || el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    if (nearBottom) {
-      el.scrollTop = el.scrollHeight // 两帧后 scrollHeight 已含本次追加内容,必达底部
-      logFollow = true
-    }
-  })))
-})
-function onLogScroll() {
+// 引擎日志按布局高度自动贴底滚动:只要日志面板处于激活态,内容增量/切换/挂载后
+// 都自动滚到最底部让最新日志始终可见,无需手动拖拽滚动条到底。
+// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚才能精确到底。
+function scrollLogToBottom() {
   const el = sparkLogBox.value
   if (!el) return
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-  logFollow = atBottom
+  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
+  })))
 }
+// 激活日志面板(切回/首次显示)时滚到底,避免面板停在上方需手动下拖
+// 用 getter 形式避免在 activePane 声明(见下)之前同步读取导致 TDZ 报错
+watch(() => activePane.value, (pane) => {
+  if (pane === 0) scrollLogToBottom()
+})
+// 日志容器挂载(首次渲染)后滚到底
+watch(sparkLogBox, (el) => {
+  if (el && activePane.value === 0) scrollLogToBottom()
+})
+// 日志内容增量/清空/裁剪时跟随最新(仅日志面板激活时)
+watch(sparkLogText, () => {
+  if (activePane.value === 0) scrollLogToBottom()
+})
 
 /** 拉取 spark 日志增量并追加 */
 async function pollSparkLogs() {
@@ -1305,7 +1307,7 @@ async function copyAllTsv() {
                 <el-button text size="small" @click="clearSparkLogs">清空</el-button>
               </span>
             </div>
-            <pre ref="sparkLogBox" class="spark-logs-body" @scroll="onLogScroll">{{ sparkLogText || logEmptyHint }}</pre>
+            <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
           </div>
         </template>
         <!-- 结果内容 -->
@@ -1325,14 +1327,13 @@ async function copyAllTsv() {
                 :align="colIsNumeric(c) ? 'right' : 'left'"
                 show-overflow-tooltip
               >
-                <!-- 表头:列名点击排序;⧉ 按钮复制列名(.stop 不影响排序) -->
+                <!-- 表头:点击列名复制列名(.stop 不触发排序);排序只点最右侧排序箭头触发 -->
                 <template #header>
-                  <span class="col-header" :title="c">{{ c }}</span>
                   <span
-                    class="col-header-copy"
-                    :title="`复制列名: ${c}`"
+                    class="col-header"
+                    :title="`点击复制列名: ${c}`"
                     @click.stop="copyCellSmart(c)"
-                  ><el-icon><CopyDocument /></el-icon></span>
+                  >{{ c }}</span>
                 </template>
                 <template #default="{ row }">
                   <span
@@ -1967,52 +1968,26 @@ async function copyAllTsv() {
     z-index: 1;
   }
 
-  /* 表头:左侧列名(点击排序)+ 右侧复制按钮 */
-  /* 表头:列名占满并预留右侧空间(放复制按钮+排序箭头),避免复制按钮与排序重叠 */
+  /* 表头:点击列名复制列名(仅占自身文本宽,左侧点击复制、右侧排序箭头仍可点击排序) */
   :deep(.col-header) {
-    flex: 1;
-    min-width: 0;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding-right: 26px; /* 为右侧 hover 的复制按钮 + 排序箭头预留 */
+    cursor: copy;
+    min-width: 0;
+    max-width: calc(100% - 22px); /* 给右侧排序箭头留出可点击区 */
+    padding-right: 8px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  /* 复制按钮:绝对定位在排序箭头左侧,悬停表头才显现,始终不遮排序 */
-  :deep(.col-header-copy) {
-    position: absolute;
-    right: 24px;
-    top: 50%;
-    transform: translateY(-50%);
-    cursor: copy;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: $muted;
-    font-size: 13px;
-    padding: 2px 3px;
-    border-radius: 4px;
-    background: var(--el-table-header-bg-color);
-    opacity: 0;
-    transition: opacity 0.15s;
 
     &:hover {
       color: $primary;
-      background: var(--el-fill-color);
+      text-decoration: underline dotted;
     }
   }
-  :deep(th.el-table__cell:hover .col-header-copy) {
-    opacity: 1;
-  }
-  /* 排序箭头保持在最右侧,与复制按钮分隔,互不重叠 */
+  /* 排序箭头保持在最右侧,作为唯一排序入口 */
   :deep(.caret-wrapper) {
     right: 6px;
-  }
-  /* 表头 cell 需要定位上下文(供复制按钮 absolute) */
-  :deep(.result-table th .cell) {
-    position: relative;
   }
 
   /* NULL 单元格:低饱和胶囊,醒目但不过度突出 */
