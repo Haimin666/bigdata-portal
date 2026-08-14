@@ -37,7 +37,7 @@ app.use(express.static(DIST_DIR))
 const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db/', '/api/assistant']
 app.use((req, res, next) => {
   if (PROXY_PATHS.some((p) => req.path.startsWith(p))) return next()
-  express.json()(req, res, next)
+  express.json({ limit: '20mb' })(req, res, next)
 })
 
 // ── 认证与用户管理 ─────────────────────────────────────────────
@@ -173,6 +173,13 @@ app.post('/api/assistant/projects', express.json(), (req, res) => {
   }
 })
 app.delete('/api/assistant/projects/:id', (req, res) => res.json(assistantProjects.remove(req.params.id)))
+app.post('/api/assistant/projects/:id/upload', express.json({ limit: '20mb' }), (req, res) => {
+  try {
+    res.json(assistantProjects.upload(req.params.id, req.body?.name, req.body?.contentBase64))
+  } catch (e) {
+    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+  }
+})
 app.put('/api/assistant/projects/session', express.json(), (req, res) => {
   try {
     res.json(assistantProjects.bindSession(req.body?.sessionId, req.body?.projectId || null))

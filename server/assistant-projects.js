@@ -58,11 +58,18 @@ export function createAssistantProjectsRoutes({ workspaceRoot }) {
         dir,
         createdAt: Date.now()
       }
-      // 配置了 workspace 路径 → 门户自动建项目目录
+      // 配置了 workspace 路径 → 门户自动建项目目录;
+      // 失败(mac 沙箱/权限)降级:只存元数据,目录由 agent 按前端注入的工作目录指令自建
+      let dirCreated = false
       if (workspaceRoot) {
-        const abs = path.join(workspaceRoot, 'projects', dir)
-        fs.mkdirSync(abs, { recursive: true })
+        try {
+          fs.mkdirSync(path.join(workspaceRoot, 'projects', dir), { recursive: true })
+          dirCreated = true
+        } catch {
+          /* 降级 */
+        }
       }
+      proj.dirCreated = dirCreated
       data.projects.push(proj)
       save(data)
       return { code: 0, data: proj }
@@ -80,6 +87,35 @@ export function createAssistantProjectsRoutes({ workspaceRoot }) {
       save(data)
       // 不删除目录(保留用户文件),仅解绑
       return { code: 0, data: { id: removed.id } }
+    },
+
+    /** POST /api/assistant/projects/:id/upload {name, contentBase64} 上传文件到项目目录 */
+    upload(id, name, contentBase64) {
+      const data = load()
+      const proj = data.projects.find((p) => p.id === id)
+      if (!proj) throw Object.assign(new Error('项目不存在'), { status: 404 })
+      if (!workspaceRoot) throw Object.assign(new Error('未配置 assistantWorkspace,无法写入项目目录'), { status: 503 })
+      const base = path.join(workspaceRoot, 'projects', proj.dir)
+      // 目录不存在则尝试创建(失败降级抛错)
+      fs.mkdirSync(base, { recursive: true })
+      const filename = path.basename(String(name || '').trim()) || `upload_${Date.now()}`
+      const abs = path.join(base, filename)
+      // 防路径穿越:basename 已隔离;再校验最终路径在 base 内
+      if (!abs.startsWith(base)) throw Object.assign(new Error('非法文件名'), { status: 400 })
+      const buf = Buffer.from(contentBase64 || '', 'base64')
+      if (!buf.length) throw Object.assign(new Error('空文件'), { status: 400 })
+      try {
+        fs.writeFileSync(abs, buf)
+      } catch (e) {
+        if (e.code === 'EPERM' || e.code === 'EACCES') {
+          throw Object.assign(
+            new Error('门户进程无权限写入 workspace 项目目录(生产环境需将门户容器挂载同一 workspace 卷);可改用消息让 agent 创建文件'),
+            { status: 503 }
+          )
+        }
+        throw e
+      }
+      return { code: 0, data: { path: `projects/${proj.dir}/${filename}`, size: buf.length } }
     },
 
     /** PUT /api/assistant/projects/session {sessionId, projectId} 关联会话到项目 */
