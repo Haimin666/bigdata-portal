@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion } from '@element-plus/icons-vue'
+import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -1094,6 +1094,60 @@ watch(engine, async (val, old) => {
 function isNumeric(val: unknown): boolean {
   return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
 }
+
+/** 某列是否数值列(按该页首行判定,用于表头/单元格对齐) */
+function colIsNumeric(c: string): boolean {
+  const row = pagedRows.value[0]
+  return !!(row && row[c] != null && isNumeric(row[c]))
+}
+
+// ── 结果表格交互:复制/选择模式 + 复制整表 ───────────────────
+/** 复制模式开=true(点击单元格即复制);关=false 时点击不劫持,可用鼠标选中文本 */
+const cellCopy = ref(true)
+const cellCopyDisabled = computed(() => !cellCopy.value)
+
+/** 单元格/列名点击复制(复制模式关时直接忽略,避免与文本选择冲突) */
+async function copyCellSmart(val: unknown) {
+  if (!cellCopy.value) return
+  await copyCell(val)
+}
+
+/** 行记录转 TSV(带表头;null 输出空串) */
+function rowsToTsv(rows: Record<string, unknown>[], cols: string[]): string {
+  const esc = (v: unknown) => {
+    const s = v == null ? '' : String(v)
+    // 含制表符/换行的字段用双引号包围并转义,防止破坏 TSV 结构
+    return /[\t\n"]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+  }
+  const head = cols.map(esc).join('\t')
+  const body = rows.map((row) => cols.map((c) => esc(row[c])).join('\t')).join('\n')
+  return head + '\n' + body
+}
+
+/** 复制当前分页 */
+async function copyPageTsv() {
+  const r = currentResult.value
+  if (!r) return
+  const ok = await copyText(rowsToTsv(pagedRows.value, r.columns))
+  if (ok) ElMessage.success('已复制当前页(TSV)')
+  else ElMessage.error('复制失败,请手动复制')
+}
+
+/** 复制全量结果(忽略分页;大结果集注意体积) */
+async function copyAllTsv() {
+  const r = currentResult.value
+  if (!r) return
+  if (r.rows.length > 5000) {
+    const confirmed = await ElMessageBox.confirm(
+      '共 ' + r.rows.length + ' 行,复制全部可能较大。仍要继续吗?', '复制整表',
+      { confirmButtonText: '继续复制', cancelButtonText: '取消', type: 'warning' }
+    ).catch(() => false)
+    if (!confirmed) return
+  }
+  const ok = await copyText(rowsToTsv(r.rows, r.columns))
+  if (ok) ElMessage.success('已复制 ' + r.rows.length + ' 行(TSV)')
+  else ElMessage.error('复制失败,请手动复制')
+}
 </script>
 
 <template>
@@ -1241,8 +1295,8 @@ function isNumeric(val: unknown): boolean {
         <template v-else-if="currentResult">
           <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
           <div v-else v-loading="loading" class="result-table-wrap">
-            <el-table :data="pagedRows" border size="small" class="result-table">
-              <el-table-column type="index" label="#" width="55" align="center" />
+            <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''">
+              <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
               <el-table-column
                 v-for="c in currentResult.columns"
                 :key="c"
@@ -1250,47 +1304,64 @@ function isNumeric(val: unknown): boolean {
                 :label="c"
                 min-width="140"
                 sortable
+                :align="colIsNumeric(c) ? 'right' : 'left'"
                 show-overflow-tooltip
               >
-                <!-- 表头:点击复制列名 -->
+                <!-- 表头:列名点击排序;⧉ 按钮复制列名(.stop 不影响排序) -->
                 <template #header>
+                  <span class="col-header" :title="c">{{ c }}</span>
                   <span
                     class="col-header-copy"
-                    :title="`点击复制列名: ${c}`"
-                    @click.stop="copyCell(c)"
-                  >{{ c }}</span>
+                    :title="`复制列名: ${c}`"
+                    @click.stop="copyCellSmart(c)"
+                  ><el-icon><CopyDocument /></el-icon></span>
                 </template>
                 <template #default="{ row }">
                   <span
                     v-if="row[c] == null"
                     class="cell-null"
-                    @click="copyCell(row[c])"
+                    :title="`NULL${cellCopy ? ' · 点击复制' : ''}`"
+                    @click="copyCellSmart(row[c])"
                   >NULL</span>
                   <span
                     v-else
                     class="cell-val"
-                    :class="{ 'cell-num': isNumeric(row[c]) }"
-                    :title="`点击复制: ${row[c]}`"
-                    @click="copyCell(row[c])"
+                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled }"
+                    :title="cellCopy ? `点击复制: ${row[c]}` : row[c]"
+                    @click="copyCellSmart(row[c])"
                   >{{ row[c] }}</span>
                 </template>
               </el-table-column>
             </el-table>
           </div>
-          <!-- 底部状态条:行数/耗时 -->
-          <div class="result-footer">
-            <span v-if="currentResult.error">执行失败</span>
-            <template v-else-if="currentResult.jobId">
-              <span class="footer-job">流式任务已提交</span>
-              <el-tag size="small" type="primary">{{ currentResult.jobId }}</el-tag>
-              <el-button size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
-              <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
-            </template>
-            <template v-else>
-              <span>{{ currentResult.rows.length }} 行</span>
-              <template v-if="currentResult.truncated"><span class="footer-muted">(已截断)</span></template>
-              <span class="footer-muted">· {{ currentResult.costMs }}ms</span>
-            </template>
+          <!-- 底部工具条:统计 + 复制 + 选择模式 -->
+          <div class="result-toolbar">
+            <span class="stats">
+              <template v-if="currentResult.error">{{ currentResult.error }}</template>
+              <template v-else-if="currentResult.jobId">
+                <span class="footer-job">流式任务已提交</span>
+                <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
+              </template>
+              <template v-else>
+                <span class="stats-num">{{ currentResult.rows.length }} 行</span>
+                <span class="stats-num">{{ currentResult.columns.length }} 列</span>
+                <template v-if="currentResult.truncated"><span class="footer-muted">(已截断)</span></template>
+                <span class="footer-muted">· {{ currentResult.costMs }}ms</span>
+                <template v-if="currentResult.rows.length > pageSize">
+                  <span class="footer-muted">· 分页 {{ pageCurrent }}/{{ Math.ceil(currentResult.rows.length / pageSize) }}</span>
+                </template>
+              </template>
+            </span>
+            <span class="tools">
+              <label class="mode-toggle" :class="{ on: cellCopy }" :title="cellCopy ? '点击单元格即复制' : '可自由选中文本(关闭点击复制)'">
+                <el-switch v-model="cellCopy" size="small" />
+                <span>{{ cellCopy ? '复制模式' : '选择模式' }}</span>
+              </label>
+              <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
+              <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
+              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
+              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
+            </span>
           </div>
           <!-- 翻页(默认 15 条/页) -->
           <el-pagination
@@ -1871,36 +1942,51 @@ function isNumeric(val: unknown): boolean {
     z-index: 1;
   }
 
-  /* 表头列名:点击复制 */
+  /* 表头:左侧列名(点击排序)+ 右侧复制按钮 */
+  :deep(.col-header) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   :deep(.col-header-copy) {
     cursor: copy;
     display: inline-flex;
     align-items: center;
-    max-width: 100%;
-    gap: 4px;
+    justify-content: center;
+    color: $muted;
+    margin-left: 4px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.15s;
 
     &:hover {
       color: $primary;
-      text-decoration: underline dotted;
-    }
-
-    /* 复制图标(仅 hover 显示,提示可点击) */
-    &::after {
-      content: '⧉';
-      font-size: 11px;
-      opacity: 0;
-      transition: opacity 0.15s;
-    }
-
-    &:hover::after {
-      opacity: 1;
     }
   }
+  :deep(th:hover .col-header-copy) {
+    opacity: 1;
+  }
+  /* 表头排序箭头与复制按钮同排 */
+  :deep(.caret-wrapper) {
+    right: 8px;
+  }
 
+  /* NULL 单元格:低饱和胶囊,醒目但不过度突出 */
   :deep(.cell-null) {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 16px;
+    letter-spacing: 0.4px;
     color: $muted;
-    font-style: italic;
+    background: var(--el-fill-color-light);
     cursor: pointer;
+    user-select: none;
   }
 
   :deep(.cell-val) {
@@ -1911,16 +1997,35 @@ function isNumeric(val: unknown): boolean {
     }
   }
 
+  /* 选择模式:取消点击复制光标,允许自由选中文本 */
+  :deep(.cell-select) {
+    cursor: text;
+    user-select: text;
+
+    &:hover {
+      color: $text;
+    }
+  }
+
   :deep(.cell-num) {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 }
 
-.result-footer {
+/* 选择模式整行:可选中 */
+:deep(.row-selectable .cell) {
+  cursor: text;
+  user-select: text;
+}
+
+/* 结果工具条:统计(左)+ 复制/模式开关(右) */
+.result-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   background: $panel;
   border: 1px solid $border;
   border-radius: 6px;
@@ -1928,6 +2033,47 @@ function isNumeric(val: unknown): boolean {
   font-size: 12px;
   color: $muted;
   flex-shrink: 0;
+}
+
+.stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-num {
+  color: $text;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+
+  span:last-child {
+    font-size: 12px;
+    color: $muted;
+  }
+
+  &.on span:last-child {
+    color: $primary;
+  }
 }
 
 .footer-muted {
