@@ -475,9 +475,10 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
     return DbError(engine, "DatabaseError", None, msg)
 
 
-def fetch(sql: str, db: str) -> Dict[str, Any]:
+def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
-    SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。"""
+    SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
+    timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。"""
     ds = get_datasource(db)
     clean_sql = sql.strip().rstrip(";").strip()
     # 查询类(可追加行数限制)vs 写语句
@@ -507,8 +508,9 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
     limit = enforce_limit(clean_sql)
 
     start = time.time()
+    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
     try:
-        conn = ds.connect(DB_CONNECT_TIMEOUT, QUERY_TIMEOUT)
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
         de = _extract_sql_error(e, ds.type)
         if de.error_type == "DatabaseError":
@@ -567,6 +569,7 @@ def fetch(sql: str, db: str) -> Dict[str, Any]:
 class QueryReq(BaseModel):
     db: str
     sql: str
+    timeoutMs: int = 0  # 异步 job 用(毫秒,0=默认 1 小时);同步 /query 忽略
 
 
 @app.get("/health")
@@ -581,6 +584,94 @@ def dbs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     if ALLOWED_DBS:
         names = [n for n in names if n in ALLOWED_DBS]
     return {"code": 0, "data": names}
+
+
+class DbJobManager:
+    """通用数据库异步任务(mysql/oracle):提交即返回 jobId,后台线程执行。
+
+    动机:公司网关固定 60s 读超时,mysql/oracle 慢查询/大查询同步挂起
+    会被掐断 504;异步化后提交/查状态/取消均为秒级往返。
+    前端体验保持不变:持续 loading,直到完成/失败/手动停止。
+    """
+
+    def __init__(self, max_jobs: int = 200, ttl: int = 3600) -> None:
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._max_jobs = max_jobs
+        self._ttl = ttl
+
+    def submit(self, db: str, sql: str, timeout_ms: int = 3600000) -> str:
+        with self._lock:
+            self._seq += 1
+            job_id = "dbj_%d_%04d" % (int(time.time()), self._seq)
+            self._jobs[job_id] = {
+                "id": job_id, "state": "queued", "db": db, "sql": sql,
+                "timeout_ms": timeout_ms, "created_at": time.time(),
+                "started_at": None, "finished_at": None,
+                "result": None, "error": None,
+            }
+        threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        j = self._jobs.get(job_id)
+        if not j:
+            return
+        j["state"] = "running"
+        j["started_at"] = time.time()
+        try:
+            # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
+            result = fetch(j["sql"], j["db"], j["timeout_ms"])
+            j["result"] = result
+            j["state"] = "done"
+        except Exception as e:
+            j["error"] = str(e)[:2000]
+            j["state"] = "failed"
+        finally:
+            j["finished_at"] = time.time()
+            self._gc()
+
+    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j:
+                return None
+            return {
+                "id": j["id"], "state": j["state"], "db": j["db"], "sql": j["sql"][:500],
+                "createdAt": j["created_at"], "startedAt": j["started_at"],
+                "finishedAt": j["finished_at"], "result": j["result"], "error": j["error"],
+            }
+
+    def cancel(self, job_id: str) -> bool:
+        """取消 queued/running 的 job。运行中的底层查询无法强制 kill(只读,
+        继续跑完无害),标记 cancelled 后前端停止轮询、结果丢弃。"""
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j or j["state"] not in ("queued", "running"):
+                return False
+            j["state"] = "cancelled"
+            j["finished_at"] = time.time()
+            return True
+
+    def _gc(self) -> None:
+        with self._lock:
+            now = time.time()
+            stale = [
+                i for i, j in self._jobs.items()
+                if j["state"] in ("done", "failed", "cancelled")
+                and (now - (j["finished_at"] or 0)) > self._ttl
+            ]
+            for i in stale:
+                del self._jobs[i]
+            done_ids = [i for i, j in self._jobs.items() if j["state"] in ("done", "failed", "cancelled")]
+            overflow = len(done_ids) - self._max_jobs
+            if overflow > 0:
+                for i in sorted(done_ids, key=lambda x: self._jobs[x]["finished_at"] or 0)[:overflow]:
+                    del self._jobs[i]
+
+
+DB_JOBS = DbJobManager()
 
 
 @app.post("/query")
@@ -656,6 +747,38 @@ def _check_qps() -> None:
             raise HTTPException(
                 status_code=429, detail=f"too many requests (max {MAX_QPS} qps)"
             )
+
+
+@app.post("/jobs")
+def db_job_submit(
+    req: QueryReq,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """异步提交 mysql/oracle 查询:立即返回 jobId,后台执行(网关 60s 超时安全)。"""
+    require_auth(x_db_token)
+    if not req.sql or not req.sql.strip():
+        raise HTTPException(status_code=400, detail="sql is required")
+    timeout_ms = req.timeoutMs or 3600000
+    job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms)
+    log.info("db job submitted: %s db=%s", job_id, req.db)
+    return {"code": 0, "data": {"jobId": job_id}}
+
+
+@app.get("/jobs/{job_id}")
+def db_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    j = DB_JOBS.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
+    return {"code": 0, "data": j}
+
+
+@app.post("/jobs/{job_id}/cancel")
+def db_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not DB_JOBS.cancel(job_id):
+        raise HTTPException(status_code=404, detail="job not found or already finished: %s" % job_id)
+    return {"code": 0, "data": {"cancelled": True}}
 
 
 @app.get("/acl")
@@ -1258,8 +1381,9 @@ def tables(db: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[st
     require_auth(x_db_token)
     check_db_allowed(db)
     ds = get_datasource(db)
+    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
     try:
-        conn = ds.connect(DB_CONNECT_TIMEOUT, QUERY_TIMEOUT)
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
     try:
@@ -1287,8 +1411,9 @@ def fields(
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
+    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
     try:
-        conn = ds.connect(DB_CONNECT_TIMEOUT, QUERY_TIMEOUT)
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
     try:

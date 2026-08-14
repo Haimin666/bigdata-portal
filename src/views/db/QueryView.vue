@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryDb, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
@@ -789,22 +789,71 @@ function ensureDb(): boolean {
   return !!db.value
 }
 
+/** 当前 mysql/oracle 异步任务的 jobId(供停止按钮取消) */
+const currentDbJobId = ref('')
+
+/** mysql/oracle 执行:异步任务模式 —— 提交即返回 jobId,前端轮询。
+ *  前端体验与同步一致:持续 loading 阻塞,直到完成/失败/手动停止。
+ *  动机:慢查询/大查询同步挂起会撞公司网关 60s 超时 504。 */
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
   if (!ensureDb()) throw new Error('请先选择数据库')
   if (isSparkWriteSql(sql) && !sparkToken.value) {
     const tk = await openSparkAuth()
     if (!tk) throw new Error('已取消:写操作未解锁')
   }
+  let jobId = ''
+  const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
+    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
+    jobId = jid
+    currentDbJobId.value = jid
+    const deadline = Date.now() + 3600000 // 上限 1 小时
+    while (Date.now() < deadline) {
+      if (batchCancelled) {
+        try {
+          await cancelDbJob(jid)
+        } catch {
+          /* 忽略 */
+        }
+        throw new Error('已取消')
+      }
+      const j = await getDbJob(jid)
+      if (j.state === 'done') {
+        currentDbJobId.value = ''
+        return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
+      }
+      if (j.state === 'cancelled') {
+        currentDbJobId.value = ''
+        throw new Error('已取消')
+      }
+      if (j.state === 'failed') {
+        currentDbJobId.value = ''
+        throw new Error(j.error || '任务执行失败')
+      }
+      await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
+    }
+    try {
+      await cancelDbJob(jid)
+    } catch {
+      /* 忽略 */
+    }
+    currentDbJobId.value = ''
+    throw new Error('任务超时(1 小时),已自动取消')
+  }
   try {
-    return await queryDb(db.value, sql, sparkToken.value || undefined)
+    return await run()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    if (/解锁|token|401|403/i.test(msg)) {
+    if (/解锁|token|401|403/i.test(msg) && !/已取消|超时/i.test(msg)) {
       sparkToken.value = ''
       sessionStorage.removeItem(SPARK_TOKEN_KEY)
       const tk2 = await openSparkAuth()
       if (!tk2) throw new Error('已取消:写操作未解锁')
-      return queryDb(db.value, sql, tk2)
+      try {
+        if (jobId) await cancelDbJob(jobId)
+      } catch {
+        /* 忽略 */
+      }
+      return await run()
     }
     throw e
   }
@@ -931,8 +980,15 @@ async function stopQuery() {
         }
       }
       await cancelSpark()
+    } else if (currentDbJobId.value) {
+      // mysql/oracle 异步任务:精确取消当前 job(查询可能仍在后台跑,结果丢弃)
+      try {
+        await cancelDbJob(currentDbJobId.value)
+      } catch {
+        /* 忽略 */
+      }
     }
-    // mysql/oracle:无引擎 job 可取消,置位后批循环自行停止
+    // mysql/oracle(无 job 时)置位后批循环自行停止
     // 停止日志轮询,立即释放 loading 状态
     stopSparkLogPolling()
     loading.value = false

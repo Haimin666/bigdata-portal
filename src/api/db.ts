@@ -89,6 +89,65 @@ export async function queryDb(db: string, sql: string, writeToken?: string): Pro
   return body.data as DbQueryResult
 }
 
+// ── mysql/oracle 异步任务(慢查询/大查询,规避公司网关 60s 超时)──
+/** 异步提交 mysql/oracle 查询:立即返回 jobId(不阻塞等结果) */
+export async function submitDbJob(db: string, sql: string, timeoutMs = 3600000): Promise<{ jobId: string }> {
+  const res = await fetch('/api/db/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ db, sql, timeoutMs })
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ jobId: string }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '提交失败')
+  return body.data as { jobId: string }
+}
+
+/** 查询 mysql/oracle 异步任务状态 */
+export async function getDbJob(jobId: string): Promise<SparkJobInfo> {
+  const res = await fetch(`/api/db/jobs/${encodeURIComponent(jobId)}`)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<SparkJobInfo>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '查询失败')
+  return body.data as SparkJobInfo
+}
+
+/** 取消 mysql/oracle 异步任务(手动停止) */
+export async function cancelDbJob(jobId: string): Promise<{ cancelled: boolean }> {
+  const res = await fetch(`/api/db/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ cancelled: boolean }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '取消失败')
+  return body.data as { cancelled: boolean }
+}
+
 /** Spark SQL/PySpark 查询(经网关 /api/spark/query 走 db-proxy 常驻 SparkSession)
  *  timeoutMs:前端侧 AbortSignal 超时 + 透传后端统一超时,默认 120s。
  *  超时后自动请求 cancelSpark 清理后端挂起的 job,避免查询无限等待占锁。 */
@@ -174,7 +233,7 @@ export async function cancelSpark(): Promise<{ cancelled: boolean }> {
 // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
 export interface SparkJobInfo {
   id: string
-  state: 'queued' | 'running' | 'done' | 'failed'
+  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   sql?: string
   kind?: string
   createdAt?: number
