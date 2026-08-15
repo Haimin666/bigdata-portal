@@ -5,3 +5,5 @@ Dockerfile
 *.log
 .env
 .env.*
+# 凭证/密钥不入镜像(compose 挂载只读提供;直接 docker run 时缺失则回退默认值)
+server/config.local.json
