@@ -755,14 +755,26 @@ export async function explainSql(params: { db: string; sql: string }): Promise<E
 }
 
 // ── 数据权限矩阵(admin only;网关 /api/db-perms,契约见 docs/modules/db-permissions.md)──
+/** v2 规则:引擎级(库/表/读写) + Spark + Flink(与 server/db-permissions.js 一致) */
+export interface DbEngRule {
+  engine: string
+  db: string
+  tables: string[] | null
+  read: boolean
+  write: boolean
+}
 export interface DbUserRule {
   user: string
-  dbs: string[]
+  engineRules?: DbEngRule[]
+  spark?: { read: boolean; write: boolean } | null
+  flink?: { enabled: boolean } | null
 }
 
 export interface DbRoleRule {
   role: string
-  dbs: string[]
+  engineRules?: DbEngRule[]
+  spark?: { read: boolean; write: boolean } | null
+  flink?: { enabled: boolean } | null
 }
 
 export interface DbPerms {

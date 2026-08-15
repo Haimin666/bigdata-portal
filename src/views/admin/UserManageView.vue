@@ -5,6 +5,7 @@ import { Plus, Refresh, Delete, EditPen, Grid } from '@element-plus/icons-vue'
 import { userApi, type UserInfo, type RolesDef } from '@/api/auth'
 import { menus } from '@/config/menu'
 import DbPermView from './DbPermView.vue'
+import DbRuleEditor, { type DbRuleV2 } from './DbRuleEditor.vue'
 import { getDbPerms, saveDbPerms, listDataSources, type DbUserRule, type DbRoleRule } from '@/api/db'
 
 defineOptions({ name: 'UserManageView' })
@@ -21,9 +22,10 @@ const tab = ref('users')
 const userRules = ref<DbUserRule[]>([])
 const roleRules = ref<DbRoleRule[]>([])
 const dbOptions = ref<string[]>([])
-const showDbPerm = ref(false)
-const dbPermUser = ref('')
-const dbPermForm = reactive<{ dbs: string[]; all: boolean }>({ dbs: [], all: false })
+// 规则编辑器(引擎/库/表/读写 + Spark + Flink)
+const showEditor = ref(false)
+const editingSubject = ref('')
+const editingInitial = ref<DbRuleV2 | null>(null)
 
 const roleLabels = computed(() => {
   const map: Record<string, string> = {}
@@ -57,19 +59,46 @@ async function loadPerms() {
   }
 }
 
-/** 用户已配置的库权限(未配置返回 null = 放行) */
-function dbsOf(username: string): string[] | null {
-  const r = userRules.value.find((x) => x.user === username)
-  return r ? r.dbs : null
+/** 用户已配置的库规则(未配置返回 null = 放行) */
+function ruleOf(username: string): DbUserRule | null {
+  return userRules.value.find((x) => x.user === username) || null
+}
+
+/** 用户管理页摘要展示(规则列) */
+function engDesc(rule: DbUserRule): string {
+  const ers = rule.engineRules || []
+  if (!ers.length) return '未配置'
+  return ers
+    .map((er) => {
+      const eng = er.engine === '*' ? '全部' : er.engine
+      const tbl = er.tables && er.tables.length ? `(${er.tables.length}表)` : ''
+      return `${eng}:${er.db}${tbl} ${er.read ? '读' : ''}${er.write ? '写' : ''}`
+    })
+    .join('; ')
+}
+function sparkTag(rule: DbUserRule): string {
+  return rule.spark?.write ? '可写' : '只读'
 }
 
 function openDbPerm(u: UserInfo) {
-  const dbs = dbsOf(u.username)
-  const isAll = !!dbs && dbs.length === 1 && dbs[0] === '*'
-  dbPermUser.value = u.username
-  dbPermForm.dbs = isAll || !dbs ? [] : [...dbs]
-  dbPermForm.all = !!dbs && isAll
-  showDbPerm.value = true
+  const rule = ruleOf(u.username)
+  editingSubject.value = u.username
+  editingInitial.value = rule
+    ? {
+        engineRules: (rule.engineRules || []).map((er) => ({ ...er, tables: er.tables ? [...er.tables] : null })),
+        spark: rule.spark ? { read: rule.spark.read === true, write: rule.spark.write === true } : null,
+        flink: rule.flink ? { enabled: rule.flink.enabled === true } : null
+      }
+    : null
+  showEditor.value = true
+}
+
+function onSaveRule(subject: string, rule: DbRuleV2) {
+  const idx = userRules.value.findIndex((r) => r.user === subject)
+  if (idx >= 0) userRules.value[idx] = { user: subject, ...rule }
+  else userRules.value.push({ user: subject, ...rule })
+  showEditor.value = false
+  void persistDbPerms()
 }
 
 /** 移除某用户的库规则(= 无规则,按 db-proxy 全局白名单放行) */
@@ -81,18 +110,6 @@ async function clearDbPerm(u: UserInfo) {
   }
   userRules.value = userRules.value.filter((r) => r.user !== u.username)
   await persistDbPerms()
-}
-
-async function saveDbPerm() {
-  const subject = dbPermUser.value
-  const dbs = dbPermForm.all ? ['*'] : [...dbPermForm.dbs]
-  if (!dbPermForm.all && dbs.length === 0) return ElMessage.warning('请至少选择一个数据库,或开启「全部库」')
-  const idx = userRules.value.findIndex((r) => r.user === subject)
-  const rule: DbUserRule = { user: subject, dbs }
-  if (idx >= 0) userRules.value[idx] = rule
-  else userRules.value.push(rule)
-  const ok = await persistDbPerms()
-  if (ok) showDbPerm.value = false
 }
 
 /** 保存时保留角色规则,只更新用户规则部分 */
@@ -234,22 +251,16 @@ function statusInfo(s: string) {
           <span v-else class="muted">全部模块</span>
         </template>
       </el-table-column>
-      <el-table-column label="可访问数据库" min-width="200">
+      <el-table-column label="可访问数据库" min-width="260">
         <template #default="{ row }">
           <template v-if="row.role === 'admin'">
             <el-tag size="small" type="danger">不受限</el-tag>
           </template>
           <template v-else>
-            <template v-if="dbsOf(row.username)">
-              <el-tag
-                v-if="dbsOf(row.username)!.includes('*')"
-                size="small"
-                type="success"
-              >全部库</el-tag>
-              <template v-else>
-                <el-tag v-for="d in (dbsOf(row.username) || []).slice(0, 4)" :key="d" size="small" class="mod-tag">{{ d }}</el-tag>
-                <el-tag v-if="(dbsOf(row.username) || []).length > 4" size="small" type="info">+{{ (dbsOf(row.username) || []).length - 4 }}</el-tag>
-              </template>
+            <template v-if="ruleOf(row.username)">
+              <span class="rule-summary" :title="engDesc(ruleOf(row.username)!)">{{ engDesc(ruleOf(row.username)!) }}</span>
+              <el-tag v-if="ruleOf(row.username)!.spark" size="small" class="spark-tag" :type="(ruleOf(row.username)!.spark?.write ? 'warning' : 'primary')">Spark {{ sparkTag(ruleOf(row.username)!) }}</el-tag>
+              <el-tag v-if="ruleOf(row.username)!.flink?.enabled" size="small" class="spark-tag" type="success">Flink</el-tag>
             </template>
             <span v-else class="muted">默认(全局白名单)</span>
           </template>
@@ -265,7 +276,7 @@ function statusInfo(s: string) {
         <template #default="{ row }">
           <el-button size="small" text type="primary" :icon="EditPen" @click="openEdit(row)">编辑</el-button>
           <el-button v-if="row.role !== 'admin'" size="small" text type="warning" :icon="Grid" @click="openDbPerm(row)">库权限</el-button>
-          <el-button v-if="row.role !== 'admin' && dbsOf(row.username)" size="small" text type="danger" @click="clearDbPerm(row)">清除</el-button>
+          <el-button v-if="row.role !== 'admin' && ruleOf(row.username)" size="small" text type="danger" @click="clearDbPerm(row)">清除</el-button>
           <el-button size="small" text type="danger" :icon="Delete" @click="removeUser(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -343,26 +354,15 @@ function statusInfo(s: string) {
       </template>
     </el-dialog>
 
-    <!-- 库权限编辑 -->
-    <el-dialog v-model="showDbPerm" :title="`库权限: ${dbPermUser}`" width="480px">
-      <el-checkbox v-model="dbPermForm.all">开放全部库</el-checkbox>
-      <el-select
-        v-if="!dbPermForm.all"
-        v-model="dbPermForm.dbs"
-        multiple
-        filterable
-        collapse-tags
-        placeholder="选择可访问的数据库"
-        style="width: 100%; margin-top: 6px"
-      >
-        <el-option v-for="d in dbOptions" :key="d" :label="d" :value="d" />
-      </el-select>
-      <div class="muted db-perm-tip">未配置规则的用户按 db-proxy 全局白名单放行;admin 不受限。下拉仅展示网关返回的库。</div>
-      <template #footer>
-        <el-button @click="showDbPerm = false">取消</el-button>
-        <el-button type="primary" @click="saveDbPerm">保存</el-button>
-      </template>
-    </el-dialog>
+    <!-- 库权限编辑(v2 规则:引擎/库/表/读写 + Spark + Flink) -->
+    <DbRuleEditor
+      v-model="showEditor"
+      :subject="editingSubject"
+      subject-kind="user"
+      :initial="editingInitial"
+      :db-options="dbOptions"
+      @save="onSaveRule"
+    />
       </el-tab-pane>
 
       <el-tab-pane label="数据权限" name="dbperm">

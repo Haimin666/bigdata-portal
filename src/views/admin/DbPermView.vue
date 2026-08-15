@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Delete, EditPen } from '@element-plus/icons-vue'
 import { getDbPerms, saveDbPerms, listDataSources, type DbUserRule, type DbRoleRule } from '@/api/db'
 import { userApi, type RolesDef } from '@/api/auth'
+import DbRuleEditor, { type DbRuleV2 } from './DbRuleEditor.vue'
 
 defineOptions({ name: 'DbPermView' })
-
-// 库 tag 最多展示数,超出折叠为 +N(完整列表见 title 提示)
-const MAX_SHOWN = 3
 
 type RuleKind = 'user' | 'role'
 
@@ -60,77 +58,89 @@ async function loadUsersAndRoles() {
 
 onMounted(load)
 
-// ── 新增 / 编辑弹窗 ─────────────────────────────────────
-const showDialog = ref(false)
-const dialogKind = ref<RuleKind>('user')
-const form = reactive<{ subject: string; dbs: string[]; all: boolean }>({ subject: '', dbs: [], all: false })
+// ── 规则编辑(DbRuleEditor:引擎/库/表/读写 + Spark + Flink)──────
+const showEditor = ref(false)
+const editingKind = ref<RuleKind>('user')
+const editingSubject = ref('')
+const editingInitial = ref<DbRuleV2 | null>(null)
 
-const dialogTitle = computed(() =>
-  `${dialogKind.value === 'user' ? '用户' : '角色'}规则${form.subject ? '编辑' : '新增'}`
-)
+function openCreate(kind: RuleKind) {
+  editingKind.value = kind
+  editingSubject.value = ''
+  editingInitial.value = null
+  showEditor.value = true
+}
 
-/** 主体下拉选项:已配置规则的主体不再重复提供(编辑中的当前主体除外) */
+/** 新增时可选择主体:已配置规则的主体不再重复提供 */
 const subjectOptions = computed(() => {
-  if (dialogKind.value === 'user') {
+  if (editingKind.value === 'user') {
     const taken = new Set(userRules.value.map((r) => r.user))
-    return users.value.filter((u) => u === form.subject || !taken.has(u)).map((u) => ({ value: u, label: u }))
+    return users.value.filter((u) => !taken.has(u)).map((u) => ({ value: u, label: u }))
   }
   const taken = new Set(roleRules.value.map((r) => r.role))
   return roleOptions.value
-    .filter((r) => r.key === form.subject || !taken.has(r.key))
+    .filter((r) => !taken.has(r.key))
     .map((r) => ({ value: r.key, label: `${r.title}(${r.key})` }))
 })
 
-function openCreate(kind: RuleKind) {
-  dialogKind.value = kind
-  Object.assign(form, { subject: '', dbs: [], all: false })
-  showDialog.value = true
-}
-
 function openEdit(kind: RuleKind, rule: DbUserRule | DbRoleRule) {
-  dialogKind.value = kind
-  const isAll = rule.dbs.length === 1 && rule.dbs[0] === '*'
-  Object.assign(form, {
-    subject: kind === 'user' ? (rule as DbUserRule).user : (rule as DbRoleRule).role,
-    dbs: isAll ? [] : [...rule.dbs],
-    all: isAll
-  })
-  showDialog.value = true
-}
-
-async function submit() {
-  const subject = form.subject.trim()
-  if (!subject) return ElMessage.warning(`请选择${dialogKind.value === 'user' ? '用户' : '角色'}`)
-  const dbs = form.all ? ['*'] : [...form.dbs]
-  if (!form.all && dbs.length === 0) return ElMessage.warning('请至少选择一个数据库,或开启「全部库」')
-  if (dialogKind.value === 'user') {
-    const rules = userRules.value
-    const idx = rules.findIndex((r) => r.user === subject)
-    const rule: DbUserRule = { user: subject, dbs }
-    if (idx >= 0) rules[idx] = rule
-    else rules.push(rule)
-  } else {
-    const rules = roleRules.value
-    const idx = rules.findIndex((r) => r.role === subject)
-    const rule: DbRoleRule = { role: subject, dbs }
-    if (idx >= 0) rules[idx] = rule
-    else rules.push(rule)
+  editingKind.value = kind
+  editingSubject.value = kind === 'user' ? (rule as DbUserRule).user : (rule as DbRoleRule).role
+  editingInitial.value = {
+    engineRules: (rule.engineRules || []).map((er) => ({ ...er, tables: er.tables ? [...er.tables] : null })),
+    spark: rule.spark ? { read: rule.spark.read === true, write: rule.spark.write === true } : null,
+    flink: rule.flink ? { enabled: rule.flink.enabled === true } : null
   }
-  await persist(true)
+  showEditor.value = true
 }
 
-// ── 全量保存 ─────────────────────────────────────────────
-async function persist(closeDialog: boolean) {
+function onSaveRule(subject: string, rule: DbRuleV2) {
+  if (editingKind.value === 'user') {
+    const idx = userRules.value.findIndex((r) => r.user === subject)
+    if (idx >= 0) userRules.value[idx] = { user: subject, ...rule }
+    else userRules.value.push({ user: subject, ...rule })
+  } else {
+    const idx = roleRules.value.findIndex((r) => r.role === subject)
+    if (idx >= 0) roleRules.value[idx] = { role: subject, ...rule }
+    else roleRules.value.push({ role: subject, ...rule })
+  }
+  showEditor.value = false
+  void persist()
+}
+
+/** 全量保存(规则编辑器保存后调用) */
+async function persist() {
   saving.value = true
   try {
     await saveDbPerms({ userRules: [...userRules.value], roleRules: [...roleRules.value] })
     ElMessage.success('已保存')
-    if (closeDialog) showDialog.value = false
   } catch (e) {
     ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
   } finally {
     saving.value = false
   }
+}
+
+/** 引擎规则摘要(展示用) */
+function engDesc(rule: DbUserRule | DbRoleRule): string {
+  const ers = rule.engineRules || []
+  if (!ers.length) return '未配置'
+  return ers
+    .map((er) => {
+      const eng = er.engine === '*' ? '全部引擎' : er.engine
+      const tbl = er.tables && er.tables.length ? `(${er.tables.length}表)` : ''
+      return `${eng}:${er.db}${tbl} ${er.read ? '读' : ''}${er.write ? '写' : ''}`
+    })
+    .join('; ')
+}
+
+function sparkDesc(rule: DbUserRule | DbRoleRule): string {
+  if (!rule.spark) return '未启用'
+  return `读${rule.spark.read ? '✓' : '✗'} 写${rule.spark.write ? '✓' : '✗'}`
+}
+
+function flinkDesc(rule: DbUserRule | DbRoleRule): string {
+  return rule.flink?.enabled ? '已启用' : '未启用'
 }
 
 // ── 删除 ─────────────────────────────────────────────────
@@ -148,21 +158,13 @@ async function removeRule(kind: RuleKind, rule: DbUserRule | DbRoleRule) {
     const idx = roleRules.value.findIndex((r) => r.role === label)
     if (idx >= 0) roleRules.value.splice(idx, 1)
   }
-  await persist(false)
+  await persist()
 }
 
 // ── 展示辅助 ─────────────────────────────────────────────
 /** 提取规则主体(用户规则取 user,角色规则取 role) */
 function subjectOf(rule: DbUserRule | DbRoleRule): string {
   return (rule as DbUserRule).user ?? (rule as DbRoleRule).role
-}
-
-function shownDbs(dbs: string[]): string[] {
-  return dbs.slice(0, MAX_SHOWN)
-}
-
-function restCount(dbs: string[]): number {
-  return Math.max(0, dbs.length - MAX_SHOWN)
 }
 </script>
 
@@ -188,26 +190,19 @@ function restCount(dbs: string[]): number {
       <el-tab-pane label="用户规则" name="user">
         <el-table v-loading="loading" :data="userRules" size="small" border empty-text="暂无用户规则,点击「新增用户规则」配置">
           <el-table-column prop="user" label="用户名" min-width="140" />
-          <el-table-column label="可访问库" min-width="260">
+          <el-table-column label="引擎规则" min-width="280">
             <template #default="{ row }">
-              <template v-if="row.dbs.includes('*')">
-                <el-tag size="small" type="success">全部库</el-tag>
-              </template>
-              <template v-else-if="row.dbs.length">
-                <el-tag
-                  v-for="d in shownDbs(row.dbs)"
-                  :key="d"
-                  size="small"
-                  class="db-tag"
-                  :title="row.dbs.join(', ')"
-                >
-                  {{ d }}
-                </el-tag>
-                <el-tag v-if="restCount(row.dbs) > 0" size="small" type="info" :title="row.dbs.join(', ')">
-                  +{{ restCount(row.dbs) }}
-                </el-tag>
-              </template>
-              <span v-else class="muted">-</span>
+              <span class="rule-summary" :title="engDesc(row)">{{ engDesc(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Spark" width="130" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.spark ? (row.spark.write ? 'warning' : 'primary') : 'info'">{{ sparkDesc(row) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="Flink" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.flink?.enabled ? 'success' : 'info'">{{ flinkDesc(row) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="200" align="center">
@@ -223,26 +218,19 @@ function restCount(dbs: string[]): number {
       <el-tab-pane label="角色规则" name="role">
         <el-table v-loading="loading" :data="roleRules" size="small" border empty-text="暂无角色规则,点击「新增角色规则」配置">
           <el-table-column prop="role" label="角色名" min-width="140" />
-          <el-table-column label="可访问库" min-width="260">
+          <el-table-column label="引擎规则" min-width="280">
             <template #default="{ row }">
-              <template v-if="row.dbs.includes('*')">
-                <el-tag size="small" type="success">全部库</el-tag>
-              </template>
-              <template v-else-if="row.dbs.length">
-                <el-tag
-                  v-for="d in shownDbs(row.dbs)"
-                  :key="d"
-                  size="small"
-                  class="db-tag"
-                  :title="row.dbs.join(', ')"
-                >
-                  {{ d }}
-                </el-tag>
-                <el-tag v-if="restCount(row.dbs) > 0" size="small" type="info" :title="row.dbs.join(', ')">
-                  +{{ restCount(row.dbs) }}
-                </el-tag>
-              </template>
-              <span v-else class="muted">-</span>
+              <span class="rule-summary" :title="engDesc(row)">{{ engDesc(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Spark" width="130" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.spark ? (row.spark.write ? 'warning' : 'primary') : 'info'">{{ sparkDesc(row) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="Flink" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.flink?.enabled ? 'success' : 'info'">{{ flinkDesc(row) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="200" align="center">
@@ -255,38 +243,16 @@ function restCount(dbs: string[]): number {
       </el-tab-pane>
     </el-tabs>
 
-    <!-- 新增 / 编辑规则 -->
-    <el-dialog v-model="showDialog" :title="dialogTitle" width="520px">
-      <el-form label-width="80px" size="default">
-        <el-form-item :label="dialogKind === 'user' ? '用户' : '角色'">
-          <el-select v-model="form.subject" filterable :placeholder="`选择${dialogKind === 'user' ? '用户' : '角色'}`" style="width: 100%">
-            <el-option v-for="o in subjectOptions" :key="o.value" :label="o.label" :value="o.value" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="全部库">
-          <el-switch v-model="form.all" />
-          <span class="form-hint">开启后该主体对所有库放行(存储为 *),并禁用下方库多选</span>
-        </el-form-item>
-        <el-form-item label="可访问库">
-          <el-select
-            v-model="form.dbs"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            :disabled="form.all"
-            placeholder="选择或输入库名(可新建)"
-            style="width: 100%"
-          >
-            <el-option v-for="d in dbOptions" :key="d" :label="d" :value="d" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showDialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submit">保存</el-button>
-      </template>
-    </el-dialog>
+    <!-- 规则编辑器(引擎/库/表/读写 + Spark + Flink) -->
+    <DbRuleEditor
+      v-model="showEditor"
+      :subject="editingSubject"
+      :subject-kind="editingKind"
+      :initial="editingInitial"
+      :db-options="dbOptions"
+      :subject-options="subjectOptions"
+      @save="onSaveRule"
+    />
   </div>
 </template>
 

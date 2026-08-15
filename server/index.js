@@ -16,7 +16,7 @@ import {
   prejobSubmit, prejobJobs, prejobStatus, prejobLogs, prejobCancel, prejobConfig
 } from './flink-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { loadPerms, savePerms, checkDbAccess } from './db-permissions.js'
+import { loadPerms, savePerms, checkDbAccess, checkSparkAccess, checkFlinkAccess } from './db-permissions.js'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
 // (本网关共 7 个代理实例),Node 24 默认 maxListeners=10 会触发 MaxListenersExceededWarning,这里放宽。
@@ -707,6 +707,27 @@ app.get('/api/config/modules', (req, res) => {
 // 该路径落在 PROXY_PATHS('/api/db/')内,全局 express.json 被跳过,此处路由级挂载 json 解析。
 // 必须在 dbProxy 透传中间件之前注册,否则被 createProxyMiddleware 直接转发(绕过写检测)。
 
+// 库 → 引擎映射(由 /api/db/acl 响应刷新;校验引擎级规则用)
+let DS_ENGINE_MAP = {}
+function dbEngine(dbName) {
+  const t = DS_ENGINE_MAP[String(dbName || '')]
+  return typeof t === 'string' ? t.toLowerCase() : ''
+}
+
+/** 简易 SQL 表名提取(表级权限校验用;去掉库前缀与引号,过滤非表关键字) */
+function extractTables(sql) {
+  const s = String(sql || '').replace(/\/\*[\s\S]*?\*\//g, '')
+  const tables = new Set()
+  const re = /\b(?:from|join|update|into|table)\s+([`"']?)([A-Za-z0-9_$#.\-]+)\1/gi
+  let m
+  while ((m = re.exec(s))) {
+    let t = String(m[2]).replace(/[`"']/g, '')
+    if (t.includes('.')) t = t.split('.').pop()
+    if (t && !/^(select|where|set|values|left|right|inner|outer|full|cross|on|and|or|as|limit|group|order|having|dual)$/i.test(t)) tables.add(t)
+  }
+  return [...tables]
+}
+
 // ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
 // 仅拦截 GET + query.db 且路径命中上述元数据接口,其余(POST explain/jobs 提交、
 // GET dbs/acl/jobs/query/health 等)一律 next() 放行。
@@ -740,6 +761,10 @@ app.get('/api/db/acl', async (req, res) => {
     if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
     const data = body.data || {}
     const datasources = Array.isArray(data.datasources) ? data.datasources : []
+    // 刷新库→引擎映射(引擎级规则校验用)
+    for (const d of datasources) {
+      if (d && typeof d.name === 'string' && d.type) DS_ENGINE_MAP[d.name] = String(d.type).toLowerCase()
+    }
     const user = req?.user || {}
     if (user.role !== 'admin') {
       const perms = loadPerms()
@@ -792,9 +817,13 @@ app.post('/api/db/jobs', express.json(), async (req, res) => {
   if (!dbName) {
     return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
   }
-  // 数据权限矩阵:按用户/角色校验库访问权(POST 提交时;GET 状态查询由透传层另行处理)
+  // 数据权限矩阵 v2:按 引擎+库+读写+表 校验
   try {
-    checkDbAccess(req, dbName)
+    checkDbAccess(req, dbName, {
+      engine: dbEngine(dbName),
+      write: isSparkWriteSql(sql),
+      tables: extractTables(sql)
+    })
   } catch (e) {
     if (e?.statusCode === 403) {
       return res.status(403).json({ code: 403, msg: e.message })
@@ -1058,14 +1087,18 @@ if (config.dbProxyUrl) {
       if (!sql || !String(sql).trim()) {
         return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
       }
+      // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
+      checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql)))
       // 写权限密码验证已移除(由网关库权限矩阵管控):SQL 写语句/PySpark 直接执行,
       // 数据源 readOnly 与 db-proxy 侧资源护栏兑底(写审计保留)。
       const writeUnlocked = false
-      // 超时对齐:前端/门户/db-proxy 统一默认 120s,避免 SQL 卡住时无限等待
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
       const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data: result })
     } catch (e) {
+      if (e?.statusCode === 403) {
+        return res.status(403).json({ code: 403, msg: e.message })
+      }
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[spark/query]', msg)
       res.status(502).json({ code: 502, msg: `spark 查询失败: ${msg.slice(0, 300)}` })
@@ -1080,12 +1113,17 @@ if (config.dbProxyUrl) {
       const k = kind === 'pyspark' ? 'pyspark' : 'sql'
       const body = String(k === 'pyspark' ? code : sql || '')
       if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
+      // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
+      checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body)))
       // 写权限密码验证已移除(与 /api/spark/query 一致):库权限矩阵 + readOnly 兑底
       const writeUnlocked = false
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
       const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data })
     } catch (e) {
+      if (e?.statusCode === 403) {
+        return res.status(403).json({ code: 403, msg: e.message })
+      }
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[spark/jobs]', msg)
       res.status(502).json({ code: 502, msg: `spark 提交失败: ${msg.slice(0, 300)}` })
@@ -1176,10 +1214,8 @@ if (config.dbProxyUrl) {
 // 任务列表/日志)为只读,不强制。
 if (config.dbProxyUrl) {
   app.post('/api/flink/query', async (req, res) => {
-    const tk = req.get('X-Spark-Token')
-    if (!tk || !sparkTokenValid(tk)) {
-      return res.status(403).json({ code: 403, msg: 'Flink 任务需要解锁,请先输入密码(与 Spark 同一密码)' })
-    }
+    // Flink 权限矩阵 v2:需规则授予 flink.enabled
+    checkFlinkAccess(req)
     try {
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
       const data = await flinkQuery(String(req.body?.sql || ''), {
@@ -1311,9 +1347,13 @@ app.post('/api/dbquery/query', async (req, res) => {
     // 空 db 直接清晰报错,避免转发后得到 db-proxy 隐晦的 "database '' not in ALLOWED_DBS"
     return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
   }
-  // 数据权限矩阵:按用户/角色校验库访问权(优先于写解锁,权限优先于操作放行)
+  // 数据权限矩阵 v2:按 引擎+库+读写+表 校验(优先于写解锁,权限优先于操作放行)
   try {
-    checkDbAccess(req, dbName)
+    checkDbAccess(req, dbName, {
+      engine: dbEngine(dbName),
+      write: isSparkWriteSql(sql),
+      tables: extractTables(sql)
+    })
   } catch (e) {
     if (e?.statusCode === 403) {
       return res.status(403).json({ code: 403, msg: e.message })
