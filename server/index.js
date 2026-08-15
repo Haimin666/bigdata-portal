@@ -1389,6 +1389,9 @@ app.use('/api/dataleap', dataleapRouter())
 // ── SPA fallback(仅非 API 的 GET 路由) ────────────────────────
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next()
+  // index.html 必须 no-cache:dist 每次构建后 chunk 文件名带新 hash,
+  // 浏览器若命中旧的 index.html(304)会去加载已删除的旧 chunk 而白屏。
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate')
   res.sendFile(path.join(DIST_DIR, 'index.html'))
 })
 
