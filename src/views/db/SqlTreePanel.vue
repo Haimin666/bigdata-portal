@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search, CopyDocument } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
@@ -10,10 +10,13 @@ import {
   moveScriptNode,
   listTables,
   listFields,
+  getTableDDL,
   type ScriptNode,
   type DbDataSource,
-  type TableField
+  type TableMeta,
+  type TableFieldDetail
 } from '@/api/db'
+import { copyText } from '@/utils/clipboard'
 
 defineOptions({ name: 'SqlTreePanel' })
 
@@ -21,6 +24,7 @@ const props = defineProps<{ dbs: DbDataSource[] }>()
 const emit = defineEmits<{
   (e: 'open', node: ScriptNode): void
   (e: 'insert', text: string): void
+  (e: 'openTable', payload: { db: string; table: string }): void
 }>()
 
 const activeTab = ref<'my' | 'catalog'>('my')
@@ -114,6 +118,8 @@ interface CatNode extends Record<string, unknown> {
   db?: string
   table?: string
   typeName?: string
+  /** 表/字段注释(detail=1 时后端返回) */
+  comment?: string
 }
 
 /** 树懒加载:根=库 → 表 → 字段 */
@@ -134,19 +140,20 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
     }
     const data = node.data as CatNode
     if (data.kind === 'db') {
-      const tables = await listTables(data.db || '')
+      const tables = await listTables(data.db || '', true)
       resolve(
-        tables.map((t) => ({
-          id: `t:${t}`,
-          name: t,
+        (tables as TableMeta[]).map((t) => ({
+          id: `t:${t.name}`,
+          name: t.name,
           kind: 'table' as const,
           isLeaf: false,
           db: data.db,
-          table: t
+          table: t.name,
+          comment: t.comment
         }))
       )
     } else if (data.kind === 'table') {
-      const fields: TableField[] = await listFields(data.db || '', data.table || data.name)
+      const fields = (await listFields(data.db || '', data.table || data.name, true)) as TableFieldDetail[]
       resolve(
         fields.map((f) => ({
           id: `f:${data.table}:${f.name}`,
@@ -155,7 +162,8 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
           isLeaf: true,
           db: data.db,
           table: data.table,
-          typeName: f.type
+          typeName: f.type,
+          comment: f.comment
         }))
       )
     } else {
@@ -167,16 +175,36 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
   }
 }
 
-/** 点击表/字段:字段插入;表仅展开(复制需点按钮) */
+/** 单击:字段插入;库/表仅展开(双击预览需点表按钮) */
 function onCatalogClick(data: CatNode) {
   if (data.kind === 'db' || data.kind === 'table') return // 库/表仅展开
   emit('insert', data.name) // 字段:保持点击插入
 }
 
-/** 复制表名到画布(点复制按钮) */
+/** 双击表:预览数据(交给父组件开新 tab 查 SELECT * LIMIT 100) */
+function onTableDblClick(data: CatNode) {
+  if (data.kind !== 'table') return
+  emit('openTable', { db: data.db || '', table: data.table || data.name })
+}
+
+/** 复制表名到画布(点 + 按钮) */
 function onCopyTable(data: CatNode) {
   emit('insert', data.table || data.name)
   ElMessage.success(`已插入 ${data.table || data.name}`)
+}
+
+/** 复制建表语句(点复制 DDL 按钮) */
+async function onCopyDDL(data: CatNode) {
+  const db = data.db || ''
+  const table = data.table || data.name
+  try {
+    const { ddl } = await getTableDDL(db, table)
+    const ok = await copyText(ddl)
+    if (!ok) throw new Error('剪贴板写入失败')
+    ElMessage.success(`已复制建表语句 ${table}`)
+  } catch (e) {
+    ElMessage.error(`复制建表语句失败:${e instanceof Error ? e.message : e}`)
+  }
 }
 
 // datasources 异步到达后重建表目录树(重新加载根库列表)
@@ -337,17 +365,28 @@ onUnmounted(() => {
           @node-click="(d: CatNode) => onCatalogClick(d)"
         >
           <template #default="{ data }">
-            <div class="tree-node">
+            <div class="tree-node" @dblclick="(e: MouseEvent) => { e.stopPropagation(); onTableDblClick(data as CatNode) }">
               <el-icon class="node-icon cat" :class="{ field: (data as CatNode).kind === 'field' }">
                 <Coin v-if="(data as CatNode).kind === 'db'" />
                 <Grid v-else-if="(data as CatNode).kind === 'table'" />
                 <CaretRight v-else />
               </el-icon>
-              <span class="node-name" :title="(data as CatNode).name">{{ (data as CatNode).name }}</span>
+              <span
+                class="node-name"
+                :title="(data as CatNode).comment ? `${(data as CatNode).name} — ${(data as CatNode).comment}` : (data as CatNode).name"
+              >{{ (data as CatNode).name }}</span>
+              <span v-if="(data as CatNode).kind === 'table' && (data as CatNode).comment" class="node-comment" :title="(data as CatNode).comment">
+                {{ (data as CatNode).comment }}
+              </span>
+              <span v-if="(data as CatNode).typeName" class="field-type" :title="(data as CatNode).comment ? `${(data as CatNode).typeName} — ${(data as CatNode).comment}` : (data as CatNode).typeName">
+                {{ (data as CatNode).typeName }}
+              </span>
+              <span v-if="(data as CatNode).kind === 'table'" class="copy-btn" title="复制建表语句" @click.stop="onCopyDDL(data as CatNode)">
+                <CopyDocument />
+              </span>
               <span v-if="(data as CatNode).kind === 'table'" class="copy-btn" title="复制表名到画布" @click.stop="onCopyTable(data as CatNode)">
                 <Plus />
               </span>
-              <span v-if="(data as CatNode).typeName" class="field-type">{{ (data as CatNode).typeName }}</span>
             </div>
           </template>
         </el-tree>
@@ -506,6 +545,17 @@ onUnmounted(() => {
     font-size: 12px;
     color: $muted;
     flex-shrink: 0;
+  }
+
+  .node-comment {
+    font-size: 12px;
+    color: $muted;
+    opacity: 0.85;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40%;
+    flex-shrink: 1;
   }
 
   .copy-btn {

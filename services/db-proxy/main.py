@@ -1434,11 +1434,17 @@ def scripts_get(
 
 # ── 表目录(库→表→字段,只读元数据)────────────────────────────
 @app.get("/tables")
-def tables(db: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def tables(
+    db: str,
+    detail: int = 0,
+    timeoutMs: int = 0,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """表列表。detail=1 时返回 [{name, comment}](含表注释),否则保持 string[] 兼容旧调用。"""
     require_auth(x_db_token)
     check_db_allowed(db)
     ds = get_datasource(db)
-    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
+    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -1446,29 +1452,49 @@ def tables(db: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[st
     try:
         cur = conn.cursor()
         if ds.type == "mysql":
-            cur.execute("SHOW TABLES")
+            cur.execute("SHOW TABLE STATUS")
             rows = cur.fetchall()
-            names = [list(r.values())[0] for r in rows]
+            items = [
+                {
+                    "name": str(d.get("Name", list(d.values())[0])),
+                    "comment": str(d.get("Comment", "") or ""),
+                }
+                for d in rows
+            ]
         else:
-            cur.execute("SELECT table_name FROM user_tables ORDER BY table_name")
+            # 当前用户 schema 下表 + 注释(Oracle 注释可为 NULL → 空串)
+            cur.execute(
+                "SELECT t.table_name, c.comments FROM user_tables t "
+                "LEFT JOIN user_tab_comments c ON t.table_name = c.table_name "
+                "ORDER BY t.table_name"
+            )
             rows = cur.fetchall()
-            names = [r[0] for r in rows]
+            items = [{"name": r[0], "comment": str(r[1] or "")} for r in rows]
         cur.close()
     finally:
         conn.close()
-    return {"code": 0, "data": names}
+    if detail:
+        return {"code": 0, "data": items}
+    return {"code": 0, "data": [i["name"] for i in items]}
 
 
 @app.get("/fields")
 def fields(
-    db: str, table: str, x_db_token: Optional[str] = Header(default=None)
+    db: str,
+    table: str,
+    detail: int = 0,
+    timeoutMs: int = 0,
+    x_db_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
+    """字段列表。detail=1 时返回完整元数据 [{name,type,comment,nullable,key}],
+    否则保持 [{name,type}] 兼容旧调用。
+    注意:Oracle 列默认值 data_default 是 LONG 类型,驱动读取有风险,P0 不取。"""
     require_auth(x_db_token)
     check_db_allowed(db)
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
-    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
+    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -1476,24 +1502,110 @@ def fields(
     try:
         cur = conn.cursor()
         if ds.type == "mysql":
-            cur.execute(f"DESC `{table}`")
+            cur.execute(f"SHOW FULL COLUMNS FROM `{table}`")
             rows = cur.fetchall()
-            cols = [
-                {"name": list(r.values())[0], "type": list(r.values())[1]}
-                for r in rows
-            ]
+            cols = []
+            for r in rows:
+                d = r if hasattr(r, "items") else {}
+                base = {"name": d.get("Field"), "type": d.get("Type")}
+                if detail:
+                    base.update(
+                        {
+                            "comment": str(d.get("Comment", "") or ""),
+                            "nullable": str(d.get("Null", "")).upper() == "YES",
+                            "key": str(d.get("Key", "") or ""),
+                            "default": d.get("Default"),
+                        }
+                    )
+                cols.append(base)
         else:
+            # 主键列集合(约束型 P)
+            pk_set = set()
             cur.execute(
-                "SELECT column_name, data_type FROM user_tab_columns "
+                "SELECT cc.column_name FROM user_cons_columns cc "
+                "JOIN user_constraints c ON cc.constraint_name = c.constraint_name "
+                "WHERE c.constraint_type = 'P' AND c.table_name = :t",
+                {"t": table.upper()},
+            )
+            for r in cur.fetchall():
+                pk_set.add(str(r[0]).upper())
+            cur.execute(
+                "SELECT column_name, data_type, nullable FROM user_tab_columns "
                 "WHERE table_name = :t ORDER BY column_id",
                 {"t": table.upper()},
             )
             rows = cur.fetchall()
-            cols = [{"name": r[0], "type": r[1]} for r in rows]
+            col_meta = {r[0]: (r[1], r[2]) for r in rows}
+            cur.execute(
+                "SELECT column_name, comments FROM user_col_comments WHERE table_name = :t",
+                {"t": table.upper()},
+            )
+            comments = {r[0]: str(r[1] or "") for r in cur.fetchall()}
+            cols = []
+            for name, (data_type, nullable) in col_meta.items():
+                base = {"name": name, "type": data_type}
+                if detail:
+                    base.update(
+                        {
+                            "comment": comments.get(name, ""),
+                            "nullable": str(nullable).upper() == "Y",
+                            "key": "PRI" if str(name).upper() in pk_set else "",
+                        }
+                    )
+                cols.append(base)
         cur.close()
     finally:
         conn.close()
     return {"code": 0, "data": cols}
+
+
+@app.get("/ddl")
+def ddl(
+    db: str,
+    table: str,
+    timeoutMs: int = 0,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """生成建表 DDL:MySQL SHOW CREATE TABLE / Oracle DBMS_METADATA.GET_DDL。
+    需数据源账号具备读取 DDL 的权限(SHOW VIEW / EXECUTE_CATALOG_ROLE),失败返回友好错误。"""
+    require_auth(x_db_token)
+    check_db_allowed(db)
+    if not _TABLE_NAME_RE.match(table or ""):
+        raise HTTPException(status_code=400, detail="非法表名")
+    ds = get_datasource(db)
+    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
+    try:
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"connect failed: {e}")
+    try:
+        cur = conn.cursor()
+        if ds.type == "mysql":
+            cur.execute(f"SHOW CREATE TABLE `{table}`")
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"table '{table}' not found")
+            d = {k: v for k, v in row.items()} if hasattr(row, "items") else {}
+            ddl_text = str(d.get("Create Table") or (row[1] if len(row) > 1 else "") or "")
+        else:
+            cur.execute(
+                "SELECT DBMS_METADATA.GET_DDL('TABLE', :t) FROM dual",
+                {"t": table.upper()},
+            )
+            row = cur.fetchone()
+            ddl_text = str(row[0]) if row and row[0] else ""
+        cur.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        de = _extract_sql_error(e, ds.type)
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to generate DDL (需要账号有 SHOW VIEW / EXECUTE_CATALOG_ROLE 权限): {de.message}",
+        )
+    finally:
+        conn.close()
+    return {"code": 0, "data": {"name": table, "ddl": ddl_text}}
 
 
 if __name__ == "__main__":

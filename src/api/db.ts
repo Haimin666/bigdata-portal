@@ -637,10 +637,39 @@ export interface TableField {
   type: string
 }
 
-export async function listTables(db: string): Promise<string[]> {
-  return request<string[]>(`/tables?db=${encodeURIComponent(db)}`)
+/** 表元数据(detail=1,含注释) */
+export interface TableMeta {
+  name: string
+  comment?: string
 }
 
-export async function listFields(db: string, table: string): Promise<TableField[]> {
-  return request<TableField[]>(`/fields?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`)
+/** 字段完整元数据(detail=1:注释/可空/键) */
+export interface TableFieldDetail extends TableField {
+  comment?: string
+  nullable?: boolean
+  key?: string
+  default?: unknown
+}
+
+/** 建表 DDL(需账号有 SHOW VIEW / EXECUTE_CATALOG_ROLE 权限) */
+export interface TableDDL {
+  name: string
+  ddl: string
+}
+
+/** 表列表;detail=true 时返回 [{name, comment}](含表注释),否则 string[] */
+export async function listTables(db: string, detail = false): Promise<string[] | TableMeta[]> {
+  const q = `db=${encodeURIComponent(db)}${detail ? '&detail=1' : ''}`
+  return request<string[] | TableMeta[]>(`/tables?${q}`)
+}
+
+/** 字段列表;detail=true 时返回完整元数据(注释/可空/键),否则 [{name, type}] */
+export async function listFields(db: string, table: string, detail = false): Promise<TableField[] | TableFieldDetail[]> {
+  const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}${detail ? '&detail=1' : ''}`
+  return request<TableField[] | TableFieldDetail[]>(`/fields?${q}`)
+}
+
+/** 生成建表 DDL */
+export async function getTableDDL(db: string, table: string): Promise<TableDDL> {
+  return request<TableDDL>(`/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`)
 }

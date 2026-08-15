@@ -309,6 +309,33 @@ function onInsert(text: string) {
   c.focus()
 }
 
+/** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
+async function onOpenTable(payload: { db: string; table: string }) {
+  if (tabs.value.length >= MAX_TABS) {
+    ElMessage.warning(`最多同时打开 ${MAX_TABS} 个 tab,请先关闭部分 tab`)
+    return
+  }
+  const src = datasources.value.find((d) => d.name === payload.db)
+  const isOracle = src?.type === 'oracle'
+  // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL 用 LIMIT;标识符按方言加引号)
+  engine.value = isOracle ? 'oracle' : 'mysql'
+  db.value = payload.db
+  const ident = isOracle ? `"${payload.table}"` : `\`${payload.table}\``
+  const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
+  const tabId = `tbl-${payload.db}.${payload.table}`
+  const existing = tabs.value.find((t) => t.id === tabId)
+  flushActiveContent()
+  if (existing) {
+    switchTab(existing.id)
+  } else {
+    const tab: EditorTab = { id: tabId, file: null, name: `${payload.db}.${payload.table}`, content: sql, dirty: false }
+    tabs.value.push(tab)
+    activeTabId.value = tab.id
+  }
+  cm?.setValue(sql)
+  await runQuery()
+}
+
 /** 保存当前活跃 tab(Ctrl/Cmd + S):绑定文件直接保存;未命名时输入文件名保存到根目录 */
 async function saveActive() {
   const tab = activeTab.value
@@ -1194,7 +1221,7 @@ async function copyAllTsv() {
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
       <div class="db-side" :style="{ width: sideWidth + 'px' }">
-        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" />
+        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" />
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
