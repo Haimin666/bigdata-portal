@@ -514,6 +514,38 @@ export async function sparkLogs(offsets: { jvm?: number; audit?: number } = {}):
   }
 }
 
+/** Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条) */
+export interface SparkStage {
+  stageId: number
+  name: string
+  status: string
+  numTasks: number
+  completedTasks: number
+  failedTasks: number
+}
+export interface SparkStagesData {
+  activeJobs: Array<{ jobId: number; status: string; stageIds: number[] }>
+  stages: SparkStage[]
+  numActiveJobs: number
+  numActiveStages: number
+}
+export async function sparkStages(): Promise<SparkStagesData> {
+  const res = await fetch('/api/spark/stages')
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<SparkStagesData>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '获取 Stage 进度失败')
+  return body.data as SparkStagesData
+}
+
 /** Spark 引擎状态(会话/appId/配置快照) */
 export async function sparkStatus(): Promise<Record<string, unknown>> {
   const res = await fetch('/api/spark/status')

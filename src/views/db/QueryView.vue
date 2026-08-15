@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument } from '@element-plus/icons-vue'
+import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -23,10 +23,11 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
+const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkJobsDialog from './FlinkJobsDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
@@ -309,7 +310,7 @@ function onInsert(text: string) {
   c.focus()
 }
 
-/** 历史记录点击(SqlTreePanel 新增 runSql 事件):把 SQL 填入当前编辑器并立即执行 */
+/** 历史/收藏条目点击(SqlTreePanel runSql 事件):历史是缓存,只回填编辑器,不自动执行 */
 function onRunHistorySql(sql: string) {
   const c = cm
   if (!c) return
@@ -317,7 +318,6 @@ function onRunHistorySql(sql: string) {
   if (!s.trim()) return
   c.setValue(s)
   c.focus()
-  void runQuery()
 }
 
 /** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
@@ -378,6 +378,7 @@ async function saveActive() {
       await saveScriptContent(tab.file.id, cm?.getValue() ?? '')
       tab.dirty = false
       ElMessage.success(`已保存 ${tab.name}`)
+      treePanelRef.value?.reloadMy()
     } catch (e) {
       ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
     }
@@ -397,6 +398,7 @@ async function saveActive() {
     tab.name = name
     tab.dirty = false
     ElMessage.success(`已保存到根目录 ${name}`)
+    treePanelRef.value?.reloadMy()
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
   }
@@ -606,6 +608,24 @@ onUnmounted(() => {
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 const sparkLogBox = ref<HTMLElement | null>(null)
+/** Spark job/stage 进度(statusTracker,3s 与日志同节奏轮询) */
+const sparkStageData = ref<{ activeJobs: Array<{ jobId: number; status: string; stageIds: number[] }>; stages: SparkStage[]; numActiveJobs: number; numActiveStages: number }>({
+  activeJobs: [],
+  stages: [],
+  numActiveJobs: 0,
+  numActiveStages: 0
+})
+function stagePct(s: SparkStage): number {
+  return s.numTasks > 0 ? Math.round((s.completedTasks / s.numTasks) * 100) : 0
+}
+function stageProgressStatus(s: SparkStage): '' | 'success' | 'exception' {
+  if (s.status === 'FAILED') return 'exception'
+  if (s.status === 'SUCCEEDED') return 'success'
+  return ''
+}
+function stageStatusClass(s: string): string {
+  return String(s || 'UNKNOWN').toLowerCase()
+}
 const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度动态计算,填满即滚动打印
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
@@ -666,6 +686,15 @@ async function pollSparkLogs() {
       if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
     }
     sparkLogOffsets.value = data.offsets
+    // spark 引擎:同节奏轮询 job/stage 进度(statusTracker)
+    if (engine.value === 'sparksql' || engine.value === 'pyspark') {
+      try {
+        const st = await sparkStages()
+        if (seq === sparkLogSeq) sparkStageData.value = st
+      } catch {
+        /* stage 接口不可用不影响日志 */
+      }
+    }
   } catch {
     /* 日志接口失败不打断查询 */
   }
@@ -689,6 +718,7 @@ function clearSparkLogs() {
   sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
   sparkLogText.value = ''
   sparkLogOffsets.value = { jvm: 0, audit: 0 }
+  sparkStageData.value = { activeJobs: [], stages: [], numActiveJobs: 0, numActiveStages: 0 }
 }
 
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
@@ -809,6 +839,42 @@ function getSqlToRun(): string {
 }
 
 // ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
+/** 注释/取消注释选中 SQL(每行前加 -- ) */
+function commentSelection(c: CodeMirror.Editor) {
+  const sel = c.getSelection()
+  c.replaceSelection(`-- ${sel}`, 'end')
+}
+
+/** 结果表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
+function colSig(): string {
+  const r = currentResult.value
+  if (!r) return 'default'
+  const base = `${r.db || ''}.${r.table || ''}`
+  return base !== '.' ? base : (r.sql || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'adhoc'
+}
+/** el-table 初始列宽:优先 localStorage 持久化的宽度 */
+function colInitWidth(c: string): number {
+  const n = parseInt(localStorage.getItem(`db-query-colw.${colSig()}.${encodeURIComponent(c)}`) || '', 10)
+  return n > 60 ? n : 140
+}
+/** el-table 列宽拖拽结束(header-dragend):持久化到 localStorage */
+function onColResize(newWidth: number, column: { property?: string }) {
+  if (!column.property) return
+  localStorage.setItem(`db-query-colw.${colSig()}.${encodeURIComponent(column.property)}`, String(Math.round(newWidth)))
+}
+/** JSON 复合值折叠查看(弹窗展示格式化文本) */
+async function showJson(v: unknown) {
+  const text = JSON.stringify(v, null, 2) ?? String(v)
+  await ElMessageBox.alert(`<pre class="dbq-json">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`, '单元格值 (JSON)', {
+    dangerouslyUseHTMLString: true,
+    customClass: 'dbq-json-dialog'
+  }).catch(() => {})
+}
+const engineLabel = computed(() => {
+  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
+  return m[engine.value] || engine.value || '—'
+})
+
 function formatSql() {
   if (!cm) return
   if (engine.value === 'pyspark') {
@@ -867,200 +933,19 @@ const results = ref<QueryResultItem[]>([])
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
-function selectPane(pane: number) {
-  activePane.value = pane
-}
-
-// ── 结果表格虚拟滚动(el-table-v2) ─────────────────────────────
-interface V2Col {
-  key: string
-  dataKey: string
-  title: string
-  width: number
-  minWidth?: number
-  align?: 'left' | 'right' | 'center'
-  fixed?: 'left' | 'right'
-  headerRenderer?: (p: { column: V2Col }) => ReturnType<typeof h>
-  cellRenderer?: (p: { rowData: Record<string, unknown>; rowIndex: number }) => ReturnType<typeof h>
-}
-const tableWrapRef = ref<HTMLElement>()
-const tableV2Width = ref(600)
-const tableV2Height = ref(300)
-const v2Sort = ref<{ key: string; order: 'asc' | 'desc' } | null>(null)
-const COLW_KEY = 'db-query-colw'
-/** 展示行:按当前排序输出(行对象引用不变,行内编辑 indexOf(row) 定位真实索引不受排序影响) */
-const displayRows = computed(() => {
-  const r = currentResult.value
-  const rows = r?.rows ?? []
-  if (!r || !v2Sort.value) return rows
-  const { key, order } = v2Sort.value
-  const arr = [...rows].sort((a, b) => {
-    const va = a[key]
-    const vb = b[key]
-    if (va == null && vb == null) return 0
-    if (va == null) return 1
-    if (vb == null) return -1
-    const na = Number(va)
-    const nb = Number(vb)
-    if (!Number.isNaN(na) && !Number.isNaN(nb) && String(va).trim() !== '' && String(vb).trim() !== '') return na - nb
-    return String(va) < String(vb) ? -1 : String(va) > String(vb) ? 1 : 0
-  })
-  return order === 'desc' ? arr.reverse() : arr
-})
-function toggleSort(col: string) {
-  if (v2Sort.value?.key !== col) v2Sort.value = { key: col, order: 'asc' }
-  else if (v2Sort.value.order === 'asc') v2Sort.value = { key: col, order: 'desc' }
-  else v2Sort.value = null
-}
-/** 表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
-function colSig(): string {
-  const r = currentResult.value
-  if (!r) return 'default'
-  const base = `${r.db || ''}.${r.table || ''}`
-  return base !== '.' ? base : (r.sql || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'adhoc'
-}
-/** 表格签名哈希:避免 SQL fallback 与列名含点导致 localStorage 键碰撞 */
-function colSigKey(): string {
-  const sig = colSig()
-  let h = 0
-  for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) >>> 0
-  return `${h.toString(36)}.${sig.length}`
-}
-function colWidth(c: string): number {
-  const n = parseInt(localStorage.getItem(`${COLW_KEY}.${colSigKey()}.${encodeURIComponent(c)}`) || '', 10)
-  return n > 40 ? n : 160
-}
-function saveColWidth(c: string, w: number) {
-  localStorage.setItem(`${COLW_KEY}.${colSigKey()}.${encodeURIComponent(c)}`, String(Math.round(w)))
-}
-const colWidths = reactive<Record<string, number>>({})
-/** 表头列宽拖拽(手柄在最右侧;拖拽中更新 colWidths 触发 v2Cols 重建) */
-function startColResize(e: MouseEvent, c: string) {
-  e.preventDefault()
-  e.stopPropagation()
-  const startX = e.clientX
-  const startW = colWidth(c)
-  const onMove = (ev: MouseEvent) => {
-    colWidths[c] = Math.max(60, startW + (ev.clientX - startX))
-  }
-  const onUp = () => {
-    const w = colWidths[c]
-    if (w) saveColWidth(c, w)
-    delete colWidths[c]
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
-  }
-  window.addEventListener('mousemove', onMove)
-  window.addEventListener('mouseup', onUp)
-}
-function renderV2Header(_p: { column: V2Col }, c: string) {
-  const sort = v2Sort.value
-  const icon = sort?.key === c ? (sort.order === 'asc' ? '▲' : '▼') : '↕'
-  return h('div', { class: 'v2-th' }, [
-    h('span', { class: 'col-header', title: `点击复制列名: ${c}`, onClick: (e: MouseEvent) => { e.stopPropagation(); void copyCellSmart(c) } }, c),
-    h('span', { class: 'v2-sort-btn', title: '排序', onClick: (e: MouseEvent) => { e.stopPropagation(); toggleSort(c) } }, icon),
-    h('span', { class: 'v2-resizer', title: '拖拽调整列宽', onMousedown: (e: MouseEvent) => startColResize(e, c) })
-  ])
-}
-function renderV2Cell(p: { rowData: Record<string, unknown> }, c: string) {
-  const row = p.rowData
-  const v = row[c]
-  if (editingCell.value && editingCell.value.row === row && editingCell.value.col === c) {
-    return h('span', { class: 'cell-edit' }, [
-      h('input', {
-        ref: (el: unknown) => { if (el) cellEditInputRef.value = el as HTMLInputElement },
-        class: 'cell-edit-input',
-        spellcheck: false,
-        value: editingCell.value.val,
-        onInput: () => onEditInput(),
-        onBlur: () => saveCellEdit(),
-        onKeydown: (e: KeyboardEvent) => {
-          if (e.key === 'Escape') { e.preventDefault(); cancelCellEdit() }
-          if (e.key === 'Enter') { e.preventDefault(); saveCellEdit() }
-        }
-      })
-    ])
-  }
-  if (v == null) {
-    return h('span', { class: 'cell-null', title: `NULL${cellCopy.value ? ' · 点击复制' : ''}`, onClick: () => copyCellSmart(v) }, 'NULL')
-  }
-  if (typeof v === 'object') {
-    return h('span', { class: 'cell-json', title: '点击查看完整 JSON', onClick: (e: MouseEvent) => { e.stopPropagation(); void showJson(v) } }, 'JSON')
-  }
-  return h(
-    'span',
-    {
-      class: {
-        'cell-val': true,
-        'cell-num': isNumeric(v),
-        'cell-select': cellCopyDisabled.value,
-        'cell-editable': isEditableCell(c)
-      },
-      title: isEditableCell(c) ? `双击编辑: ${String(v)}` : cellCopy.value ? `点击复制: ${String(v)}` : String(v),
-      onClick: () => copyCellSmart(v),
-      onDblclick: () => startCellEdit(row, c)
-    },
-    String(v)
-  )
-}
-function commentSelection(c: CodeMirror.Editor) {
-  const sel = c.getSelection()
-  c.replaceSelection(`-- ${sel}`, 'end')
-}
-
-/** JSON 复合值折叠查看(弹窗展示格式化文本) */
-async function showJson(v: unknown) {
-  const text = JSON.stringify(v, null, 2) ?? String(v)
-  await ElMessageBox.alert(`<pre class="dbq-json">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`, '单元格值 (JSON)', {
-    dangerouslyUseHTMLString: true,
-    customClass: 'dbq-json-dialog'
-  }).catch(() => {})
-}
-/** 结果 tab 显示名:SQL 摘要(截断 26 字符),无 SQL 则 queryN */
-function sqlSummary(r: QueryResultItem, idx: number): string {
-  const s = (r.sql || '').replace(/\s+/g, ' ').trim()
-  return s ? (s.length > 26 ? `${s.slice(0, 26)}…` : s) : `query${idx + 1}`
-}
-const engineLabel = computed(() => {
-  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
-  return m[engine.value] || engine.value || '—'
-})
-const v2Cols = computed<V2Col[]>(() => {
+// 结果表格翻页(默认 15 条/页)
+const pageSize = ref(15)
+const pageCurrent = ref(1)
+const pagedRows = computed(() => {
   const r = currentResult.value
   if (!r) return []
-  const cols: V2Col[] = [
-    { key: '__idx__', dataKey: '__idx__', title: '#', width: 56, align: 'center', fixed: 'left', cellRenderer: ({ rowIndex }) => h('span', { class: 'cell-idx' }, String(rowIndex + 1)) }
-  ]
-  for (const c of r.columns) {
-    cols.push({
-      key: c,
-      dataKey: c,
-      title: c,
-      width: colWidths[c] ?? colWidth(c),
-      minWidth: 80,
-      align: colIsNumeric(c) ? 'right' : 'left',
-      headerRenderer: (p) => renderV2Header(p, c),
-      cellRenderer: (p) => renderV2Cell(p, c)
-    })
-  }
-  return cols
+  const start = (pageCurrent.value - 1) * pageSize.value
+  return r.rows.slice(start, start + pageSize.value)
 })
-/** 结果表容器尺寸观察(虚拟滚动需要显式宽高;表格元素后挂载,用 watch 在出现时建立) */
-let wrapObs: ResizeObserver | null = null
-watch(tableWrapRef, (el) => {
-  wrapObs?.disconnect()
-  wrapObs = null
-  if (!el) return
-  wrapObs = new ResizeObserver(() => {
-    tableV2Width.value = el.clientWidth
-    tableV2Height.value = el.clientHeight
-  })
-  wrapObs.observe(el)
-})
-onUnmounted(() => {
-  wrapObs?.disconnect()
-  wrapObs = null
-})
+function selectPane(pane: number) {
+  activePane.value = pane
+  pageCurrent.value = 1
+}
 
 // ── 结果单元格行内编辑(仅表预览结果 editable)──────────────────
 // editingCell:当前正在编辑的单元格(row 为 rows 中真实行对象引用,rowIdx 为 indexOf 结果)
@@ -1550,8 +1435,7 @@ async function execOne(sql: string, index: number, seq: number): Promise<void> {
     results.value[index] = {
       ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
       sql,
-      ...r,
-      running: false
+      ...r
     }
   } catch (e) {
     if (seq !== runSeq) return
@@ -1588,9 +1472,9 @@ let runSeq = 0
 
 /** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用) */
 const HISTORY_KEY = 'db-query-history'
-const HISTORY_MAX = 50
+const HISTORY_MAX = 20
 
-/** 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 50、仅 trim 非空且 ≤2000 */
+/** 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 20 循环缓存(超出删最旧)、仅 trim 非空且 ≤2000 */
 function pushHistory(sql: string) {
   const s = String(sql ?? '').trim()
   if (!s || s.length > 2000) return
@@ -1792,9 +1676,9 @@ function isNumeric(val: unknown): boolean {
   return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
 }
 
-/** 某列是否数值列(按结果集首行判定,用于表头/单元格对齐) */
+/** 某列是否数值列(按该页首行判定,用于表头/单元格对齐) */
 function colIsNumeric(c: string): boolean {
-  const row = currentResult.value?.rows[0]
+  const row = pagedRows.value[0]
   return !!(row && row[c] != null && isNumeric(row[c]))
 }
 
@@ -1821,6 +1705,15 @@ function rowsToTsv(rows: Record<string, unknown>[], cols: string[]): string {
   return head + '\n' + body
 }
 
+/** 复制当前分页 */
+async function copyPageTsv() {
+  const r = currentResult.value
+  if (!r) return
+  const ok = await copyText(rowsToTsv(pagedRows.value, r.columns))
+  if (ok) ElMessage.success('已复制当前页(TSV)')
+  else ElMessage.error('复制失败,请手动复制')
+}
+
 /** 复制全量结果(忽略分页;大结果集注意体积) */
 async function copyAllTsv() {
   const r = currentResult.value
@@ -1843,7 +1736,7 @@ async function copyAllTsv() {
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
       <div class="db-side" :style="{ width: sideWidth + 'px' }">
-        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" @run-sql="onRunHistorySql" />
+        <SqlTreePanel ref="treePanelRef" :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" @run-sql="onRunHistorySql" />
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
@@ -1959,12 +1852,11 @@ async function copyAllTsv() {
           :key="idx"
           class="result-tab"
           :class="{ active: activePane === idx + 1 }"
-          :title="sqlSummary(r, idx)"
           @click="selectPane(idx + 1)"
         >
           <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
           <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
-          <span class="tab-name" :class="{ err: r.error }">{{ sqlSummary(r, idx) }}</span>
+          <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
           <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
             <el-icon><Download /></el-icon>
           </span>
@@ -1982,6 +1874,28 @@ async function copyAllTsv() {
                 <el-button text size="small" @click="clearSparkLogs">清空</el-button>
               </span>
             </div>
+            <div v-if="sparkStageData.stages.length" class="spark-stages">
+              <div class="spark-stages-head">
+                <span class="spark-stages-title">Stage 进度</span>
+                <span v-if="sparkStageData.numActiveJobs" class="spark-stages-meta">
+                  {{ sparkStageData.numActiveJobs }} 个活跃 Job · {{ sparkStageData.numActiveStages }} 个活跃 Stage
+                </span>
+              </div>
+              <div v-for="s in sparkStageData.stages" :key="s.stageId" class="spark-stage">
+                <div class="spark-stage-line">
+                  <span class="spark-stage-id">Stage {{ s.stageId }}</span>
+                  <span class="spark-stage-name" :title="s.name">{{ s.name }}</span>
+                  <span class="spark-stage-status" :class="stageStatusClass(s.status)">{{ s.status }}</span>
+                  <span class="spark-stage-count">{{ s.completedTasks }}/{{ s.numTasks }} tasks</span>
+                </div>
+                <el-progress
+                  :percentage="stagePct(s)"
+                  :show-text="false"
+                  :stroke-width="5"
+                  :status="stageProgressStatus(s)"
+                />
+              </div>
+            </div>
             <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
           </div>
         </template>
@@ -1989,20 +1903,75 @@ async function copyAllTsv() {
         <template v-else-if="currentResult">
           <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
           <div v-else class="result-card">
-            <div v-loading="loading" ref="tableWrapRef" class="result-table-wrap">
-              <el-table-v2
-                v-if="currentResult.rows.length"
-                :columns="v2Cols"
-                :data="displayRows"
-                :width="tableV2Width"
-                :height="tableV2Height"
-                :row-height="32"
-                :row-class="() => (cellCopyDisabled ? 'row-selectable' : '')"
-                :scrollbar-always-on="true"
-                class="result-table"
-              />
-              <div v-else class="empty-table">无数据</div>
-            </div>
+            <div v-loading="loading" class="result-table-wrap">
+              <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''" @header-dragend="onColResize">
+              <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
+              <el-table-column
+                v-for="c in currentResult.columns"
+                :key="c"
+                :prop="c"
+                :label="c"
+                :width="colInitWidth(c)"
+                sortable
+                :align="colIsNumeric(c) ? 'right' : 'left'"
+                show-overflow-tooltip
+              >
+                <!-- 表头:点击列名复制列名(.stop 不触发排序);排序只点最右侧排序箭头触发 -->
+                <template #header>
+                  <span
+                    class="col-header"
+                    :title="`点击复制列名: ${c}`"
+                    @click.stop="copyCellSmart(c)"
+                  >{{ c }}</span>
+                </template>
+                <template #default="{ row }">
+                  <span v-if="editingCell && editingCell.row === row && editingCell.col === c" class="cell-edit">
+                    <input
+                      ref="cellEditInputRef"
+                      :value="editingCell.val"
+                      class="cell-edit-input"
+                      spellcheck="false"
+                      @input="onEditInput"
+                      @blur="saveCellEdit"
+                      @keydown.esc.prevent="cancelCellEdit"
+                      @keydown.enter.prevent="saveCellEdit"
+                    />
+                  </span>
+                  <span
+                    v-else-if="row[c] == null"
+                    class="cell-null"
+                    :title="`NULL${cellCopy ? ' · 点击复制' : ''}`"
+                    @click="copyCellSmart(row[c])"
+                  >NULL</span>
+                  <span
+                    v-else-if="typeof row[c] === 'object'"
+                    class="cell-json"
+                    title="点击查看完整 JSON"
+                    @click.stop="showJson(row[c])"
+                  >JSON</span>
+                  <span
+                    v-else
+                    class="cell-val"
+                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled, 'cell-editable': isEditableCell(c) }"
+                    :title="isEditableCell(c) ? `双击编辑: ${row[c]}` : (cellCopy ? `点击复制: ${row[c]}` : row[c])"
+                    @click="copyCellSmart(row[c])"
+                    @dblclick="startCellEdit(row, c)"
+                  >{{ row[c] }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <!-- 翻页(紧贴数据集下方) -->
+          <el-pagination
+            v-if="currentResult.rows.length > pageSize"
+            v-model:current-page="pageCurrent"
+            v-model:page-size="pageSize"
+            class="result-pagination"
+            :page-sizes="[15, 50, 100, 200]"
+            :total="currentResult.rows.length"
+            layout="total, sizes, prev, pager, next"
+            small
+          />
           <!-- 底部信息条:统计 + 复制 + 选择模式(最底部) -->
           <div class="result-toolbar">
             <span class="stats">
@@ -2032,10 +2001,11 @@ async function copyAllTsv() {
               >提交修改 ({{ currentResult.pendingEdits?.length ?? 0 }})</el-button>
               <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
+              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
             </span>
           </div>
-          </div>
+            </div>
         </template>
       </div>
     </div>
@@ -2841,112 +2811,6 @@ async function copyAllTsv() {
   justify-content: center;
 }
 
-/* ── 结果表 el-table-v2 虚拟滚动适配 ─────────────────────── */
-.result-table {
-  :deep(.el-table-v2__header-row) {
-    background: var(--el-fill-color-light);
-    th {
-      color: var(--el-text-color-primary);
-      font-weight: 600;
-      font-size: 12px;
-    }
-  }
-
-  :deep(.el-table-v2__row) {
-    height: 32px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  :deep(.el-table-v2__cell) {
-    padding: 0 8px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* 自定义表头:列名复制 + 排序按钮 + 列宽拖拽手柄 */
-  :deep(.v2-th) {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    width: 100%;
-
-    .col-header {
-      display: inline-flex;
-      align-items: center;
-      cursor: copy;
-      min-width: 0;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-
-      &:hover {
-        color: $primary;
-        text-decoration: underline dotted;
-      }
-    }
-
-    .v2-sort-btn {
-      flex-shrink: 0;
-      font-size: 10px;
-      color: $muted;
-      cursor: pointer;
-      user-select: none;
-
-      &:hover {
-        color: $primary;
-      }
-    }
-
-    .v2-resizer {
-      flex-shrink: 0;
-      width: 5px;
-      height: 16px;
-      cursor: col-resize;
-      border-right: 2px solid transparent;
-
-      &:hover,
-      &:active {
-        border-right-color: $primary;
-      }
-    }
-  }
-
-  /* JSON 复合值折叠标签 */
-  :deep(.cell-json) {
-    display: inline-block;
-    padding: 0 6px;
-    border-radius: 4px;
-    font-size: 11px;
-    line-height: 16px;
-    color: #d97706;
-    background: rgba(217, 119, 6, 0.12);
-    cursor: pointer;
-    user-select: none;
-
-    &:hover {
-      background: rgba(217, 119, 6, 0.22);
-    }
-  }
-
-  /* 序号列 */
-  :deep(.cell-idx) {
-    color: $muted;
-    user-select: none;
-    font-variant-numeric: tabular-nums;
-  }
-}
-
-.empty-table {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: $muted;
-  font-size: 12px;
-}
-
 /* ── 结果 tab 运行状态点 ─────────────────────────────────── */
 .tab-state {
   width: 8px;
@@ -3021,7 +2885,7 @@ async function copyAllTsv() {
   }
 }
 
-/* JSON 单元格值弹窗 */
+/* JSON 单元格值弹窗 + 折叠标签 */
 .dbq-json-dialog .dbq-json {
   max-height: 60vh;
   overflow: auto;
@@ -3034,6 +2898,22 @@ async function copyAllTsv() {
   word-break: break-all;
   background: var(--el-fill-color-light);
   border-radius: 4px;
+}
+
+.cell-json {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.12);
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background: rgba(217, 119, 6, 0.22);
+  }
 }
 
 /* Spark 引擎日志透传面板 */
@@ -3065,6 +2945,93 @@ async function copyAllTsv() {
   display: flex;
   align-items: center;
 }
+/* ── Spark Stage 进度(日志面板顶部) ────────────────────────── */
+.spark-stages {
+  border-bottom: 1px solid $border;
+  padding: 8px 14px;
+  max-height: 200px;
+  overflow: auto;
+
+  .spark-stages-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+
+    .spark-stages-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: $text;
+    }
+
+    .spark-stages-meta {
+      font-size: 11px;
+      color: $muted;
+    }
+  }
+
+  .spark-stage {
+    margin-bottom: 6px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  .spark-stage-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    margin-bottom: 2px;
+
+    .spark-stage-id {
+      color: $primary;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .spark-stage-name {
+      color: $text;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .spark-stage-status {
+      flex-shrink: 0;
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 3px;
+      color: $muted;
+      background: var(--el-fill-color-light);
+
+      &.running {
+        color: $primary;
+        background: rgba(64, 158, 255, 0.12);
+      }
+
+      &.succeeded {
+        color: #67c23a;
+        background: rgba(103, 194, 58, 0.12);
+      }
+
+      &.failed {
+        color: #f56c6c;
+        background: rgba(245, 108, 108, 0.12);
+      }
+    }
+
+    .spark-stage-count {
+      color: $muted;
+      flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+}
+
 .spark-logs-body {
   flex: 1;
   min-height: 0; /* 关键:日志容器按布局高度收缩并在内部滚动,而不是撑高整页 */

@@ -1039,6 +1039,16 @@ def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
     return {"code": 0, "data": SPARK_ENGINE.status()}
 
 
+@app.get("/spark/stages")
+def spark_stages(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    return {"code": 0, "data": SPARK_ENGINE.stages_status()}
+
+
 @app.post("/spark/jobs")
 def spark_job_submit(
     req: SparkJobSubmitReq,

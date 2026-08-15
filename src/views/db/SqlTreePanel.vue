@@ -61,6 +61,8 @@ async function reloadMy() {
   }
 }
 
+defineExpose({ reloadMy })
+
 /** 节点点击:文件打开;目录展开/折叠由 el-tree 默认行为处理 */
 function onNodeClick(data: ScriptNode) {
   if (data.type === 'file') emit('open', data)
@@ -262,7 +264,7 @@ function formatTime(ts: number): string {
   return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
-/** 点击历史/收藏条目:回填编辑器并立即执行 */
+/** 点击历史/收藏条目:回填编辑器(历史是缓存,不自动执行;用户按 Cmd+Enter 自行运行) */
 function onRunItem(item: HistItem) {
   emit('runSql', item.sql)
 }

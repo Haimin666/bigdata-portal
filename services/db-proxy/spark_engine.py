@@ -586,6 +586,61 @@ class SparkEngine:
                     timer.cancel()
                 self._end_job()
 
+    # ── Stage 进度(statusTracker)──────────────────────────────
+    def stages_status(self) -> Dict[str, Any]:
+        """Spark 活跃 job/stage 进度(供前端日志面板展示进度条)。
+
+        依赖 sparkContext.statusTracker()(Spark 2.1+);local 模式 / session 未启动时降级为空。
+        """
+        empty: Dict[str, Any] = {"activeJobs": [], "stages": [], "numActiveJobs": 0, "numActiveStages": 0}
+        try:
+            if self._spark is None or self._spark.sparkContext.isStopped:
+                return empty
+            st = self._spark.sparkContext.statusTracker()
+            job_ids: set = set(st.getActiveJobIds())
+            gid = self._current_job_group
+            if gid:
+                job_ids.update(st.getJobIdsForGroup(gid))
+            jobs: List[Dict[str, Any]] = []
+            stage_ids: set = set()
+            for jid in sorted(job_ids):
+                info = st.getJobInfo(jid)
+                if info is None:
+                    continue
+                jobs.append(
+                    {
+                        "jobId": jid,
+                        "status": str(getattr(info, "status", "UNKNOWN")),
+                        "stageIds": list(getattr(info, "stageIds", []) or []),
+                    }
+                )
+                stage_ids.update(getattr(info, "stageIds", []) or [])
+            stages: List[Dict[str, Any]] = []
+            for sid in sorted(stage_ids):
+                info = st.getStageInfo(sid)
+                if info is None:
+                    continue
+                num = int(getattr(info, "numTasks", 0) or 0)
+                done = int(getattr(info, "numCompletedTasks", 0) or 0)
+                stages.append(
+                    {
+                        "stageId": sid,
+                        "name": str(getattr(info, "name", "") or ""),
+                        "status": str(getattr(info, "status", "UNKNOWN")),
+                        "numTasks": num,
+                        "completedTasks": done,
+                        "failedTasks": int(getattr(info, "numFailedTasks", 0) or 0),
+                    }
+                )
+            return {
+                "activeJobs": jobs,
+                "stages": stages,
+                "numActiveJobs": len([j for j in jobs if j["status"] == "RUNNING"]),
+                "numActiveStages": len([s for s in stages if s["status"] == "RUNNING"]),
+            }
+        except Exception as e:  # statusTracker 在部分部署/版本不可用,不影响查询本身
+            return {"error": str(e), **empty}
+
     # ── 日志透传 ──────────────────────────────────────────────
     def read_logs(self, offsets: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         """增量读取 spark 日志:按文件各自记录读取位置,返回各文件新增内容。
