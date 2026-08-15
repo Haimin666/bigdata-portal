@@ -82,6 +82,7 @@ src/
 - **写操作解锁**:Spark/Flink 写 SQL 必须带 `X-Spark-Token`(由 `/api/spark/auth` 校验 `sparkWritePassword` 签发,12h);`isSparkWriteSql` 白名单检测(去注释 + 拒绝多语句 + 防 `/*!` 走私 + `SET GLOBAL` 视为写);**token 绑定签发用户**——仅本人会话可用,跨用户复用立即失效删除(防 XSS 窃取复用)
 - **MySQL/Oracle 同防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` + token 校验;db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线);`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束,GET 状态查询放行
 - 未配置 `sparkWritePassword` → 写操作一律禁止(默认只读)
+- **数据权限矩阵(用户/角色→库)**:`server/data/db-permissions.json`(userRules/roleRules,不存在即无规则不拦截);带 `db` 参数的 MySQL/Oracle 访问接口(query/jobs/explain 路由内 + tables/fields/ddl/schema GET 前置中间件)按调用者校验,不在其 dbs → 403;**admin 一律放行**,无规则回退 db-proxy 全局白名单;管理 API `GET/PUT /api/db-perms`(admin only)。详见 `docs/modules/db-permissions.md`
 
 ## 4. db-proxy(数据服务,Python FastAPI)
 

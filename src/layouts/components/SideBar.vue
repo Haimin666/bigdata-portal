@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus, type MenuItem } from '@/config/menu'
 import { getEnabledModules } from '@/api/db'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick, Lock } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 import RobotIcon from '@/components/RobotIcon.vue'
 
@@ -33,6 +33,7 @@ const icons: Record<string, Component> = {
   Coin,
   Notebook,
   User: UserFilled,
+  Lock,
   MagicStick,
   Robot: RobotIcon
 }
@@ -49,8 +50,8 @@ const filteredMenus = computed<MenuItem[]>(() => {
   if (auth.me?.username) allow = auth.modules // 用户体系优先
   let list = menus
   if (allow && allow.length > 0) list = menus.filter((m) => allow.includes(m.name))
-  // 用户管理仅管理员可见(静态菜单,此处按角色过滤)
-  if (!auth.isAdmin) list = list.filter((m) => m.name !== 'userManage')
+  // 用户管理 / 数据权限仅管理员可见(静态菜单,此处按角色过滤)
+  if (!auth.isAdmin) list = list.filter((m) => m.name !== 'userManage' && m.name !== 'dbPerm')
   return list
 })
 

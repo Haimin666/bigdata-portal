@@ -721,3 +721,55 @@ export async function explainSql(params: { db: string; sql: string }): Promise<E
     body: JSON.stringify({ db: params.db, sql: params.sql })
   })
 }
+
+// ── 数据权限矩阵(admin only;网关 /api/db-perms,契约见 docs/modules/db-permissions.md)──
+export interface DbUserRule {
+  user: string
+  dbs: string[]
+}
+
+export interface DbRoleRule {
+  role: string
+  dbs: string[]
+}
+
+export interface DbPerms {
+  userRules: DbUserRule[]
+  roleRules: DbRoleRule[]
+}
+
+/** /api/db-perms 专用请求(独立于本文件 /api/db 前缀的 request;非 2xx 或业务 code 非 0 抛错) */
+async function permsRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api/db-perms${path}`, init)
+  let body: ApiResponse<T> | null = null
+  try {
+    body = (await res.json()) as ApiResponse<T>
+  } catch {
+    /* 忽略非 JSON */
+  }
+  if (!res.ok) {
+    throw new Error(body?.detail || body?.msg || `HTTP ${res.status}`)
+  }
+  if (body && body.code !== undefined && body.code !== 0) {
+    throw new Error(body.detail || body.msg || '请求失败')
+  }
+  return (body?.data ?? {}) as T
+}
+
+/** 读取数据权限矩阵规则(GET /api/db-perms) */
+export async function getDbPerms(): Promise<DbPerms> {
+  const data = await permsRequest<Partial<DbPerms>>('')
+  return {
+    userRules: Array.isArray(data.userRules) ? data.userRules : [],
+    roleRules: Array.isArray(data.roleRules) ? data.roleRules : []
+  }
+}
+
+/** 全量覆盖保存数据权限矩阵规则(PUT /api/db-perms,body { userRules, roleRules }) */
+export async function saveDbPerms(rules: DbPerms): Promise<unknown> {
+  return permsRequest<unknown>('', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userRules: rules.userRules, roleRules: rules.roleRules })
+  })
+}

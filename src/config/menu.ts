@@ -19,6 +19,13 @@ export const menus: MenuItem[] = [
     kind: 'native'
   },
   {
+    path: '/db-perms',
+    title: '数据权限',
+    name: 'dbPerm',
+    icon: 'Lock',
+    kind: 'native'
+  },
+  {
     path: '/dataleap',
     title: 'DataLeap 实验',
     name: 'dataleap',

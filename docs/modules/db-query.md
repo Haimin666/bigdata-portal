@@ -42,6 +42,7 @@
 - **复制建表语句**:`/ddl?db=&table=` —— MySQL 走 `SHOW CREATE TABLE`,Oracle 走 `DBMS_METADATA.GET_DDL`,需账号有对应元数据读取权限,失败友好报错
 - **行内编辑(写场景)**:仅**双击表生成的预览 tab**(单表 `SELECT *` 且带主键)可编辑 —— 双击单元格进入编辑(主键列拒绝),改值后结果工具条「提交修改 (N)」列出全部变更,弹确认框展示生成的 `UPDATE ... SET ... WHERE 主键` 完整 SQL(多条按行分组逐条执行,MySQL 反引号 / Oracle 双引号,字符串/日期转义 `''`、数字/布尔/null 原样),确认后走现有写解锁链路(`X-Spark-Token`)执行,成功后清空待提交列表并自动重查刷新;无主键/非预览 tab 不可编辑
 - **写审计**:db-proxy 对 MySQL/Oracle/Doris 的写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines):时间、数据源、sql(截断 500)、影响行数、耗时、来源(sync/async)。只读数据源被拦的写尝试同样记录
+- **数据权限矩阵(P3)**:网关层用户/角色→库白名单(`server/data/db-permissions.json`),带 `db` 参数的 MySQL/Oracle 接口按调用者校验,不在其 dbs → 403;admin 放行、无规则回退全局白名单;管理页面 `/db-perms`(admin)。详见 `docs/modules/db-permissions.md`
 - **Schema 补全**:`/schema?db=` 一次性返回该库全部表+字段(MySQL `information_schema` / Oracle `all_tables+all_tab_columns`),按当前数据源缓存;编辑器 Ctrl+Space 触发补全 —— 表名优先,表名下钻字段名,SQL 关键字兜底
 - **EXPLAIN 可视化**:工具栏「EXPLAIN」取选中 SQL → `/explain` —— MySQL 走 `EXPLAIN FORMAT=JSON` 解析成树(降级普通 EXPLAIN 表格),Oracle 走 `EXPLAIN PLAN FOR` + `DBMS_XPLAN` 表格按 ID/PARENT_ID 递归成树;结果在弹窗中用 el-tree 展示(访问类型/行数/代价/过滤条件)
 - **历史与收藏**:QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history`(去重,上限 50);侧栏「历史」tab 星标收藏写入 `db-query-favorites`(上限 50),点击历史/收藏条目回填编辑器并可一键执行
