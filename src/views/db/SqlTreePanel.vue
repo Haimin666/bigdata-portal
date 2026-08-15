@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search, CopyDocument } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search, CopyDocument, Star, StarFilled, Delete } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
@@ -25,9 +25,10 @@ const emit = defineEmits<{
   (e: 'open', node: ScriptNode): void
   (e: 'insert', text: string): void
   (e: 'openTable', payload: { db: string; table: string }): void
+  (e: 'runSql', sql: string): void
 }>()
 
-const activeTab = ref<'my' | 'catalog'>('my')
+const activeTab = ref<'my' | 'catalog' | 'history'>('my')
 
 // ── 模糊搜索(我的目录 / 表目录,按名称包含匹配)────────────────
 const mySearch = ref('')
@@ -207,6 +208,105 @@ async function onCopyDDL(data: CatNode) {
   }
 }
 
+// ── 历史与收藏(localStorage 持久化,history 由父组件 QueryView 写入)──────
+const HISTORY_KEY = 'db-query-history'
+const FAV_KEY = 'db-query-favorites'
+const HISTORY_MAX = 50
+
+interface HistItem {
+  ts: number
+  sql: string
+}
+
+const historyList = ref<HistItem[]>([])
+const favList = ref<HistItem[]>([])
+
+/** 容错读取 localStorage(损坏 JSON/非数组返回空,不抛错) */
+function readStore(key: string): HistItem[] {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (h): h is HistItem => !!h && typeof h === 'object' && typeof h.sql === 'string' && typeof h.ts === 'number'
+    )
+  } catch {
+    return []
+  }
+}
+
+/** 写回 localStorage(截断到上限;localStorage 不可用如 Safari 隐私模式时静默忽略) */
+function writeStore(key: string, list: HistItem[]) {
+  try {
+    localStorage.setItem(key, JSON.stringify(list.slice(0, HISTORY_MAX)))
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 读取历史 + 收藏(挂载与激活历史 tab 时各刷新一次) */
+function loadHistory() {
+  historyList.value = readStore(HISTORY_KEY)
+  favList.value = readStore(FAV_KEY)
+}
+
+/** 时间格式:今天 HH:mm,跨天 MM-DD HH:mm */
+function formatTime(ts: number): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
+}
+
+/** 点击历史/收藏条目:回填编辑器并立即执行 */
+function onRunItem(item: HistItem) {
+  emit('runSql', item.sql)
+}
+
+/** 收藏:从历史移除该条,写入收藏(去重、新在前、上限 50) */
+function toggleFav(item: HistItem) {
+  const sql = String(item.sql || '').trim()
+  if (!sql) return
+  historyList.value = historyList.value.filter((h) => h !== item)
+  writeStore(HISTORY_KEY, historyList.value)
+  favList.value = [{ ...item, sql }, ...favList.value.filter((f) => f.sql !== sql)].slice(0, HISTORY_MAX)
+  writeStore(FAV_KEY, favList.value)
+  ElMessage.success('已收藏')
+}
+
+/** 取消收藏:从收藏列表移除 */
+function removeFav(item: HistItem) {
+  favList.value = favList.value.filter((f) => f !== item)
+  writeStore(FAV_KEY, favList.value)
+}
+
+/** 删除单条历史 */
+function removeHistory(item: HistItem) {
+  historyList.value = historyList.value.filter((h) => h !== item)
+  writeStore(HISTORY_KEY, historyList.value)
+}
+
+/** 清空全部历史(确认后) */
+async function clearHistory() {
+  if (!historyList.value.length) return
+  try {
+    await ElMessageBox.confirm('确定清空全部查询历史?清空后不可恢复。', '清空历史', { type: 'warning' })
+  } catch {
+    return // 取消/关闭
+  }
+  historyList.value = []
+  writeStore(HISTORY_KEY, historyList.value)
+  ElMessage.success('历史已清空')
+}
+
+watch(activeTab, (v) => {
+  if (v === 'history') loadHistory()
+})
+
 // datasources 异步到达后重建表目录树(重新加载根库列表)
 const dbsKey = computed(() => props.dbs.map((d) => d.name).join(','))
 
@@ -274,6 +374,7 @@ async function onNodeDrop(draggingNode: any, dropNode: any, type: 'prev' | 'inne
 
 onMounted(() => {
   void reloadMy()
+  loadHistory()
   window.addEventListener('click', closeCtx)
   window.addEventListener('contextmenu', closeCtx)
 })
@@ -289,6 +390,7 @@ onUnmounted(() => {
     <div class="panel-tabs">
       <div class="ptab" :class="{ active: activeTab === 'my' }" @click="activeTab = 'my'">我的目录</div>
       <div class="ptab" :class="{ active: activeTab === 'catalog' }" @click="activeTab = 'catalog'">表目录</div>
+      <div class="ptab" :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">历史</div>
     </div>
 
     <!-- 我的目录 -->
@@ -392,6 +494,47 @@ onUnmounted(() => {
         </el-tree>
       </div>
     </div>
+
+    <!-- 历史 / 收藏 -->
+    <div v-show="activeTab === 'history'" class="panel-body">
+      <div class="panel-toolbar">
+        <span class="toolbar-title">查询历史</span>
+        <el-button
+          v-if="historyList.length"
+          text
+          type="primary"
+          size="small"
+          class="clear-history-btn"
+          @click="clearHistory"
+        >清空历史</el-button>
+      </div>
+      <div class="tree-wrap">
+        <template v-if="favList.length || historyList.length">
+          <div v-if="favList.length" class="hist-group">
+            <div class="hist-group-title">收藏</div>
+            <div v-for="it in favList" :key="`fav:${it.ts}:${it.sql}`" class="hist-item" @click="onRunItem(it)">
+              <span class="hist-sql" :title="it.sql">{{ it.sql }}</span>
+              <span class="hist-time">{{ formatTime(it.ts) }}</span>
+              <span class="hist-ops">
+                <el-icon class="starred" title="取消收藏" @click.stop="removeFav(it)"><StarFilled /></el-icon>
+              </span>
+            </div>
+          </div>
+          <div v-if="historyList.length" class="hist-group">
+            <div class="hist-group-title">最近</div>
+            <div v-for="it in historyList" :key="`hist:${it.ts}:${it.sql}`" class="hist-item" @click="onRunItem(it)">
+              <span class="hist-sql" :title="it.sql">{{ it.sql }}</span>
+              <span class="hist-time">{{ formatTime(it.ts) }}</span>
+              <span class="hist-ops">
+                <el-icon title="收藏" @click.stop="toggleFav(it)"><Star /></el-icon>
+                <el-icon class="danger" title="删除" @click.stop="removeHistory(it)"><Delete /></el-icon>
+              </span>
+            </div>
+          </div>
+        </template>
+        <div v-else class="tree-empty">暂无历史,执行过的 SQL 会出现在这里</div>
+      </div>
+    </div>
   </div>
 
   <!-- 右键菜单(我的目录) -->
@@ -487,6 +630,84 @@ onUnmounted(() => {
   font-size: 14px;
   color: $muted;
   text-align: center;
+}
+
+/* ── 历史 / 收藏 ───────────────────────────────────────── */
+.clear-history-btn {
+  padding: 0;
+}
+
+.hist-group {
+  padding: 2px 0 6px;
+}
+
+.hist-group-title {
+  padding: 8px 8px 4px;
+  font-size: 12px;
+  color: $muted;
+  user-select: none;
+}
+
+.hist-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--bd-table-hover);
+  }
+
+  .hist-sql {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    color: $text;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hist-time {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: $muted;
+  }
+
+  .hist-ops {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+
+    :deep(.el-icon) {
+      font-size: 14px;
+      color: $muted;
+      cursor: pointer;
+
+      &:hover {
+        color: $primary;
+      }
+
+      &.starred {
+        color: #e6a23c;
+
+        &:hover {
+          color: #d08c1d;
+        }
+      }
+
+      &.danger:hover {
+        color: #f56c6c;
+      }
+    }
+  }
+
+  &:hover .hist-ops {
+    display: inline-flex;
+  }
 }
 
 .file-tree {

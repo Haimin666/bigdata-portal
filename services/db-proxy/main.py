@@ -34,6 +34,7 @@ import time
 import uuid
 import secrets
 import collections
+import datetime
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -321,6 +322,59 @@ def check_read_only_sql(sql: str) -> bool:
     return bool(READ_ONLY_SQL_RE.match(sql))
 
 
+# ── 写操作审计(MySQL/Oracle/Doris 写 SQL 执行审计,JSON Lines)────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIT_DIR = os.path.join(BASE_DIR, "audit")
+AUDIT_LOG_FILE = os.path.join(AUDIT_DIR, "audit-db.log")
+_audit_lock = threading.Lock()
+
+
+def _is_write_sql(sql: str) -> bool:
+    """写语句判定:非 SELECT/EXPLAIN/SHOW/DESC/DESCRIBE 开头即视为写
+    (INSERT/UPDATE/DELETE/REPLACE/CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/COMMENT/SET 等)。
+    与 READ_ONLY_SQL_RE 对齐:注释前缀先剥,末尾分号不影响判定。"""
+    if not sql or not sql.strip():
+        return False
+    return not bool(READ_ONLY_SQL_RE.match(sql))
+
+
+def _write_audit(
+    db: str,
+    engine: str,
+    sql: str,
+    affected: Optional[int],
+    cost_ms: float,
+    source: str,
+    blocked: bool = False,
+) -> None:
+    """追加一条写操作审计到 audit/audit-db.log(线程安全,独立锁)。
+    sql 截断 500;审计写失败只记 warning,绝不干扰查询主流程。"""
+    try:
+        os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+        rec: Dict[str, Any] = {
+            "ts": datetime.datetime.now().isoformat(sep="T"),
+            "db": db,
+            "engine": engine,
+            "sql": (sql or "")[:500],
+            "affected": affected,
+            "costMs": int(cost_ms or 0),
+            "source": source,
+        }
+        if blocked:
+            rec["blocked"] = True
+        line = json.dumps(rec, ensure_ascii=False)
+        with _audit_lock:
+            with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            # 审计日志含完整 SQL,收紧权限:文件 0600(目录已在 makedirs 时 0700)
+            try:
+                os.chmod(AUDIT_LOG_FILE, 0o600)
+            except Exception:
+                pass
+    except Exception as e:  # 审计失败不影响查询结果
+        log.warning("audit write failed: %s", e)
+
+
 def _strip_sql_literals(sql: str) -> str:
     """剥离注释与字符串字面量,用于语句/表名检查(避免字符串里的 FROM/JOIN/分号被误判)。"""
     s = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql)
@@ -475,7 +529,7 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
     return DbError(engine, "DatabaseError", None, msg)
 
 
-def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None):
+def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync"):
     """解析/校验 SQL,返回 (ds, clean_sql, is_select, limit, q_timeout, start)。
     供 fetch(同步)与 DbJobManager(异步,需持有连接才能取消)共用。"""
     ds = get_datasource(db)
@@ -500,6 +554,8 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None):
             is_select = False
     # 数据源级只读:显式 readOnly:true 的库拒绝一切非查询 SQL(纵深保护)
     if ds.read_only and not is_select:
+        # 写尝试即使未执行也要审计(affected=null, blocked=true)
+        _write_audit(db, ds.type, clean_sql, None, 0.0, source, blocked=True)
         raise HTTPException(
             status_code=403,
             detail=f"datasource '{ds.name}' is read-only (readOnly:true), write SQL not allowed",
@@ -543,8 +599,11 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
             "truncated": truncated,
         }
     # 写语句(INSERT/UPDATE/DELETE):执行并返回受影响行数
+    # 注意:pymysql 的 execute() 返回受影响行数,但 python-oracledb 返回 None,
+    # 统一用 cursor.rowcount(commit 前有效,此处顺序正确),修复 Oracle 审计 affected 恒 null。
     cur = conn.cursor()
-    affected = cur.execute(clean_sql)
+    cur.execute(clean_sql)
+    affected = cur.rowcount
     conn.commit()
     cur.close()
     return {
@@ -555,21 +614,34 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
     }
 
 
-def fetch(sql: str, db: str, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
+def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync") -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
-    timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。"""
-    ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(sql, db, timeout_ms)
+    timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。
+    写语句执行(成功/失败/连接失败)后追加一条审计日志(source='sync'|'async')。"""
+    ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(
+        sql, db, timeout_ms, source=source
+    )
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
         de = _extract_sql_error(e, ds.type)
         if de.error_type == "DatabaseError":
             de = DbError(ds.type, "ConnectError", de.error_code, de.message)
+        if not is_select:
+            _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
         raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}")
     try:
-        return _execute_query(ds, conn, clean_sql, is_select, limit, start)
+        result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
+        if not is_select:
+            affected = (
+                result["rows"][0].get("affected_rows") if result.get("rows") else None
+            )
+            _write_audit(db, ds.type, clean_sql, affected, result["costMs"], source)
+        return result
     except Exception as e:
+        if not is_select:
+            _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
         de = _extract_sql_error(e, ds.type)
         raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}")
     finally:
@@ -656,9 +728,12 @@ class DbJobManager:
         j["state"] = "running"
         j["started_at"] = time.time()
         conn = None
+        clean_sql = ""
+        is_select = False
+        start = time.time()
         try:
             # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
-            ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"])
+            ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"], source="async")
             conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
             j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
             try:
@@ -669,6 +744,12 @@ class DbJobManager:
                     conn.close()
                 except Exception:
                     pass
+            if not is_select:
+                # 异步写执行成功:审计(source='async')
+                affected = (
+                    result["rows"][0].get("affected_rows") if result.get("rows") else None
+                )
+                _write_audit(j["db"], ds.type, clean_sql, affected, result["costMs"], "async")
             j["result"] = result
             j["state"] = "done"
         except Exception as e:
@@ -676,6 +757,9 @@ class DbJobManager:
                 # 取消导致连接关闭抛异常 → 视为用户主动停止
                 j["state"] = "cancelled"
             else:
+                # 写语句执行失败也审计(仅当 _prepare_query 已通过,避免 readOnly 等前置拦截重复记录)
+                if not is_select and clean_sql:
+                    _write_audit(j["db"], ds.type, clean_sql, None, (time.time() - start) * 1000, "async")
                 j["error"] = str(e)[:2000]
                 j["state"] = "failed"
         finally:
@@ -1606,6 +1690,376 @@ def ddl(
     finally:
         conn.close()
     return {"code": 0, "data": {"name": table, "ddl": ddl_text}}
+
+
+# ── Schema 补全(/schema:全量表+字段扁平元数据)────────────────
+SCHEMA_MAX_TABLES = 800
+
+
+@app.get("/schema")
+def schema(
+    db: str,
+    timeoutMs: int = 30000,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """一次性返回该数据源全部表+字段的扁平元数据(供前端 SQL 编辑器补全)。
+
+    - MySQL/Doris(走 mysql 协议):information_schema.tables/columns;table_schema 取
+      连接库(ds.service,与 /tables 的 SHOW TABLE STATUS 一致),而非请求参数 db
+    - Oracle:all_tables(OWNER=当前用户)+ all_tab_comments + all_tab_columns
+    表数 > 800 只返回前 800 张并在 data.truncated=true。"""
+    require_auth(x_db_token)
+    check_db_allowed(db)
+    ds = get_datasource(db)
+    q_timeout = max(1, int(timeoutMs / 1000)) if timeoutMs else QUERY_TIMEOUT
+    try:
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"connect failed: {e}")
+    try:
+        cur = conn.cursor()
+        if ds.type == "mysql":
+            # Doris 通过 mysql 协议直连,information_schema 一致
+            cur.execute(
+                "SELECT table_name, table_comment FROM information_schema.tables "
+                "WHERE table_schema = %s ORDER BY table_name",
+                (ds.service,),
+            )
+            table_rows = cur.fetchall()
+            cur.execute(
+                "SELECT table_name, column_name, column_type FROM information_schema.columns "
+                "WHERE table_schema = %s ORDER BY table_name, ordinal_position",
+                (ds.service,),
+            )
+            col_rows = cur.fetchall()
+            tables: List[Dict[str, Any]] = []
+            for t in table_rows:
+                d = t if hasattr(t, "items") else {"table_name": t[0], "table_comment": t[1] if len(t) > 1 else None}
+                tables.append(
+                    {
+                        "name": str(d.get("table_name") or ""),
+                        "comment": str(d.get("table_comment") or ""),
+                        "columns": [],
+                    }
+                )
+            by_name = {t["name"]: t for t in tables}
+            for c in col_rows:
+                d = c if hasattr(c, "items") else {"table_name": c[0], "column_name": c[1], "column_type": c[2] if len(c) > 2 else ""}
+                t = by_name.get(str(d.get("table_name") or ""))
+                if t is not None:
+                    t["columns"].append(
+                        {"name": str(d.get("column_name") or ""), "type": str(d.get("column_type") or "")}
+                    )
+        else:
+            cur.execute(
+                "SELECT t.table_name, c.comments FROM all_tables t "
+                "LEFT JOIN all_tab_comments c ON t.owner = c.owner AND t.table_name = c.table_name "
+                "WHERE t.owner = (SELECT user FROM dual) ORDER BY t.table_name"
+            )
+            table_rows = cur.fetchall()
+            cur.execute(
+                "SELECT table_name, column_name, data_type FROM all_tab_columns "
+                "WHERE owner = (SELECT user FROM dual) ORDER BY table_name, column_id"
+            )
+            col_rows = cur.fetchall()
+            tables = [{"name": str(r[0] or ""), "comment": str(r[1] or ""), "columns": []} for r in table_rows]
+            by_name = {t["name"]: t for t in tables}
+            for c in col_rows:
+                t = by_name.get(str(c[0] or ""))
+                if t is not None:
+                    t["columns"].append({"name": str(c[1] or ""), "type": str(c[2] or "")})
+        cur.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        de = _extract_sql_error(e, ds.type)
+        raise HTTPException(status_code=502, detail=f"failed to load schema: {de.message}")
+    finally:
+        conn.close()
+    truncated = len(tables) > SCHEMA_MAX_TABLES
+    if truncated:
+        tables = tables[:SCHEMA_MAX_TABLES]
+    return {"code": 0, "data": {"tables": tables, "truncated": truncated, "engine": ds.type}}
+
+
+# ── EXPLAIN 可视化(/explain)────────────────────────────────
+_EXPLAIN_OP_KEYS = (
+    "query_block",
+    "ordering_operation",
+    "grouping_operation",
+    "duplicates_removal",
+    "table",
+    "union_result",
+    "materialized_from_subquery",
+    "windowing",
+    "partition",
+    "aggregate",
+    "first_row",
+    "second_row",
+    "insert_from_query",
+    "update",
+    "insert",
+    "delete",
+    "replace",
+    "updating_table",
+    "inserting_table",
+    "deleting_table",
+)
+
+
+def _mysql_explain_cost(inner: Dict[str, Any]) -> Optional[Any]:
+    """从 cost_info 提取成本:total_cost 优先(任务要求),MySQL 真实输出中
+    table 节点只有 prefix_cost / query_block 只有 query_cost,依次回退。"""
+    ci = inner.get("cost_info")
+    if not isinstance(ci, dict):
+        return None
+    return ci.get("total_cost") or ci.get("prefix_cost") or ci.get("query_cost")
+
+
+def _mysql_explain_operation(inner: Dict[str, Any]) -> Dict[str, Any]:
+    """非 table 的操作节点(ordering/grouping/windowing 等):保留 operation readable 文本。"""
+    node: Dict[str, Any] = {
+        "operation": inner.get("readable") or inner.get("operation") or "",
+        "rows": inner.get("rows"),
+        "cost": _mysql_explain_cost(inner),
+    }
+    extra = []
+    if inner.get("using_filesort"):
+        extra.append("filesort")
+    if inner.get("using_temporary_table"):
+        extra.append("temporary table")
+    node["extra"] = "; ".join(extra) or None
+    return node
+
+
+def _mysql_explain_table(inner: Dict[str, Any]) -> Dict[str, Any]:
+    """table 节点:name/access_type/rows/filtered/cost/extra + readable 作为 operation。"""
+    node: Dict[str, Any] = {
+        "name": str(inner.get("table_name") or ""),
+        "access_type": inner.get("access_type"),
+        "rows": inner.get("rows"),
+        "filtered": inner.get("filtered"),
+        "cost": _mysql_explain_cost(inner),
+        "operation": inner.get("readable") or "",
+    }
+    extra = []
+    pk = inner.get("possible_keys")
+    if pk:
+        extra.append("possible_keys: " + (", ".join(pk) if isinstance(pk, list) else str(pk)))
+    if inner.get("key"):
+        extra.append("key: " + str(inner.get("key")))
+    if inner.get("ref"):
+        extra.append("ref: " + str(inner.get("ref")))
+    if inner.get("attached_condition"):
+        extra.append("attached_condition: " + str(inner.get("attached_condition")))
+    uc = inner.get("used_columns")
+    if uc:
+        extra.append("used_columns: " + (", ".join(uc) if isinstance(uc, list) else str(uc)))
+    node["extra"] = "; ".join(extra) or None
+    return node
+
+
+def _mysql_explain_node(data: Any) -> Dict[str, Any]:
+    """把 EXPLAIN FORMAT=JSON 的一段递归成 {name, operation, rows, cost, children} 树。
+    query_block 的 nested_loop 展开为 children;子查询(attached_subqueries)也挂为 children。"""
+    if not isinstance(data, dict):
+        return {"name": str(data)[:200], "children": []}
+    op_keys = [k for k in data if k in _EXPLAIN_OP_KEYS]
+    if not op_keys:
+        return {"name": "node", "children": []}
+    if len(op_keys) == 1:
+        k = op_keys[0]
+        inner = data[k]
+        node: Dict[str, Any] = {"name": k, "children": []}
+        if k == "table" and isinstance(inner, dict):
+            node.update(_mysql_explain_table(inner))
+            node["children"] = [_mysql_explain_node(x) for x in (inner.get("attached_subqueries") or [])]
+        elif isinstance(inner, dict):
+            node.update(_mysql_explain_operation(inner))
+            children = [_mysql_explain_node(x) for x in (inner.get("nested_loop") or [])]
+            children.extend(_mysql_explain_node(x) for x in (inner.get("attached_subqueries") or []))
+            node["children"] = children
+        else:
+            node["operation"] = str(inner)[:200]
+        return node
+    # 同一层出现多个操作键(罕见):并列展开
+    children = [_mysql_explain_node({k: data[k]}) for k in op_keys]
+    return {"name": "query_block", "children": children}
+
+
+def _build_explain_tree(data: Any) -> Dict[str, Any]:
+    return _mysql_explain_node(data)
+
+
+def _to_int(s: Any) -> Optional[int]:
+    if s is None:
+        return None
+    try:
+        return int(str(s).split()[0].replace(",", ""))
+    except (ValueError, IndexError):
+        return None
+
+
+def _build_oracle_tree(rows: List[Any]) -> Optional[Dict[str, Any]]:
+    """PLAN_TABLE 行 → 按 parent_id 递归成 {id, operation, object_name, rows, cost, children} 树。"""
+    nodes: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        try:
+            rid = int(r[0])
+        except (TypeError, ValueError):
+            continue
+        operation = str(r[2] or "")
+        options = str(r[3] or "")
+        if options and options.lower() != "null":
+            operation = (operation + " " + options).strip()
+        nodes[rid] = {
+            "id": rid,
+            "parent_id": int(r[1]) if r[1] is not None else None,
+            "operation": operation,
+            "object_name": str(r[4] or ""),
+            "rows": _to_int(r[5]),
+            "cost": _to_int(r[6]),
+            "children": [],
+        }
+    if not nodes:
+        return None
+    roots: List[Dict[str, Any]] = []
+    for node in nodes.values():
+        parent = nodes.get(node["parent_id"])
+        if parent is not None:
+            parent["children"].append(node)
+        else:
+            roots.append(node)
+    if len(roots) == 1:
+        return roots[0]
+    return {
+        "id": 0,
+        "operation": "STATEMENT",
+        "object_name": "",
+        "rows": None,
+        "cost": None,
+        "children": roots,
+    }
+
+
+_PLAN_ROW_RE = re.compile(r"^\|\s*\*?\s*(\d+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|")
+
+
+def _parse_dbms_xplan_tree(lines: List[str]) -> Optional[Dict[str, Any]]:
+    """解析 DBMS_XPLAN.DISPLAY 文本(无 parent_id 列,退化为链式树);解析失败返回 None。"""
+    nodes: Dict[int, Dict[str, Any]] = {}
+    for ln in lines:
+        m = _PLAN_ROW_RE.match(ln)
+        if not m:
+            continue
+        try:
+            rid = int(m.group(1))
+        except ValueError:
+            continue
+        nodes[rid] = {
+            "id": rid,
+            "operation": (m.group(2) or "").strip() or None,
+            "object_name": (m.group(3) or "").strip() or None,
+            "rows": _to_int(m.group(4)),
+            "cost": _to_int(m.group(5)),
+            "children": [],
+        }
+    if not nodes:
+        return None
+    ids = sorted(nodes)
+    for i, rid in enumerate(ids[1:], start=1):
+        nodes[ids[i - 1]]["children"].append(nodes[rid])
+    return nodes[ids[0]]
+
+
+class ExplainReq(BaseModel):
+    db: str
+    sql: str
+    engine: Optional[str] = None  # 可选:不传按数据源推断
+
+
+@app.post("/explain")
+def explain(
+    req: ExplainReq, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    """执行计划可视化(只读,写语句 400)。
+
+    - MySQL/Doris:优先 EXPLAIN FORMAT=JSON → {kind:'tree', root};老版本/失败时
+      回退普通 EXPLAIN → {kind:'table', columns, rows}
+    - Oracle:EXPLAIN PLAN FOR 后查 PLAN_TABLE(按 parent_id 建树);不可用则
+      DBMS_XPLAN.DISPLAY 文本解析;再失败 → {kind:'table', rows: 原始行}"""
+    require_auth(x_db_token)
+    check_db_allowed(req.db)
+    raw = (req.sql or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="sql is required")
+    # 复用 /query 同一套校验:走私检测(INTO OUTFILE/DUMPFILE、LOAD_FILE、可执行注释)、
+    # CTE-DML、单语句、表白名单、read_only 拦截;EXPLAIN 只读,非 SELECT 一律 400
+    # (MySQL 5.x 的 EXPLAIN 对 DML 会实际执行,必须在此挡住)。
+    ds, clean, is_select, _limit, q_timeout, _start = _prepare_query(raw, req.db)
+    if not is_select:
+        raise HTTPException(status_code=400, detail="explain only supports read-only SQL")
+    try:
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"connect failed: {e}")
+    try:
+        cur = conn.cursor()
+        if ds.type == "mysql":
+            try:
+                # EXPLAIN FORMAT=JSON:老版本 MySQL 不支持会语法报错 → 回退普通 EXPLAIN
+                cur.execute("EXPLAIN FORMAT=JSON " + clean)
+                row = cur.fetchone()
+                raw = None
+                if row:
+                    raw = next(iter(row.values())) if hasattr(row, "items") else row[0]
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                if not isinstance(data, dict):
+                    raise ValueError("unexpected explain json shape")
+                root = _build_explain_tree(data)
+                return {"code": 0, "data": {"kind": "tree", "root": root}}
+            except Exception:
+                cur.execute("EXPLAIN " + clean)
+                rows = cur.fetchall()
+                columns = list(rows[0].keys()) if rows else []
+                return {"code": 0, "data": {"kind": "table", "columns": columns, "rows": rows}}
+        else:
+            cur.execute("EXPLAIN PLAN FOR " + clean)
+            try:
+                cur.execute(
+                    "SELECT id, parent_id, operation, options, object_name, cardinality, cost "
+                    "FROM plan_table ORDER BY id"
+                )
+                pt = cur.fetchall()
+                if pt:
+                    root = _build_oracle_tree(pt)
+                    if root is not None:
+                        return {"code": 0, "data": {"kind": "tree", "root": root}}
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL, 'ALL'))")
+                plan_rows = cur.fetchall()
+                lines = [
+                    str(r[0]) if not hasattr(r, "items") else str(next(iter(r.values())))
+                    for r in plan_rows
+                ]
+            except Exception:
+                lines = []
+            root = _parse_dbms_xplan_tree(lines)
+            if root is not None:
+                return {"code": 0, "data": {"kind": "tree", "root": root}}
+            return {"code": 0, "data": {"kind": "table", "rows": lines}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        de = _extract_sql_error(e, ds.type)
+        raise HTTPException(status_code=502, detail=f"explain failed: {de.message}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

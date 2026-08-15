@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, type DbDataSource, type ScriptNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -309,6 +309,17 @@ function onInsert(text: string) {
   c.focus()
 }
 
+/** 历史记录点击(SqlTreePanel 新增 runSql 事件):把 SQL 填入当前编辑器并立即执行 */
+function onRunHistorySql(sql: string) {
+  const c = cm
+  if (!c) return
+  const s = String(sql || '')
+  if (!s.trim()) return
+  c.setValue(s)
+  c.focus()
+  void runQuery()
+}
+
 /** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
 async function onOpenTable(payload: { db: string; table: string }) {
   if (tabs.value.length >= MAX_TABS) {
@@ -334,6 +345,28 @@ async function onOpenTable(payload: { db: string; table: string }) {
   }
   cm?.setValue(sql)
   await runQuery()
+  // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
+  const r = results.value[results.value.length - 1]
+  if (r && !r.error && r.sql.trim() === sql.trim()) {
+    r.editable = true
+    r.db = payload.db
+    r.table = payload.table
+    r.engine = isOracle ? 'oracle' : 'mysql'
+    r.pendingEdits = []
+    void loadPreviewPk(r, payload.db, payload.table, isOracle)
+  }
+}
+
+/** 异步取表主键列(listFields detail 中 key==='PRI';Oracle 主键列转大写比较,名字原样存) */
+async function loadPreviewPk(r: QueryResultItem, dbName: string, tableName: string, isOracle: boolean) {
+  try {
+    const fields = (await listFields(dbName, tableName, true)) as TableFieldDetail[]
+    const pks = (fields || []).filter((f) => String(f.key || '').toUpperCase() === 'PRI').map((f) => f.name)
+    // Oracle 元数据列名通常为大写;比较时统一转大写,存储保持原样
+    r.pkCols = isOracle ? pks.map((p) => p.toUpperCase()) : pks
+  } catch {
+    r.pkCols = []
+  }
 }
 
 /** 保存当前活跃 tab(Ctrl/Cmd + S):绑定文件直接保存;未命名时输入文件名保存到根目录 */
@@ -478,18 +511,19 @@ async function initEditor() {
     const t = activeTab.value
     if (t) t.dirty = true
   })
-  // ── 补全触发:输入字母/下划线后 250ms 弹出(避免每键弹闪);浮层打开时 Tab 选词 ──
+  // ── 补全触发:输入字母/下划线后 300ms 防抖弹出(仅候选非空);浮层打开时 Tab 选词 ──
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
     if (change.origin !== '+input') return
     const ch = change.text[0] || ''
     if (!/[\w.]/.test(ch)) return
     if (completionTimer) clearTimeout(completionTimer)
     completionTimer = window.setTimeout(() => {
+      // pyspark 用内置单词补全;SQL 用 schema 感知补全(表名/列名/关键字)
       c.showHint({
         completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : CodeMirror.hint.sql
+        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
       })
-    }, 250)
+    }, 300)
   })
   // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
@@ -505,9 +539,10 @@ async function initEditor() {
       void saveActive()
     },
     'Ctrl-Space': (c: CodeMirror.Editor) => {
+      // pyspark 用内置单词补全;SQL 用 schema 感知补全
       c.showHint({
         completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : CodeMirror.hint.sql
+        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
       })
     },
     Tab: (c: CodeMirror.Editor) => {
@@ -793,6 +828,14 @@ function formatSql() {
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
+/** 单元格待提交修改(row 为结果行在 r.rows 中的索引,由 indexOf(row) 得到) */
+interface PendingEdit {
+  row: number
+  col: string
+  oldVal: unknown
+  newVal: unknown
+}
+
 interface QueryResultItem {
   sql: string
   columns: string[]
@@ -802,6 +845,13 @@ interface QueryResultItem {
   error?: string
   jobId?: string
   mode?: string
+  // ── 行内编辑(仅表预览结果)────────────────────────
+  editable?: boolean // 是否允许单元格双击编辑
+  db?: string // 目标库(onOpenTable 设置)
+  table?: string // 目标表(onOpenTable 设置)
+  engine?: string // 方言: 'oracle' | 'mysql'(onOpenTable 设置)
+  pkCols?: string[] // 主键列名(异步 listFields(detail) 取 key==='PRI')
+  pendingEdits?: PendingEdit[] // 待提交的单元格修改(同 row+col 去重)
 }
 
 const results = ref<QueryResultItem[]>([])
@@ -820,6 +870,350 @@ const pagedRows = computed(() => {
 function selectPane(pane: number) {
   activePane.value = pane
   pageCurrent.value = 1
+}
+
+// ── 结果单元格行内编辑(仅表预览结果 editable)──────────────────
+// editingCell:当前正在编辑的单元格(row 为 rows 中真实行对象引用,rowIdx 为 indexOf 结果)
+const editingCell = ref<{ row: Record<string, unknown>; rowIdx: number; col: string; val: string } | null>(null)
+
+/** 当前结果 tab 是否可编辑(仅表预览且有主键列),供单元格双击提示 */
+function isEditableCell(_col: string): boolean {
+  const r = currentResult.value
+  return !!r && !!r.editable && !!r.pkCols?.length
+}
+
+/** 双击单元格进入编辑(值非 null 且当前结果可编辑且有主键;主键列本身不允许改) */
+function startCellEdit(row: Record<string, unknown>, col: string) {
+  const r = currentResult.value
+  if (!r || !r.editable || !r.pkCols?.length) return
+  const v = row[col]
+  if (v == null) return
+  // 主键列拒绝编辑(会破坏 UPDATE 定位)
+  if (r.pkCols.some((pk) => pk.toUpperCase() === col.toUpperCase())) {
+    ElMessage.warning('主键列不允许编辑')
+    return
+  }
+  const rowIdx = r.rows.indexOf(row)
+  if (rowIdx < 0) return
+  editingCell.value = { row, rowIdx, col, val: String(v) }
+  void nextTick(() => {
+    const input = cellEditInputRef.value
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+const cellEditInputRef = ref<HTMLInputElement>()
+
+/** 输入更新编辑值(不落盘,失焦才保存) */
+function onEditInput() {
+  const inp = cellEditInputRef.value
+  if (inp && editingCell.value) editingCell.value.val = inp.value
+}
+
+/** 失焦保存:值变化则记录到该行所属结果 tab 的 pendingEdits(同 row+col 去重覆盖)。
+ *  注意不能用 currentResult —— 用户在编辑中输入后切换结果 tab 会触发 blur,
+ *  此时 currentResult 已指向别的结果,须按行对象引用定位原结果 */
+function saveCellEdit() {
+  const e = editingCell.value
+  editingCell.value = null
+  if (!e) return
+  const r = results.value.find((x) => x.rows.includes(e.row))
+  if (!r || !r.editable) return
+  const newVal = parseCellValue(e.row[e.col], e.val)
+  const oldVal = e.row[e.col]
+  if (newVal === oldVal) return // 值未变不记录
+  const pending = r.pendingEdits || (r.pendingEdits = [])
+  const idx = pending.findIndex((p) => p.row === e.rowIdx && p.col === e.col)
+  const edit = { row: e.rowIdx, col: e.col, oldVal, newVal }
+  if (idx >= 0) pending[idx] = edit
+  else pending.push(edit)
+  // 本地立即反映新值(供后续再次编辑/提交取主键值)
+  e.row[e.col] = newVal
+}
+
+/** Esc 取消编辑 */
+function cancelCellEdit() {
+  editingCell.value = null
+}
+
+/** 输入文本按原值类型还原(number 尽量转数值,其余保持字符串) */
+function parseCellValue(oldVal: unknown, raw: string): unknown {
+  if (typeof oldVal === 'number') {
+    const n = Number(raw)
+    return Number.isNaN(n) ? raw : n
+  }
+  if (typeof oldVal === 'boolean') return raw === 'true'
+  return raw
+}
+
+/** SQL 字面量:数字/布尔/null 原样,字符串/日期用单引号并转义 '' */
+function sqlLiteral(v: unknown): string {
+  if (v == null) return 'NULL'
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  // MySQL/Doris 字符串字面量中反斜杠是转义符:先转义 \ 再转义 ' (Oracle 无反斜杠语义,双写无害)
+  return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
+}
+
+/** HTML 转义(确认弹窗展示完整 SQL 用) */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/** 按 row 分组生成 UPDATE 语句数组(每条单语句;MySQL 反引号 / Oracle 双引号;主键列取当前行内值) */
+function buildUpdateSql(r: QueryResultItem): string[] {
+  if (!r.table || !r.pkCols?.length || !r.pendingEdits?.length) return []
+  const isOracle = r.engine === 'oracle'
+  const q = (id: string) => (isOracle ? `"${id}"` : `\`${id}\``)
+  const tbl = q(r.table)
+  const byRow = new Map<number, { row: Record<string, unknown>; edits: PendingEdit[] }>()
+  for (const p of r.pendingEdits) {
+    const item = r.rows[p.row]
+    if (!item) continue
+    const grp = byRow.get(p.row) || { row: item, edits: [] }
+    grp.edits.push(p)
+    byRow.set(p.row, grp)
+  }
+  const stmts: string[] = []
+  for (const [, { row, edits }] of byRow) {
+    const sets = edits.map((p) => {
+      // 列名可能大小写与 rows 键不一致(如 Oracle),按大小写不敏感定位实际键
+      const key = findRowKey(row, p.col)
+      return `${q(key)} = ${sqlLiteral(p.newVal)}`
+    }).join(', ')
+    // 主键 WHERE:取该行主键列当前行内值(主键列禁止编辑故不受修改影响)
+    const wheres = r.pkCols.map((pk) => {
+      const key = findRowKey(row, pk)
+      return `${q(key)} = ${sqlLiteral(row[key])}`
+    }).filter(Boolean)
+    if (!wheres.length) continue
+    stmts.push(`UPDATE ${tbl} SET ${sets} WHERE ${wheres.join(' AND ')}`)
+  }
+  return stmts
+}
+
+/** 在 row 中按大小写不敏感查找列名对应的键(找不到返回原列名) */
+function findRowKey(row: Record<string, unknown>, col: string): string {
+  if (col in row) return col
+  const upper = col.toUpperCase()
+  const hit = Object.keys(row).find((k) => k.toUpperCase() === upper)
+  return hit || col
+}
+
+/** 提交修改:确认完整 SQL → 确保解锁 → queryDb 逐条执行 → 清空并自动重查 */
+async function commitEdits() {
+  const r = currentResult.value
+  if (!r || !r.editable || !r.pendingEdits?.length) return
+  const stmts = buildUpdateSql(r)
+  if (!stmts.length) {
+    ElMessage.warning('没有可提交的修改(主键列无法定位)')
+    return
+  }
+  // 展示完整 SQL 供确认
+  let confirmed = false
+  try {
+    await ElMessageBox.confirm(
+      `<pre class="edit-sql-preview">${escapeHtml(stmts.join('\n'))}</pre>`,
+      `确认提交 ${r.pendingEdits.length} 处修改?`,
+      { dangerouslyUseHTMLString: true, confirmButtonText: '确认提交', cancelButtonText: '取消', type: 'warning' }
+    )
+    confirmed = true
+  } catch {
+    /* 取消 */
+  }
+  if (!confirmed) return
+  // 写操作需要 sparkToken:未解锁先弹密码框(复用现有解锁链路),取消则中止
+  if (!sparkToken.value) {
+    const tk = await openSparkAuth()
+    if (!tk) {
+      ElMessage.warning('已取消:写权限未解锁')
+      return
+    }
+  }
+  loading.value = true // 提交期间互斥,防用户同时执行新查询导致 rerunResult 竞态
+  try {
+    // 逐条执行(网关/db-proxy 单语句语义,不支持分号拼接多语句)
+    for (const sql of stmts) {
+      await queryDb(r.db || db.value, sql, sparkToken.value || undefined)
+    }
+    ElMessage.success(`已提交 ${r.pendingEdits.length} 处修改`)
+    r.pendingEdits = []
+    // 自动重查:重新执行原预览 SQL(复用 execOne 直接刷新该结果 tab,不打断编辑器)
+    await rerunResult(r)
+  } catch (e) {
+    ElMessage.error(`提交失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 重新执行某结果 tab 对应的原 SQL(提交修改后自动重查)。
+ *  直接走 execDb(预览 SQL 必为 mysql/oracle SELECT,无需经过 engine 分支判定;
+ *  临时切 db 到结果记录的库,执行后恢复,避免 watch(engine) 干扰) */
+async function rerunResult(r: QueryResultItem) {
+  const idx = results.value.indexOf(r)
+  if (idx < 0) return
+  const seq = ++runSeq
+  batchCancelled = false
+  loading.value = true
+  const savedDb = db.value
+  if (r.db) db.value = r.db
+  try {
+    let res
+    try {
+      res = await execDb(r.sql)
+    } catch (e) {
+      if (seq === runSeq) {
+        results.value[idx] = {
+          ...results.value[idx],
+          sql: r.sql,
+          columns: [],
+          rows: [],
+          costMs: 0,
+          truncated: false,
+          pendingEdits: [],
+          error: e instanceof Error ? e.message : String(e)
+        }
+        activePane.value = idx + 1
+      }
+      return
+    }
+    if (seq !== runSeq) return
+    // 保留编辑元数据,清空待提交修改
+    results.value[idx] = { ...results.value[idx], sql: r.sql, ...res, pendingEdits: [] }
+    if (seq === runSeq) activePane.value = idx + 1
+  } finally {
+    db.value = savedDb
+    loading.value = false
+  }
+}
+
+// ── EXPLAIN 执行计划面板 ─────────────────────────────────────
+const showExplain = ref(false)
+const explainLoading = ref(false)
+const explainError = ref('')
+const explainTree = ref<ExplainNode | null>(null)
+const explainTable = ref<{ columns: string[]; rows: Record<string, unknown>[] } | null>(null)
+
+/** 取当前活动 tab 编辑器选中文本;空则取全文第一条语句 */
+function getExplainSql(): string {
+  if (!cm) return ''
+  const sel = cm.getSelection().trim()
+  if (sel) return sel
+  const segs = splitSqlSegments(cm.getValue()).map((s) => s.sql.trim()).filter(Boolean)
+  return segs[0] || ''
+}
+
+/** 执行计划节点 → 展示文本(表名/访问方式 + rows/cost 等统计) */
+function explainNodeLabel(n: ExplainNode | null | undefined): string {
+  if (!n) return ''
+  const parts: string[] = []
+  const op = String(n.operation || n.name || '').trim()
+  if (op) parts.push(op)
+  const obj = String(n.object_name || '').trim()
+  if (obj && obj !== op) parts.push(obj)
+  if (n.access_type) parts.push(String(n.access_type))
+  const stats: string[] = []
+  if (n.rows != null) stats.push(`rows=${n.rows}`)
+  if (n.filtered != null) stats.push(`filtered=${n.filtered}`)
+  if (n.cost != null) stats.push(`cost=${n.cost}`)
+  if (n.extra) stats.push(String(n.extra))
+  return [...parts, ...stats].join(' ')
+}
+
+/** 触发 EXPLAIN:取当前数据源 + 当前编辑器选中/首条 SQL,弹结果面板 */
+async function runExplain() {
+  if (!ensureDb()) {
+    ElMessage.warning('请先选择数据库')
+    return
+  }
+  if (engine.value !== 'mysql' && engine.value !== 'oracle') {
+    ElMessage.warning('EXPLAIN 仅支持 MySQL / Oracle')
+    return
+  }
+  const sql = getExplainSql()
+  if (!sql) {
+    ElMessage.warning('没有可分析的 SQL(请选中或输入语句)')
+    return
+  }
+  showExplain.value = true
+  explainLoading.value = true
+  explainError.value = ''
+  explainTree.value = null
+  explainTable.value = null
+  try {
+    const data = await explainSql({ db: db.value, sql })
+    if (data.kind === 'tree') explainTree.value = data.root
+    else {
+      // MySQL 回退为普通行;Oracle 无列时是文本行列表,统一转成单列对象
+      const cols = data.columns?.length ? data.columns : ['line']
+      const rows = (data.rows || []).map((r) =>
+        r && typeof r === 'object' ? (r as Record<string, unknown>) : { line: String(r) }
+      )
+      explainTable.value = { columns: cols, rows }
+    }
+  } catch (e) {
+    explainError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    explainLoading.value = false
+  }
+}
+
+// ── Schema 补全缓存(按 db 缓存表+列元数据,首次补全时按需拉取)──
+interface SchemaMeta {
+  tables: Array<{ name: string; comment?: string; columns: Array<{ name: string; type?: string }> }>
+}
+const schemaCache = new Map<string, SchemaMeta>()
+
+/** 取 db 的 schema 元数据(缓存命中直接返回,未命中调 getSchema) */
+async function ensureSchema(dbName: string): Promise<SchemaMeta | null> {
+  const hit = schemaCache.get(dbName)
+  if (hit) return hit
+  try {
+    const data = await getSchema(dbName)
+    const meta: SchemaMeta = { tables: data.tables || [] }
+    schemaCache.set(dbName, meta)
+    return meta
+  } catch {
+    return null // 拉取失败静默,仅无补全
+  }
+}
+
+/** 常用 SQL 关键字(补全候选) */
+const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE', 'SET', 'VALUES', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'BETWEEN', 'LIKE']
+
+/** 自定义 SQL 补全:表名 + 列名(含 tbl.col 点语法)+ 常用关键字 */
+async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | null> {
+  const dbName = db.value
+  if (!dbName) return null
+  const meta = await ensureSchema(dbName)
+  if (!meta) return null
+  const cur = cm.getCursor()
+  const before = cm.getLine(cur.line).slice(0, cur.ch)
+  // 光标前标识符:支持 `表名.列名`(点号前后各一段)
+  const m = before.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)
+  if (!m) return null
+  const full = m[1]
+  const dotIdx = full.lastIndexOf('.')
+  let list: string[] = []
+  let fromCh: number
+  if (dotIdx >= 0) {
+    const tbl = full.slice(0, dotIdx)
+    const colPrefix = full.slice(dotIdx + 1).toLowerCase()
+    const t = meta.tables.find((x) => x.name.toLowerCase() === tbl.toLowerCase())
+    if (!t) return null
+    list = t.columns.filter((c) => c.name.toLowerCase().startsWith(colPrefix)).map((c) => c.name)
+    fromCh = cur.ch - (full.length - dotIdx - 1)
+  } else {
+    const prefix = full.toLowerCase()
+    list = meta.tables.map((t) => t.name).filter((n) => n.toLowerCase().startsWith(prefix))
+    list.push(...SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(prefix)))
+    fromCh = cur.ch - full.length
+  }
+  if (!list.length) return null
+  return { list: Array.from(new Set(list)), from: { line: cur.line, ch: fromCh }, to: cur }
 }
 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
@@ -958,10 +1352,20 @@ async function execOne(sql: string, index: number, seq: number): Promise<void> {
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await execDb(sql)
     if (seq !== runSeq) return // 旧批次已失效,丢弃结果
-    results.value[index] = { sql, ...r }
+    // 执行成功 → 写入历史(任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 50)
+    pushHistory(sql)
+    // 保留表预览(可编辑)元数据:重查后仍可继续编辑,pendingEdits 随本次清空
+    const prev = results.value[index]
+    results.value[index] = {
+      ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
+      sql,
+      ...r
+    }
   } catch (e) {
     if (seq !== runSeq) return
+    const prev = results.value[index]
     results.value[index] = {
+      ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
       sql,
       columns: [],
       rows: [],
@@ -989,9 +1393,43 @@ function getSegments(text: string): string[] {
 let batchCancelled = false
 let runSeq = 0
 
+/** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用) */
+const HISTORY_KEY = 'db-query-history'
+const HISTORY_MAX = 50
+
+/** 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 50、仅 trim 非空且 ≤2000 */
+function pushHistory(sql: string) {
+  const s = String(sql ?? '').trim()
+  if (!s || s.length > 2000) return
+  try {
+    let list: Array<{ ts: number; sql: string }> = []
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) list = parsed.filter((h) => h && typeof h.sql === 'string' && typeof h.ts === 'number')
+      }
+    } catch {
+      /* 历史数据损坏则忽略,重新开始 */
+    }
+    list = list.filter((h) => h.sql !== s)
+    list.unshift({ ts: Date.now(), sql: s })
+    if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX)
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list))
+  } catch {
+    /* localStorage 不可用(Safari 隐私模式等)时静默忽略 */
+  }
+}
+
 /** 执行目标 SQL 段列表(逐条 FIFO 串行执行) */
 async function execSegments(segs: string[], seq: number) {
-  results.value = segs.map((sql) => ({ sql, columns: [], rows: [], costMs: 0, truncated: false }))
+  results.value = segs.map((sql, i) => {
+    // 旧结果若是表预览(可编辑),保留编辑元数据(重查后 pendingEdits 清空)
+    const prev = results.value[i]
+    return prev?.editable
+      ? { sql, columns: [], rows: [], costMs: 0, truncated: false, editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] }
+      : { sql, columns: [], rows: [], costMs: 0, truncated: false }
+  })
   for (let i = 0; i < segs.length; i++) {
     if (batchCancelled) break
     await execOne(segs[i], i, seq)
@@ -1221,7 +1659,7 @@ async function copyAllTsv() {
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
       <div class="db-side" :style="{ width: sideWidth + 'px' }">
-        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" />
+        <SqlTreePanel :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" @run-sql="onRunHistorySql" />
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
@@ -1268,6 +1706,7 @@ async function copyAllTsv() {
         <el-divider direction="vertical" />
       </template>
       <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
+      <el-button :icon="Promotion" @click="runExplain">EXPLAIN</el-button>
       <el-button v-if="loading" type="danger" :icon="VideoPause" @click="stopQuery">
         停止
       </el-button>
@@ -1385,8 +1824,20 @@ async function copyAllTsv() {
                   >{{ c }}</span>
                 </template>
                 <template #default="{ row }">
+                  <span v-if="editingCell && editingCell.row === row && editingCell.col === c" class="cell-edit">
+                    <input
+                      ref="cellEditInputRef"
+                      :value="editingCell.val"
+                      class="cell-edit-input"
+                      spellcheck="false"
+                      @input="onEditInput"
+                      @blur="saveCellEdit"
+                      @keydown.esc.prevent="cancelCellEdit"
+                      @keydown.enter.prevent="saveCellEdit"
+                    />
+                  </span>
                   <span
-                    v-if="row[c] == null"
+                    v-else-if="row[c] == null"
                     class="cell-null"
                     :title="`NULL${cellCopy ? ' · 点击复制' : ''}`"
                     @click="copyCellSmart(row[c])"
@@ -1394,9 +1845,10 @@ async function copyAllTsv() {
                   <span
                     v-else
                     class="cell-val"
-                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled }"
-                    :title="cellCopy ? `点击复制: ${row[c]}` : row[c]"
+                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled, 'cell-editable': isEditableCell(c) }"
+                    :title="isEditableCell(c) ? `双击编辑: ${row[c]}` : (cellCopy ? `点击复制: ${row[c]}` : row[c])"
                     @click="copyCellSmart(row[c])"
+                    @dblclick="startCellEdit(row, c)"
                   >{{ row[c] }}</span>
                 </template>
               </el-table-column>
@@ -1433,6 +1885,13 @@ async function copyAllTsv() {
                 <el-switch v-model="cellCopy" size="small" />
                 <span>{{ cellCopy ? '复制模式' : '选择模式' }}</span>
               </label>
+              <el-button
+                v-if="currentResult.editable && (currentResult.pendingEdits?.length ?? 0) > 0"
+                size="small"
+                type="warning"
+                plain
+                @click="commitEdits"
+              >提交修改 ({{ currentResult.pendingEdits?.length ?? 0 }})</el-button>
               <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
@@ -1486,6 +1945,38 @@ async function copyAllTsv() {
 
   <!-- Flink PreJob 提交/管理弹窗 -->
   <FlinkPreJobDialog v-model="showFlinkPreJob" />
+
+  <!-- EXPLAIN 执行计划面板 -->
+  <el-dialog
+    v-model="showExplain"
+    title="EXPLAIN 执行计划"
+    width="720px"
+    :close-on-click-modal="false"
+    append-to-body
+  >
+    <div v-loading="explainLoading" class="explain-body">
+      <el-alert v-if="explainError" type="error" :title="explainError" show-icon :closable="false" class="explain-error" />
+      <template v-else-if="explainTree">
+        <el-tree
+          :data="[explainTree]"
+          :props="{ label: 'operation', children: 'children' }"
+          default-expand-all
+          :expand-on-click-node="false"
+          class="explain-tree"
+        >
+          <template #default="{ data }">
+            <span class="explain-node">{{ explainNodeLabel(data) }}</span>
+          </template>
+        </el-tree>
+      </template>
+      <template v-else-if="explainTable">
+        <el-table :data="explainTable.rows" border size="small" max-height="420" class="explain-table">
+          <el-table-column v-for="c in explainTable.columns" :key="c" :prop="c" :label="c" min-width="140" />
+        </el-table>
+      </template>
+      <el-empty v-else-if="!explainLoading" description="暂无执行计划" />
+    </div>
+  </el-dialog>
 </template>
 
 <style scoped lang="scss">
@@ -2076,6 +2567,34 @@ async function copyAllTsv() {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-variant-numeric: tabular-nums;
   }
+
+  /* 可编辑单元格(表预览且有主键):悬停提示可双击编辑 */
+  :deep(.cell-editable) {
+    cursor: cell;
+
+    &:hover {
+      background: var(--el-color-warning-light-9);
+    }
+  }
+
+  /* 编辑态输入框(双击进入) */
+  :deep(.cell-edit) {
+    display: inline-flex;
+    width: 100%;
+  }
+
+  .cell-edit-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 2px 6px;
+    font: inherit;
+    font-size: 12px;
+    color: $text;
+    border: 1px solid $primary;
+    border-radius: 4px;
+    outline: none;
+    background: #fff;
+  }
 }
 
 /* 选择模式整行:可选中 */
@@ -2230,5 +2749,52 @@ async function copyAllTsv() {
 .spark-auth-tip .el-icon {
   margin-top: 2px;
   flex-shrink: 0;
+}
+
+/* ── EXPLAIN 面板 ─────────────────────────────────────── */
+.explain-body {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.explain-error {
+  margin-bottom: 0;
+}
+
+.explain-tree {
+  font-size: 12px;
+
+  :deep(.el-tree-node__content) {
+    height: auto;
+    min-height: 28px;
+    padding: 2px 0;
+  }
+}
+
+.explain-node {
+  display: inline-block;
+  padding: 2px 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
+.explain-table {
+  width: 100%;
+}
+
+/* 提交修改确认弹窗中的完整 SQL 预览 */
+.edit-sql-preview {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
 }
 </style>

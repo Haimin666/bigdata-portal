@@ -673,3 +673,51 @@ export async function listFields(db: string, table: string, detail = false): Pro
 export async function getTableDDL(db: string, table: string): Promise<TableDDL> {
   return request<TableDDL>(`/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`)
 }
+
+// ── Schema 元数据补全 / EXPLAIN(经网关 /api/db/schema、/api/db/explain)────────
+
+/** 单表元数据(供 SQL 编辑器补全) */
+export interface DbSchemaTable {
+  name: string
+  comment?: string
+  columns: Array<{ name: string; type?: string }>
+}
+
+/** 数据源全部表+字段(一次性拉取;表数超限时 truncated=true) */
+export interface DbSchema {
+  tables: DbSchemaTable[]
+  truncated?: boolean
+  engine?: string
+}
+
+/** 拉取数据源 schema(表+字段,供编辑器补全;GET /api/db/schema 经网关透传 db-proxy /schema) */
+export async function getSchema(db: string): Promise<DbSchema> {
+  return request<DbSchema>(`/schema?db=${encodeURIComponent(db)}`)
+}
+
+/** EXPLAIN 树节点(root 展开;MySQL/Oracle 字段略有差异) */
+export interface ExplainNode {
+  operation?: string
+  name?: string
+  access_type?: string
+  object_name?: string
+  rows?: number | string
+  filtered?: number | string
+  cost?: number | string
+  extra?: string
+  children?: ExplainNode[]
+}
+
+/** EXPLAIN 响应:tree(结构化执行计划树)或 table(普通 EXPLAIN 行) */
+export type ExplainResult =
+  | { kind: 'tree'; root: ExplainNode | null }
+  | { kind: 'table'; columns?: string[]; rows?: unknown[] }
+
+/** 获取执行计划(只读 SQL;POST /api/db/explain,网关有专用路由) */
+export async function explainSql(params: { db: string; sql: string }): Promise<ExplainResult> {
+  return request<ExplainResult>('/explain', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ db: params.db, sql: params.sql })
+  })
+}

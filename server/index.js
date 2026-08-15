@@ -77,8 +77,9 @@ app.use((req, res, next) => {
 const EXEC_GATES = [
   { re: /^\/api\/spark\//, module: 'dbQuery' }, // SQL/PySpark 执行、解锁、停止
   { re: /^\/api\/flink\//, module: 'dbQuery' }, // Flink 查询/PreJob 提交/停止
-  { re: /^\/api\/dbquery\//, module: 'dbQuery' }, // MySQL/Oracle 查询
+  { re: /^\/api\/dbquery\//, module: 'dbQuery' }, // MySQL/Oracle 查询(/schema /explain 已改走 /api/db/* 透传)
   { re: /^\/api\/db\/jobs/, module: 'dbQuery', onlyWrite: true }, // MySQL/Oracle 异步任务提交/取消(GET 状态查询放行)
+  { re: /^\/api\/db\/(schema|explain)(\/|$)/, module: 'dbQuery' }, // 元数据补全/执行计划(只读,仍需模块与角色门禁)
   { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
   { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
   { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
@@ -742,6 +743,40 @@ app.post('/api/db/jobs', express.json(), async (req, res) => {
     res.json({ code: 0, data: body.data })
   } catch (e) {
     console.error('[db/jobs]', e instanceof Error ? e.message : e)
+    const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+  }
+})
+
+// /explain 为只读执行计划接口,专用路由显式解析并转发 body:
+// PROXY_PATHS 跳过 express.json(避免与透传的 stream 转发冲突),若不在此挂路由级
+// json 解析,POST body 可能不被网关读取,故照 /api/db/jobs 的方式处理。
+app.post('/api/db/explain', express.json(), async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  const sql = String(req.body?.sql || '')
+  const dbName = String(req.body?.db || '').trim()
+  if (!dbName) {
+    return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
+  const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 30000, 60000)
+  try {
+    const r = await fetch(config.dbProxyUrl + '/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
+      body: JSON.stringify({ db: dbName, sql, timeoutMs }),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) {
+      const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      err.status = r.status
+      throw err
+    }
+    res.json({ code: 0, data: body.data })
+  } catch (e) {
+    console.error('[db/explain]', e instanceof Error ? e.message : e)
     const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
     res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
   }
