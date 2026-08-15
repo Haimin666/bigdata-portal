@@ -9,7 +9,7 @@
 | EXEC_GATES（`server/index.js`） | 模块级 | admin/dev/viewer + modules 白名单，拦「执行类操作」 |
 | db-proxy `allowedDbs`（全局白名单） | 库级（人人相同） | `datasources.json` 启动加载，`check_db_allowed` 校验 |
 | 数据源 `readOnly` | 数据源级 | db-proxy 拒绝非查询 SQL，写尝试记审计 |
-| 写解锁 `X-Spark-Token` | 会话级 | 密码解锁后 12h 有效，绑定 username |
+| ~~写解锁 `X-Spark-Token`~~ | 已移除 | 写权限密码验证移除,由库权限矩阵 + 数据源 readOnly 管控 |
 | **db-permissions 矩阵（本模块）** | **用户/角色→库级** | **按调用者区分可访问库，网关层校验** |
 
 设计原则：**权限继续收口在网关**，db-proxy 保持无用户概念的机器代理（`main.py` L78 注释约定）；矩阵只控制「能访问哪些库」，readOnly 覆盖不做（数据源级 readOnly 已覆盖）。

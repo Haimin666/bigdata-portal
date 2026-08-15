@@ -55,12 +55,6 @@ const router = createRouter({
           meta: { adminOnly: true }
         },
         {
-          path: 'db-perms',
-          name: 'dbPerm',
-          component: () => import('@/views/admin/DbPermView.vue'),
-          meta: { adminOnly: true }
-        },
-        {
           path: 'dataleap',
           name: 'dataleap',
           component: () => import('@/views/dataleap/DataLeapView.vue')

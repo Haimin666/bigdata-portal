@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
+import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, sparkAuth, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -41,65 +41,7 @@ const db = ref('')
 const loading = ref(false)
 const error = ref('')
 
-// ── Spark 写权限解锁(类似 Jupyter 登录)───────────────────────
-// sparksql 可执行 INSERT/CREATE/DROP 等写操作,必须先密码解锁拿 token
-const SPARK_TOKEN_KEY = 'bigdata-portal.spark-token'
-const sparkToken = ref(sessionStorage.getItem(SPARK_TOKEN_KEY) || '')
-const showSparkAuth = ref(false)
-const sparkPwd = ref('')
-const sparkAuthLoading = ref(false)
-const sparkUnlocked = computed(() => !!sparkToken.value)
-
-/** 打开解锁弹窗,返回 promise:resolve(token) 或 resolve(null) 取消 */
-function openSparkAuth(): Promise<string | null> {
-  return new Promise((resolve) => {
-    sparkAuthResolve = resolve
-    showSparkAuth.value = true
-  })
-}
-let sparkAuthResolve: ((t: string | null) => void) | null = null
-
-async function submitSparkAuth() {
-  if (!sparkPwd.value) {
-    ElMessage.warning('请输入密码')
-    return
-  }
-  sparkAuthLoading.value = true
-  try {
-    const { token } = await sparkAuth(sparkPwd.value)
-    sparkToken.value = token
-    sessionStorage.setItem(SPARK_TOKEN_KEY, token)
-    sparkPwd.value = ''
-    showSparkAuth.value = false
-    ElMessage.success('写权限已解锁(12 小时内有效)')
-    sparkAuthResolve?.(token)
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
-    sparkAuthResolve?.(null)
-  } finally {
-    sparkAuthLoading.value = false
-    sparkAuthResolve = null
-  }
-}
-
-function cancelSparkAuth() {
-  showSparkAuth.value = false
-  sparkAuthResolve?.(null)
-  sparkAuthResolve = null
-}
-
-/** 弹窗完全关闭(含 ESC):必须 resolve 挂起的 promise,否则 await openSparkAuth() 永久挂起卡死 */
-function onSparkAuthClosed() {
-  sparkAuthResolve?.(null)
-  sparkAuthResolve = null
-}
-
-function lockSparkWrite() {
-  sparkToken.value = ''
-  sessionStorage.removeItem(SPARK_TOKEN_KEY)
-  ElMessage.info('已锁定 Spark 写权限')
-}
-
+// 写权限密码验证已移除(由网关库权限矩阵管控 + 数据源 readOnly 兜底),以下直接执行
 /** 判定 SQL 是否可能为写操作(与后端 server/index.js 的 isSparkWriteSql 保持一致):
  *  只读关键字开头放行;WITH 前缀且无写关键字放行;含分号/其余一律视为写。
  *  引号感知切分(字符串内分号不算多语句),并拦截 SELECT INTO OUTFILE/LOAD_FILE 走私 */
@@ -154,11 +96,10 @@ const currentSparkJobId = ref('')
  *  SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行。 */
 async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
   const needsAuth = kind === 'pyspark' || (kind === 'sql' && isSparkWriteSql(sql))
-  if (needsAuth && !sparkToken.value) {
-    const tk = await openSparkAuth()
-    if (!tk) throw new Error('已取消:写权限未解锁')
+  if (needsAuth) {
+    // 写权限密码验证已移除(网关库权限矩阵管控),直接执行
   }
-  const { jobId } = await submitSparkJob(sql, sparkToken.value || undefined, kind, 7200000)
+  const { jobId } = await submitSparkJob(sql, undefined, kind, 7200000)
   currentSparkJobId.value = jobId
   const deadline = Date.now() + 7200000 // 上限 2 小时
   while (Date.now() < deadline) {
@@ -1099,19 +1040,11 @@ async function commitEdits() {
     /* 取消 */
   }
   if (!confirmed) return
-  // 写操作需要 sparkToken:未解锁先弹密码框(复用现有解锁链路),取消则中止
-  if (!sparkToken.value) {
-    const tk = await openSparkAuth()
-    if (!tk) {
-      ElMessage.warning('已取消:写权限未解锁')
-      return
-    }
-  }
   loading.value = true // 提交期间互斥,防用户同时执行新查询导致 rerunResult 竞态
   try {
     // 逐条执行(网关/db-proxy 单语句语义,不支持分号拼接多语句)
     for (const sql of stmts) {
-      await queryDb(r.db || db.value, sql, sparkToken.value || undefined)
+      await queryDb(r.db || db.value, sql)
     }
     ElMessage.success(`已提交 ${r.pendingEdits.length} 处修改`)
     r.pendingEdits = []
@@ -1313,23 +1246,8 @@ function onInsertFlinkDdl(ddls: string[]) {
 /** Flink 执行:所有 flink 任务都要解锁(与 Spark 共用同一密码/token);
  *  未解锁先弹密码框;token 过期(网关 403)自动重新解锁后重试一次 */
 async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (!sparkToken.value) {
-    const tk = await openSparkAuth()
-    if (!tk) throw new Error('已取消:Flink 任务未解锁')
-  }
-  try {
-    return await queryFlink(sql, flinkMode.value, sparkToken.value || undefined)
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    if (/解锁|token|401|403/i.test(msg)) {
-      sparkToken.value = ''
-      sessionStorage.removeItem(SPARK_TOKEN_KEY)
-      const tk2 = await openSparkAuth()
-      if (!tk2) throw new Error('已取消:Flink 任务未解锁')
-      return queryFlink(sql, flinkMode.value, tk2)
-    }
-    throw e
-  }
+  // 写权限密码验证已移除(网关库权限矩阵管控),直接执行
+  return queryFlink(sql, flinkMode.value)
 }
 
 /** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
@@ -1350,14 +1268,8 @@ const currentDbJobId = ref('')
  *  动机:慢查询/大查询同步挂起会撞公司网关 60s 超时 504。 */
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
   if (!ensureDb()) throw new Error('请先选择数据库')
-  if (isSparkWriteSql(sql) && !sparkToken.value) {
-    const tk = await openSparkAuth()
-    if (!tk) throw new Error('已取消:写操作未解锁')
-  }
-  let jobId = ''
   const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
-    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000, sparkToken.value || undefined)
-    jobId = jid
+    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
     currentDbJobId.value = jid
     const deadline = Date.now() + 3600000 // 上限 1 小时
     while (Date.now() < deadline) {
@@ -1395,19 +1307,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   try {
     return await run()
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    if (/解锁|token|401|403/i.test(msg) && !/已取消|超时/i.test(msg)) {
-      sparkToken.value = ''
-      sessionStorage.removeItem(SPARK_TOKEN_KEY)
-      const tk2 = await openSparkAuth()
-      if (!tk2) throw new Error('已取消:写操作未解锁')
-      try {
-        if (jobId) await cancelDbJob(jobId)
-      } catch {
-        /* 忽略 */
-      }
-      return await run()
-    }
+    // 写权限密码验证已移除,不再有解锁重试;错误直接上抛(库未授权/资源护栏等)
     throw e
   }
 }
@@ -1651,16 +1551,8 @@ onMounted(async () => {
   }
 })
 
-watch(engine, async (val, old) => {
-  // flink 切换即需解锁:未解锁先弹密码框;取消则回退原引擎(不解锁不能使用 flink)
-  if (val === 'flinksql' && !sparkToken.value) {
-    const tk = await openSparkAuth()
-    if (!tk) {
-      ElMessage.warning('Flink 需先解锁才能使用')
-      engine.value = old && old !== 'flinksql' ? old : ''
-      return
-    }
-  }
+watch(engine, async (val) => {
+  // 写权限密码验证已移除,切换引擎不再要求解锁
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
@@ -1749,16 +1641,6 @@ async function copyAllTsv() {
         <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
-      <el-button
-        v-if="engine"
-        class="spark-lock-btn"
-        :type="sparkUnlocked ? 'success' : 'warning'"
-        :icon="sparkUnlocked ? Unlock : Lock"
-        size="small"
-        @click="sparkUnlocked ? lockSparkWrite() : openSparkAuth()"
-      >
-        {{ sparkUnlocked ? '写权限已解锁' : '解锁写权限' }}
-      </el-button>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
@@ -2033,32 +1915,6 @@ async function copyAllTsv() {
       <span class="sb-item">{{ themeMode === 'dark' ? '深色' : '浅色' }}主题</span>
     </div>
   </div>
-
-  <!-- Spark 写权限解锁弹窗(类似 Jupyter 登录) -->
-  <el-dialog
-    v-model="showSparkAuth"
-    title="Spark 写权限验证"
-    width="400px"
-    :close-on-click-modal="false"
-    :close-on-press-escape="false"
-    @closed="onSparkAuthClosed"
-  >
-    <div class="spark-auth-tip">
-      <el-icon color="#e6a23c"><Lock /></el-icon>
-      <span>Spark SQL 支持写操作(INSERT / CREATE / DROP / TRUNCATE 等),仅限技术人员使用。请输入写权限密码解锁。</span>
-    </div>
-    <el-input
-      v-model="sparkPwd"
-      type="password"
-      show-password
-      placeholder="请输入 Spark 写权限密码"
-      @keyup.enter="submitSparkAuth"
-    />
-    <template #footer>
-      <el-button @click="cancelSparkAuth">取消</el-button>
-      <el-button type="primary" :loading="sparkAuthLoading" @click="submitSparkAuth">验证</el-button>
-    </template>
-  </el-dialog>
 
   <!-- Flink 连接器批量建表弹窗 -->
   <FlinkConnectorDialog v-model="showFlinkConn" @insert="onInsertFlinkDdl" />
@@ -3045,25 +2901,6 @@ async function copyAllTsv() {
   word-break: break-all;
   color: var(--el-text-color-regular);
   background: var(--el-fill-color-light);
-}
-
-.spark-lock-btn {
-  margin-left: 8px;
-}
-
-.spark-auth-tip {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 12px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: #606266;
-}
-
-.spark-auth-tip .el-icon {
-  margin-top: 2px;
-  flex-shrink: 0;
 }
 
 /* ── EXPLAIN 面板 ─────────────────────────────────────── */

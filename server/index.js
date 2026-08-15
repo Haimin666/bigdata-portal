@@ -725,6 +725,39 @@ app.use('/api/db', (req, res, next) => {
   }
 })
 
+// 数据源列表(/acl)按用户权限过滤:admin / 无规则 → 全量;有规则 → 仅展示开放的库
+// (库下拉/表目录“不同用户看到不同库”由此接口承载;db-proxy 无用户概念)
+app.get('/api/db/acl', async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  try {
+    const r = await fetch(config.dbProxyUrl + '/acl', {
+      headers: { 'X-DB-Token': config.dbProxyToken || '' },
+      signal: AbortSignal.timeout(8000)
+    })
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+    const data = body.data || {}
+    const datasources = Array.isArray(data.datasources) ? data.datasources : []
+    const user = req?.user || {}
+    if (user.role !== 'admin') {
+      const perms = loadPerms()
+      const username = user.username ?? user.user ?? user.name ?? ''
+      const roles = Array.isArray(user.roles) ? user.roles : user.role ? [user.role] : []
+      const dbs = allowedDbsFor(perms, username, roles)
+      if (dbs != null && !dbs.includes('*')) {
+        const allowed = new Set(dbs)
+        data.datasources = datasources.filter((d) => d && allowed.has(String(d.name || '')))
+      }
+    }
+    res.json({ code: 0, data })
+  } catch (e) {
+    console.error('[db/acl]', e instanceof Error ? e.message : e)
+    res.status(502).json({ code: 502, msg: `数据源列表获取失败: ${e instanceof Error ? e.message : String(e)}` })
+  }
+})
+
 // ── 数据权限矩阵:管理 API(admin only,读写 data/db-permissions.json)────────────
 app.get('/api/db-perms', auth.requireAdmin, (req, res) => {
   res.json({ code: 0, data: loadPerms() })
@@ -769,10 +802,7 @@ app.post('/api/db/jobs', express.json(), async (req, res) => {
     throw e
   }
   if (isSparkWriteSql(sql)) {
-    const tk = req.get('X-Spark-Token')
-    if (!tk || !sparkTokenValid(tk)) {
-      return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入密码(与 Spark 同一密码)' })
-    }
+    // 写权限密码验证已移除(与 /api/dbquery/query 一致):库权限矩阵管控 + 数据源 readOnly 兑底
   }
   // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
   const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 3600000, 7200000)
@@ -1028,22 +1058,9 @@ if (config.dbProxyUrl) {
       if (!sql || !String(sql).trim()) {
         return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
       }
-      // 写语句必须解锁(SQL 引擎);pyspark 为任意 Python 执行,同样必须解锁(信任模式)
-      let writeUnlocked = false
-      if (k === 'sql' && isSparkWriteSql(sql)) {
-        const tk = req.get('X-Spark-Token')
-        if (!tk || !sparkTokenValid(tk, req)) {
-          return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入 Spark 写权限密码' })
-        }
-        writeUnlocked = true
-      }
-      if (k === 'pyspark') {
-        const tk = req.get('X-Spark-Token')
-        if (!tk || !sparkTokenValid(tk, req)) {
-          return res.status(403).json({ code: 403, msg: 'PySpark 为任意代码执行,请先解锁 Spark 写权限' })
-        }
-        writeUnlocked = true
-      }
+      // 写权限密码验证已移除(由网关库权限矩阵管控):SQL 写语句/PySpark 直接执行,
+      // 数据源 readOnly 与 db-proxy 侧资源护栏兑底(写审计保留)。
+      const writeUnlocked = false
       // 超时对齐:前端/门户/db-proxy 统一默认 120s,避免 SQL 卡住时无限等待
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
       const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
@@ -1057,24 +1074,14 @@ if (config.dbProxyUrl) {
 
   // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
   // 写拦截与 /api/spark/query 一致:写语句必须解锁(X-Spark-Token)
-  function sparkWriteAllowed(req) {
-    const tk = req.get('X-Spark-Token')
-    return !!(tk && sparkTokenValid(tk, req))
-  }
-
   app.post('/api/spark/jobs', async (req, res) => {
     try {
       const { sql, code, kind } = req.body || {}
       const k = kind === 'pyspark' ? 'pyspark' : 'sql'
       const body = String(k === 'pyspark' ? code : sql || '')
       if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
-      let writeUnlocked = false
-      if ((k === 'sql' && isSparkWriteSql(body)) || k === 'pyspark') {
-        if (!sparkWriteAllowed(req)) {
-          return res.status(403).json({ code: 403, msg: '写操作/PySpark 需要解锁,请先输入 Spark 写权限密码' })
-        }
-        writeUnlocked = true
-      }
+      // 写权限密码验证已移除(与 /api/spark/query 一致):库权限矩阵 + readOnly 兑底
+      const writeUnlocked = false
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
       const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data })
@@ -1314,10 +1321,8 @@ app.post('/api/dbquery/query', async (req, res) => {
     throw e
   }
   if (isSparkWriteSql(sql)) {
-    const tk = req.get('X-Spark-Token')
-    if (!tk || !sparkTokenValid(tk)) {
-      return res.status(403).json({ code: 403, msg: '写操作需要解锁,请先输入密码(与 Spark 同一密码)' })
-    }
+    // 写权限密码验证已移除:库访问权由上方 checkDbAccess 矩阵管控,
+    // 数据源 readOnly 与 db-proxy 资源护栏兜底(写审计保留)。
   }
   // 超时对齐:统一默认 120s,上限 10 分钟;转发体白名单化,丢弃未知字段(G5)
   const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
