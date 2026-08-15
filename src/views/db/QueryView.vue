@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretRight, Download, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
+import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, Lock, Unlock, VideoPause, Promotion, CopyDocument } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
 import 'codemirror/mode/sql/sql.js'
@@ -545,6 +545,14 @@ async function initEditor() {
         hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
       })
     },
+    'Cmd-Shift-F': () => {
+      formatSql()
+    },
+    'Ctrl-Shift-F': () => {
+      formatSql()
+    },
+    'Cmd-/': (c: CodeMirror.Editor) => commentSelection(c),
+    'Ctrl-/': (c: CodeMirror.Editor) => commentSelection(c),
     Tab: (c: CodeMirror.Editor) => {
       // 补全浮层打开时:交给 show-hint 选词(不要缩进)
       if (c.state.completionActive) return
@@ -852,25 +860,207 @@ interface QueryResultItem {
   engine?: string // 方言: 'oracle' | 'mysql'(onOpenTable 设置)
   pkCols?: string[] // 主键列名(异步 listFields(detail) 取 key==='PRI')
   pendingEdits?: PendingEdit[] // 待提交的单元格修改(同 row+col 去重)
+  running?: boolean // 执行中(结果 tab 状态点/底部状态栏)
 }
 
 const results = ref<QueryResultItem[]>([])
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
-// 结果表格翻页(默认 15 条/页)
-const pageSize = ref(15)
-const pageCurrent = ref(1)
-const pagedRows = computed(() => {
-  const r = currentResult.value
-  if (!r) return []
-  const start = (pageCurrent.value - 1) * pageSize.value
-  return r.rows.slice(start, start + pageSize.value)
-})
 function selectPane(pane: number) {
   activePane.value = pane
-  pageCurrent.value = 1
 }
+
+// ── 结果表格虚拟滚动(el-table-v2) ─────────────────────────────
+interface V2Col {
+  key: string
+  dataKey: string
+  title: string
+  width: number
+  minWidth?: number
+  align?: 'left' | 'right' | 'center'
+  fixed?: 'left' | 'right'
+  headerRenderer?: (p: { column: V2Col }) => ReturnType<typeof h>
+  cellRenderer?: (p: { rowData: Record<string, unknown>; rowIndex: number }) => ReturnType<typeof h>
+}
+const tableWrapRef = ref<HTMLElement>()
+const tableV2Width = ref(600)
+const tableV2Height = ref(300)
+const v2Sort = ref<{ key: string; order: 'asc' | 'desc' } | null>(null)
+const COLW_KEY = 'db-query-colw'
+/** 展示行:按当前排序输出(行对象引用不变,行内编辑 indexOf(row) 定位真实索引不受排序影响) */
+const displayRows = computed(() => {
+  const r = currentResult.value
+  const rows = r?.rows ?? []
+  if (!r || !v2Sort.value) return rows
+  const { key, order } = v2Sort.value
+  const arr = [...rows].sort((a, b) => {
+    const va = a[key]
+    const vb = b[key]
+    if (va == null && vb == null) return 0
+    if (va == null) return 1
+    if (vb == null) return -1
+    const na = Number(va)
+    const nb = Number(vb)
+    if (!Number.isNaN(na) && !Number.isNaN(nb) && String(va).trim() !== '' && String(vb).trim() !== '') return na - nb
+    return String(va) < String(vb) ? -1 : String(va) > String(vb) ? 1 : 0
+  })
+  return order === 'desc' ? arr.reverse() : arr
+})
+function toggleSort(col: string) {
+  if (v2Sort.value?.key !== col) v2Sort.value = { key: col, order: 'asc' }
+  else if (v2Sort.value.order === 'asc') v2Sort.value = { key: col, order: 'desc' }
+  else v2Sort.value = null
+}
+/** 表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
+function colSig(): string {
+  const r = currentResult.value
+  if (!r) return 'default'
+  const base = `${r.db || ''}.${r.table || ''}`
+  return base !== '.' ? base : (r.sql || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'adhoc'
+}
+/** 表格签名哈希:避免 SQL fallback 与列名含点导致 localStorage 键碰撞 */
+function colSigKey(): string {
+  const sig = colSig()
+  let h = 0
+  for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) >>> 0
+  return `${h.toString(36)}.${sig.length}`
+}
+function colWidth(c: string): number {
+  const n = parseInt(localStorage.getItem(`${COLW_KEY}.${colSigKey()}.${encodeURIComponent(c)}`) || '', 10)
+  return n > 40 ? n : 160
+}
+function saveColWidth(c: string, w: number) {
+  localStorage.setItem(`${COLW_KEY}.${colSigKey()}.${encodeURIComponent(c)}`, String(Math.round(w)))
+}
+const colWidths = reactive<Record<string, number>>({})
+/** 表头列宽拖拽(手柄在最右侧;拖拽中更新 colWidths 触发 v2Cols 重建) */
+function startColResize(e: MouseEvent, c: string) {
+  e.preventDefault()
+  e.stopPropagation()
+  const startX = e.clientX
+  const startW = colWidth(c)
+  const onMove = (ev: MouseEvent) => {
+    colWidths[c] = Math.max(60, startW + (ev.clientX - startX))
+  }
+  const onUp = () => {
+    const w = colWidths[c]
+    if (w) saveColWidth(c, w)
+    delete colWidths[c]
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+function renderV2Header(_p: { column: V2Col }, c: string) {
+  const sort = v2Sort.value
+  const icon = sort?.key === c ? (sort.order === 'asc' ? '▲' : '▼') : '↕'
+  return h('div', { class: 'v2-th' }, [
+    h('span', { class: 'col-header', title: `点击复制列名: ${c}`, onClick: (e: MouseEvent) => { e.stopPropagation(); void copyCellSmart(c) } }, c),
+    h('span', { class: 'v2-sort-btn', title: '排序', onClick: (e: MouseEvent) => { e.stopPropagation(); toggleSort(c) } }, icon),
+    h('span', { class: 'v2-resizer', title: '拖拽调整列宽', onMousedown: (e: MouseEvent) => startColResize(e, c) })
+  ])
+}
+function renderV2Cell(p: { rowData: Record<string, unknown> }, c: string) {
+  const row = p.rowData
+  const v = row[c]
+  if (editingCell.value && editingCell.value.row === row && editingCell.value.col === c) {
+    return h('span', { class: 'cell-edit' }, [
+      h('input', {
+        ref: (el: unknown) => { if (el) cellEditInputRef.value = el as HTMLInputElement },
+        class: 'cell-edit-input',
+        spellcheck: false,
+        value: editingCell.value.val,
+        onInput: () => onEditInput(),
+        onBlur: () => saveCellEdit(),
+        onKeydown: (e: KeyboardEvent) => {
+          if (e.key === 'Escape') { e.preventDefault(); cancelCellEdit() }
+          if (e.key === 'Enter') { e.preventDefault(); saveCellEdit() }
+        }
+      })
+    ])
+  }
+  if (v == null) {
+    return h('span', { class: 'cell-null', title: `NULL${cellCopy.value ? ' · 点击复制' : ''}`, onClick: () => copyCellSmart(v) }, 'NULL')
+  }
+  if (typeof v === 'object') {
+    return h('span', { class: 'cell-json', title: '点击查看完整 JSON', onClick: (e: MouseEvent) => { e.stopPropagation(); void showJson(v) } }, 'JSON')
+  }
+  return h(
+    'span',
+    {
+      class: {
+        'cell-val': true,
+        'cell-num': isNumeric(v),
+        'cell-select': cellCopyDisabled.value,
+        'cell-editable': isEditableCell(c)
+      },
+      title: isEditableCell(c) ? `双击编辑: ${String(v)}` : cellCopy.value ? `点击复制: ${String(v)}` : String(v),
+      onClick: () => copyCellSmart(v),
+      onDblclick: () => startCellEdit(row, c)
+    },
+    String(v)
+  )
+}
+function commentSelection(c: CodeMirror.Editor) {
+  const sel = c.getSelection()
+  c.replaceSelection(`-- ${sel}`, 'end')
+}
+
+/** JSON 复合值折叠查看(弹窗展示格式化文本) */
+async function showJson(v: unknown) {
+  const text = JSON.stringify(v, null, 2) ?? String(v)
+  await ElMessageBox.alert(`<pre class="dbq-json">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`, '单元格值 (JSON)', {
+    dangerouslyUseHTMLString: true,
+    customClass: 'dbq-json-dialog'
+  }).catch(() => {})
+}
+/** 结果 tab 显示名:SQL 摘要(截断 26 字符),无 SQL 则 queryN */
+function sqlSummary(r: QueryResultItem, idx: number): string {
+  const s = (r.sql || '').replace(/\s+/g, ' ').trim()
+  return s ? (s.length > 26 ? `${s.slice(0, 26)}…` : s) : `query${idx + 1}`
+}
+const engineLabel = computed(() => {
+  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
+  return m[engine.value] || engine.value || '—'
+})
+const v2Cols = computed<V2Col[]>(() => {
+  const r = currentResult.value
+  if (!r) return []
+  const cols: V2Col[] = [
+    { key: '__idx__', dataKey: '__idx__', title: '#', width: 56, align: 'center', fixed: 'left', cellRenderer: ({ rowIndex }) => h('span', { class: 'cell-idx' }, String(rowIndex + 1)) }
+  ]
+  for (const c of r.columns) {
+    cols.push({
+      key: c,
+      dataKey: c,
+      title: c,
+      width: colWidths[c] ?? colWidth(c),
+      minWidth: 80,
+      align: colIsNumeric(c) ? 'right' : 'left',
+      headerRenderer: (p) => renderV2Header(p, c),
+      cellRenderer: (p) => renderV2Cell(p, c)
+    })
+  }
+  return cols
+})
+/** 结果表容器尺寸观察(虚拟滚动需要显式宽高;表格元素后挂载,用 watch 在出现时建立) */
+let wrapObs: ResizeObserver | null = null
+watch(tableWrapRef, (el) => {
+  wrapObs?.disconnect()
+  wrapObs = null
+  if (!el) return
+  wrapObs = new ResizeObserver(() => {
+    tableV2Width.value = el.clientWidth
+    tableV2Height.value = el.clientHeight
+  })
+  wrapObs.observe(el)
+})
+onUnmounted(() => {
+  wrapObs?.disconnect()
+  wrapObs = null
+})
 
 // ── 结果单元格行内编辑(仅表预览结果 editable)──────────────────
 // editingCell:当前正在编辑的单元格(row 为 rows 中真实行对象引用,rowIdx 为 indexOf 结果)
@@ -1074,6 +1264,7 @@ async function rerunResult(r: QueryResultItem) {
           costMs: 0,
           truncated: false,
           pendingEdits: [],
+          running: false,
           error: e instanceof Error ? e.message : String(e)
         }
         activePane.value = idx + 1
@@ -1082,7 +1273,7 @@ async function rerunResult(r: QueryResultItem) {
     }
     if (seq !== runSeq) return
     // 保留编辑元数据,清空待提交修改
-    results.value[idx] = { ...results.value[idx], sql: r.sql, ...res, pendingEdits: [] }
+    results.value[idx] = { ...results.value[idx], sql: r.sql, ...res, pendingEdits: [], running: false }
     if (seq === runSeq) activePane.value = idx + 1
   } finally {
     db.value = savedDb
@@ -1359,7 +1550,8 @@ async function execOne(sql: string, index: number, seq: number): Promise<void> {
     results.value[index] = {
       ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
       sql,
-      ...r
+      ...r,
+      running: false
     }
   } catch (e) {
     if (seq !== runSeq) return
@@ -1371,6 +1563,7 @@ async function execOne(sql: string, index: number, seq: number): Promise<void> {
       rows: [],
       costMs: 0,
       truncated: false,
+      running: false,
       error: e instanceof Error ? e.message : String(e)
     }
   } finally {
@@ -1427,8 +1620,8 @@ async function execSegments(segs: string[], seq: number) {
     // 旧结果若是表预览(可编辑),保留编辑元数据(重查后 pendingEdits 清空)
     const prev = results.value[i]
     return prev?.editable
-      ? { sql, columns: [], rows: [], costMs: 0, truncated: false, editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] }
-      : { sql, columns: [], rows: [], costMs: 0, truncated: false }
+      ? { sql, columns: [], rows: [], costMs: 0, truncated: false, editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[], running: true }
+      : { sql, columns: [], rows: [], costMs: 0, truncated: false, running: true }
   })
   for (let i = 0; i < segs.length; i++) {
     if (batchCancelled) break
@@ -1461,7 +1654,7 @@ async function runQuery() {
     loading.value = true
     error.value = ''
     try {
-      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false }]
+      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true }]
       await execOne(target, 0, seq)
       if (seq === runSeq) activePane.value = 1
     } finally {
@@ -1599,9 +1792,9 @@ function isNumeric(val: unknown): boolean {
   return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
 }
 
-/** 某列是否数值列(按该页首行判定,用于表头/单元格对齐) */
+/** 某列是否数值列(按结果集首行判定,用于表头/单元格对齐) */
 function colIsNumeric(c: string): boolean {
-  const row = pagedRows.value[0]
+  const row = currentResult.value?.rows[0]
   return !!(row && row[c] != null && isNumeric(row[c]))
 }
 
@@ -1626,15 +1819,6 @@ function rowsToTsv(rows: Record<string, unknown>[], cols: string[]): string {
   const head = cols.map(esc).join('\t')
   const body = rows.map((row) => cols.map((c) => esc(row[c])).join('\t')).join('\n')
   return head + '\n' + body
-}
-
-/** 复制当前分页 */
-async function copyPageTsv() {
-  const r = currentResult.value
-  if (!r) return
-  const ok = await copyText(rowsToTsv(pagedRows.value, r.columns))
-  if (ok) ElMessage.success('已复制当前页(TSV)')
-  else ElMessage.error('复制失败,请手动复制')
 }
 
 /** 复制全量结果(忽略分页;大结果集注意体积) */
@@ -1775,9 +1959,12 @@ async function copyAllTsv() {
           :key="idx"
           class="result-tab"
           :class="{ active: activePane === idx + 1 }"
+          :title="sqlSummary(r, idx)"
           @click="selectPane(idx + 1)"
         >
-          <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
+          <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
+          <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
+          <span class="tab-name" :class="{ err: r.error }">{{ sqlSummary(r, idx) }}</span>
           <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
             <el-icon><Download /></el-icon>
           </span>
@@ -1802,69 +1989,20 @@ async function copyAllTsv() {
         <template v-else-if="currentResult">
           <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
           <div v-else class="result-card">
-            <div v-loading="loading" class="result-table-wrap">
-              <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''">
-              <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
-              <el-table-column
-                v-for="c in currentResult.columns"
-                :key="c"
-                :prop="c"
-                :label="c"
-                min-width="140"
-                sortable
-                :align="colIsNumeric(c) ? 'right' : 'left'"
-                show-overflow-tooltip
-              >
-                <!-- 表头:点击列名复制列名(.stop 不触发排序);排序只点最右侧排序箭头触发 -->
-                <template #header>
-                  <span
-                    class="col-header"
-                    :title="`点击复制列名: ${c}`"
-                    @click.stop="copyCellSmart(c)"
-                  >{{ c }}</span>
-                </template>
-                <template #default="{ row }">
-                  <span v-if="editingCell && editingCell.row === row && editingCell.col === c" class="cell-edit">
-                    <input
-                      ref="cellEditInputRef"
-                      :value="editingCell.val"
-                      class="cell-edit-input"
-                      spellcheck="false"
-                      @input="onEditInput"
-                      @blur="saveCellEdit"
-                      @keydown.esc.prevent="cancelCellEdit"
-                      @keydown.enter.prevent="saveCellEdit"
-                    />
-                  </span>
-                  <span
-                    v-else-if="row[c] == null"
-                    class="cell-null"
-                    :title="`NULL${cellCopy ? ' · 点击复制' : ''}`"
-                    @click="copyCellSmart(row[c])"
-                  >NULL</span>
-                  <span
-                    v-else
-                    class="cell-val"
-                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled, 'cell-editable': isEditableCell(c) }"
-                    :title="isEditableCell(c) ? `双击编辑: ${row[c]}` : (cellCopy ? `点击复制: ${row[c]}` : row[c])"
-                    @click="copyCellSmart(row[c])"
-                    @dblclick="startCellEdit(row, c)"
-                  >{{ row[c] }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
-          <!-- 翻页(紧贴数据集下方) -->
-          <el-pagination
-            v-if="currentResult.rows.length > pageSize"
-            v-model:current-page="pageCurrent"
-            v-model:page-size="pageSize"
-            class="result-pagination"
-            :page-sizes="[15, 50, 100, 200]"
-            :total="currentResult.rows.length"
-            layout="total, sizes, prev, pager, next"
-            small
-          />
+            <div v-loading="loading" ref="tableWrapRef" class="result-table-wrap">
+              <el-table-v2
+                v-if="currentResult.rows.length"
+                :columns="v2Cols"
+                :data="displayRows"
+                :width="tableV2Width"
+                :height="tableV2Height"
+                :row-height="32"
+                :row-class="() => (cellCopyDisabled ? 'row-selectable' : '')"
+                :scrollbar-always-on="true"
+                class="result-table"
+              />
+              <div v-else class="empty-table">无数据</div>
+            </div>
           <!-- 底部信息条:统计 + 复制 + 选择模式(最底部) -->
           <div class="result-toolbar">
             <span class="stats">
@@ -1894,11 +2032,10 @@ async function copyAllTsv() {
               >提交修改 ({{ currentResult.pendingEdits?.length ?? 0 }})</el-button>
               <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
-              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
             </span>
           </div>
-            </div>
+          </div>
         </template>
       </div>
     </div>
@@ -1908,6 +2045,22 @@ async function copyAllTsv() {
       <el-empty description="选择数据库,编写 SQL 后执行(Ctrl/Cmd + Enter)" />
     </div>
       </div>
+    </div>
+
+    <!-- 底部全局状态栏(DataGrip 式):引擎/库/结果统计/主题 -->
+    <div class="statusbar">
+      <span class="sb-item"><span class="sb-label">引擎</span>{{ engineLabel }}</span>
+      <span class="sb-item"><span class="sb-label">库</span>{{ db || '—' }}</span>
+      <template v-if="currentResult && !currentResult.error && !currentResult.jobId">
+        <span class="sb-item sb-stats">
+          {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · {{ currentResult.costMs }}ms
+          <span v-if="currentResult.truncated" class="sb-trunc">· 已截断</span>
+        </span>
+        <span v-if="currentResult.running" class="sb-item sb-running"><el-icon class="tab-spin"><Loading /></el-icon> 执行中…</span>
+      </template>
+      <span v-else-if="loading" class="sb-item sb-running"><el-icon class="tab-spin"><Loading /></el-icon> 执行中…</span>
+      <span class="sb-spacer" />
+      <span class="sb-item">{{ themeMode === 'dark' ? '深色' : '浅色' }}主题</span>
     </div>
   </div>
 
@@ -2686,6 +2839,201 @@ async function copyAllTsv() {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ── 结果表 el-table-v2 虚拟滚动适配 ─────────────────────── */
+.result-table {
+  :deep(.el-table-v2__header-row) {
+    background: var(--el-fill-color-light);
+    th {
+      color: var(--el-text-color-primary);
+      font-weight: 600;
+      font-size: 12px;
+    }
+  }
+
+  :deep(.el-table-v2__row) {
+    height: 32px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  :deep(.el-table-v2__cell) {
+    padding: 0 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 自定义表头:列名复制 + 排序按钮 + 列宽拖拽手柄 */
+  :deep(.v2-th) {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+
+    .col-header {
+      display: inline-flex;
+      align-items: center;
+      cursor: copy;
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+
+      &:hover {
+        color: $primary;
+        text-decoration: underline dotted;
+      }
+    }
+
+    .v2-sort-btn {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: $muted;
+      cursor: pointer;
+      user-select: none;
+
+      &:hover {
+        color: $primary;
+      }
+    }
+
+    .v2-resizer {
+      flex-shrink: 0;
+      width: 5px;
+      height: 16px;
+      cursor: col-resize;
+      border-right: 2px solid transparent;
+
+      &:hover,
+      &:active {
+        border-right-color: $primary;
+      }
+    }
+  }
+
+  /* JSON 复合值折叠标签 */
+  :deep(.cell-json) {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 16px;
+    color: #d97706;
+    background: rgba(217, 119, 6, 0.12);
+    cursor: pointer;
+    user-select: none;
+
+    &:hover {
+      background: rgba(217, 119, 6, 0.22);
+    }
+  }
+
+  /* 序号列 */
+  :deep(.cell-idx) {
+    color: $muted;
+    user-select: none;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.empty-table {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: $muted;
+  font-size: 12px;
+}
+
+/* ── 结果 tab 运行状态点 ─────────────────────────────────── */
+.tab-state {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &.tab-ok {
+    background: #67c23a;
+  }
+
+  &.tab-err {
+    background: #f56c6c;
+  }
+
+  &.tab-trunc {
+    background: #e6a23c;
+  }
+}
+
+.tab-spin {
+  animation: dbq-spin 1s linear infinite;
+  color: $primary;
+}
+
+@keyframes dbq-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 底部全局状态栏(DataGrip 式) ─────────────────────────── */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: $muted;
+  background: $panel;
+  border-top: 1px solid $border;
+  user-select: none;
+
+  .sb-label {
+    color: $muted;
+    margin-right: 4px;
+  }
+
+  .sb-stats {
+    color: $text;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sb-trunc {
+    color: #e6a23c;
+  }
+
+  .sb-running {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: $primary;
+  }
+
+  .sb-spacer {
+    flex: 1;
+  }
+}
+
+/* JSON 单元格值弹窗 */
+.dbq-json-dialog .dbq-json {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  font-family: var(--el-font-family-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
 }
 
 /* Spark 引擎日志透传面板 */
