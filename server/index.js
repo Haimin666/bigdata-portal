@@ -16,6 +16,7 @@ import {
   prejobSubmit, prejobJobs, prejobStatus, prejobLogs, prejobCancel, prejobConfig
 } from './flink-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { loadPerms, savePerms, checkDbAccess } from './db-permissions.js'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
 // (本网关共 7 个代理实例),Node 24 默认 maxListeners=10 会触发 MaxListenersExceededWarning,这里放宽。
@@ -52,6 +53,7 @@ const auth = setupAuth(app, config)
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/login', '/api/dataleap',
+  '/api/assistant',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
 ]
@@ -82,6 +84,7 @@ const EXEC_GATES = [
   { re: /^\/api\/db\/(schema|explain)(\/|$)/, module: 'dbQuery' }, // 元数据补全/执行计划(只读,仍需模块与角色门禁)
   { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
   { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
+  { re: /^\/api\/assistant\/projects/, module: 'assistant', onlyWrite: true }, // 项目/文件/目录/上传/会话绑定(POST/PUT/PATCH/DELETE;GET 只读放行)
   { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
 ]
 app.use((req, res, next) => {
@@ -173,28 +176,21 @@ app.post('/api/assistant/projects', express.json(), (req, res) => {
     res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
   }
 })
-app.delete('/api/assistant/projects/:id', (req, res) => res.json(assistantProjects.remove(req.params.id)))
-app.get('/api/assistant/projects/:id/files', (req, res) => {
+// 统一错误包装:模块方法同步抛错 → {code, msg} JSON(Express 默认会返回 HTML 500)
+const wrap = (fn) => (req, res) => {
   try {
-    res.json(assistantProjects.listFiles(req.params.id, req.query.rel || ''))
+    res.json(fn(req))
   } catch (e) {
     res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
   }
-})
-app.post('/api/assistant/projects/:id/dir', express.json(), (req, res) => {
-  try {
-    res.json(assistantProjects.mkdir(req.params.id, req.body?.rel || '', req.body?.name || ''))
-  } catch (e) {
-    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
-  }
-})
-app.post('/api/assistant/projects/:id/file', express.json(), (req, res) => {
-  try {
-    res.json(assistantProjects.createFile(req.params.id, req.body?.rel || '', req.body?.name || '', req.body?.content))
-  } catch (e) {
-    res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
-  }
-})
+}
+app.delete('/api/assistant/projects/:id', wrap((req) => assistantProjects.remove(req.params.id)))
+app.get('/api/assistant/projects/:id/files', wrap((req) => assistantProjects.listFiles(req.params.id, req.query.rel || '')))
+app.get('/api/assistant/projects/:id/file', wrap((req) => assistantProjects.readFile(req.params.id, req.query.rel || '')))
+app.delete('/api/assistant/projects/:id/file', wrap((req) => assistantProjects.removeFile(req.params.id, req.query.rel || '')))
+app.patch('/api/assistant/projects/:id/file', express.json(), wrap((req) => assistantProjects.renameFile(req.params.id, req.body?.rel || '', req.body?.name, req.body?.newName)))
+app.post('/api/assistant/projects/:id/dir', express.json(), wrap((req) => assistantProjects.mkdir(req.params.id, req.body?.rel || '', req.body?.name || '')))
+app.post('/api/assistant/projects/:id/file', express.json(), wrap((req) => assistantProjects.createFile(req.params.id, req.body?.rel || '', req.body?.name || '', req.body?.content)))
 app.post('/api/assistant/projects/:id/upload', express.json({ limit: '20mb' }), (req, res) => {
   try {
     res.json(assistantProjects.upload(req.params.id, req.body?.name, req.body?.contentBase64))
@@ -710,6 +706,44 @@ app.get('/api/config/modules', (req, res) => {
 // MySQL/Oracle 异步任务提交:与 /api/dbquery/query 同防线 —— 写 SQL 必须 X-Spark-Token 解锁。
 // 该路径落在 PROXY_PATHS('/api/db/')内,全局 express.json 被跳过,此处路由级挂载 json 解析。
 // 必须在 dbProxy 透传中间件之前注册,否则被 createProxyMiddleware 直接转发(绕过写检测)。
+
+// ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
+// 仅拦截 GET + query.db 且路径命中上述元数据接口,其余(POST explain/jobs 提交、
+// GET dbs/acl/jobs/query/health 等)一律 next() 放行。
+// 注意:app.use('/api/db', ...) 内 req.path 已去掉 /api/db 前缀(与下方透传层一致)。
+app.use('/api/db', (req, res, next) => {
+  if (req.method !== 'GET' || !req.query.db) return next()
+  if (!/^\/(tables|fields|ddl|schema)(\/|$)/i.test(req.path)) return next()
+  try {
+    checkDbAccess(req, String(req.query.db))
+    next()
+  } catch (e) {
+    if (e?.statusCode === 403) {
+      return res.status(403).json({ code: 403, msg: e.message })
+    }
+    next(e)
+  }
+})
+
+// ── 数据权限矩阵:管理 API(admin only,读写 data/db-permissions.json)────────────
+app.get('/api/db-perms', auth.requireAdmin, (req, res) => {
+  res.json({ code: 0, data: loadPerms() })
+})
+
+app.put('/api/db-perms', auth.requireAdmin, express.json(), (req, res) => {
+  const { userRules, roleRules } = req.body || {}
+  if (!Array.isArray(userRules) || !Array.isArray(roleRules)) {
+    return res.status(400).json({ code: 400, msg: 'userRules 与 roleRules 必须为数组' })
+  }
+  try {
+    savePerms({ userRules, roleRules })
+    res.json({ code: 0, msg: '已保存' })
+  } catch (e) {
+    console.error('[db-perms] 保存失败', e instanceof Error ? e.message : e)
+    res.status(500).json({ code: 500, msg: `规则保存失败: ${e instanceof Error ? e.message : String(e)}` })
+  }
+})
+
 app.post('/api/db/jobs', express.json(), async (req, res) => {
   if (!config.dbProxyUrl) {
     return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
@@ -718,6 +752,15 @@ app.post('/api/db/jobs', express.json(), async (req, res) => {
   const dbName = String(req.body?.db || '').trim()
   if (!dbName) {
     return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
+  // 数据权限矩阵:按用户/角色校验库访问权(POST 提交时;GET 状态查询由透传层另行处理)
+  try {
+    checkDbAccess(req, dbName)
+  } catch (e) {
+    if (e?.statusCode === 403) {
+      return res.status(403).json({ code: 403, msg: e.message })
+    }
+    throw e
   }
   if (isSparkWriteSql(sql)) {
     const tk = req.get('X-Spark-Token')
@@ -759,6 +802,15 @@ app.post('/api/db/explain', express.json(), async (req, res) => {
   const dbName = String(req.body?.db || '').trim()
   if (!dbName) {
     return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
+  // 数据权限矩阵:按用户/角色校验库访问权(explain 为只读计划,仍需库级授权)
+  try {
+    checkDbAccess(req, dbName)
+  } catch (e) {
+    if (e?.statusCode === 403) {
+      return res.status(403).json({ code: 403, msg: e.message })
+    }
+    throw e
   }
   const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 30000, 60000)
   try {
@@ -1245,6 +1297,15 @@ app.post('/api/dbquery/query', async (req, res) => {
   if (!dbName) {
     // 空 db 直接清晰报错,避免转发后得到 db-proxy 隐晦的 "database '' not in ALLOWED_DBS"
     return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+  }
+  // 数据权限矩阵:按用户/角色校验库访问权(优先于写解锁,权限优先于操作放行)
+  try {
+    checkDbAccess(req, dbName)
+  } catch (e) {
+    if (e?.statusCode === 403) {
+      return res.status(403).json({ code: 403, msg: e.message })
+    }
+    throw e
   }
   if (isSparkWriteSql(sql)) {
     const tk = req.get('X-Spark-Token')

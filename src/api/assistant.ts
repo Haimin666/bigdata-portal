@@ -39,7 +39,11 @@ function genId(): string {
 }
 
 async function j(res: Response): Promise<any> {
-  if (!res.ok) throw new Error(`assistant api ${res.status}`)
+  if (!res.ok) {
+    // 透出后端友好错误信息(如「文件已存在」「项目已存在」),失败可读
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.msg || `assistant api ${res.status}`)
+  }
   return res.json().catch(() => ({}))
 }
 
@@ -67,39 +71,45 @@ export async function listSessions(): Promise<AssistantSession[]> {
   return list.sort((a, b) => Number(b.current) - Number(a.current))
 }
 
-/** 新建会话:通过 /submit /new 让服务端开新会话,返回新 current 会话 */
+/** 新建会话:通过 /submit /new 让服务端开新会话,轮询等新 current 会话出现(最多 3s) */
 export async function createSession(): Promise<AssistantSession> {
-  await fetch('/api/assistant/submit', {
+  const before = await listSessions()
+  const beforeIds = new Set(before.map((s) => s.id))
+  const res = await fetch('/api/assistant/submit', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ input: '/new' })
   })
-  const list = await listSessions()
-  const cur = list.find((s) => s.current)
-  if (cur) return cur
-  // 服务端没立即可见新会话时,等一轮刷新
-  await new Promise((r) => setTimeout(r, 500))
-  const again = await listSessions()
-  return again.find((s) => s.current) ?? { id: genId(), title: '新会话', createdAt: Date.now(), updatedAt: Date.now() }
+  if (!res.ok) throw new Error(`新建会话失败(${res.status})`)
+  // 轮询等待新 current 会话(8787 异步落盘,可能延迟几百 ms)
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 500))
+    const list = await listSessions()
+    const cur = list.find((s) => s.current && !beforeIds.has(s.id))
+    if (cur) return cur
+  }
+  throw new Error('新建会话超时,请确认开发助手服务(8787)正常')
 }
 
 export async function deleteSession(id: string, name?: string): Promise<void> {
-  await fetch('/api/assistant/delete-session', {
+  const res = await fetch('/api/assistant/delete-session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name || id })
   })
+  if (!res.ok) throw new Error(`删除会话失败(${res.status})`)
 }
 
 export async function listMessages(sessionId: string): Promise<ChatMessage[]> {
-  // 先切换会话,再拉历史
-  await fetch('/api/assistant/resume', {
+  // 先切换会话,再拉历史;resume 失败直接抛错,避免拉到错误会话的历史
+  const r = await fetch('/api/assistant/resume', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: sessionId })
   })
+  if (!r.ok) throw new Error(`切换会话失败(${r.status})`)
   const data = await j(await fetch('/api/assistant/history'))
-  const msgs: ChatMessage[] = Array.isArray(data) ? [] : []
+  const msgs: ChatMessage[] = []
   if (Array.isArray(data)) {
     for (const m of data) {
       if (m.role === 'system') continue
@@ -171,40 +181,6 @@ export async function getBranches(): Promise<{ tree?: string; branches: BranchIn
   return { tree: data?.tree, branches: list }
 }
 
-export interface ModelInfo {
-  ref: string
-  provider?: string
-  model?: string
-  active?: boolean
-}
-
-export async function getModels(): Promise<{ current?: string; models: ModelInfo[] }> {
-  const data = await j(await fetch('/api/assistant/models'))
-  return {
-    current: data?.current,
-    models: Array.isArray(data?.models)
-      ? data.models.map((m: any) => ({ ref: m.ref, provider: m.provider, model: m.model, active: !!m.active }))
-      : []
-  }
-}
-
-export interface AssistantStatus {
-  label?: string
-  cwd?: string
-  used?: number
-  window?: number
-  cacheHit?: number
-  cacheMiss?: number
-  running?: boolean
-  plan?: boolean
-  balance?: any
-  lastUsage?: any
-}
-
-export async function getStatus(): Promise<AssistantStatus> {
-  return j(await fetch('/api/assistant/status'))
-}
-
 // ── 项目制(A+B:门户项目分组 + workspace 目录 + 指令注入)──
 export interface AssistantProject {
   id: string
@@ -233,7 +209,8 @@ export async function createProject(name: string): Promise<AssistantProject> {
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  await fetch(`/api/assistant/projects/${id}`, { method: 'DELETE' })
+  const res = await fetch(`/api/assistant/projects/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`删除项目失败(${res.status})`)
 }
 
 /** 项目文件条目 */
@@ -287,11 +264,40 @@ export async function uploadToProject(
 
 /** 会话归属项目(projectId 空 = 解绑) */
 export async function bindSessionProject(sessionId: string, projectId: string | null): Promise<void> {
-  await fetch('/api/assistant/projects/session', {
+  const res = await fetch('/api/assistant/projects/session', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, projectId })
   })
+  if (!res.ok) throw new Error(`绑定项目失败(${res.status})`)
+}
+
+/** 读取项目文件内容(文本;二进制返回 {binary:true,size}) */
+export async function readProjectFile(projectId: string, rel: string): Promise<{ binary: boolean; size: number; content?: string }> {
+  const body = await j(await fetch(`/api/assistant/projects/${projectId}/file?rel=${encodeURIComponent(rel)}`))
+  return body?.data ?? { binary: false, size: 0, content: '' }
+}
+
+/** 删除项目文件/空目录 */
+export async function deleteProjectFile(projectId: string, rel: string): Promise<void> {
+  const res = await fetch(`/api/assistant/projects/${projectId}/file?rel=${encodeURIComponent(rel)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.msg || `删除失败(${res.status})`)
+  }
+}
+
+/** 重命名/移动项目文件 */
+export async function renameProjectFile(projectId: string, rel: string, name: string, newName: string): Promise<void> {
+  const res = await fetch(`/api/assistant/projects/${projectId}/file`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rel, name, newName })
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.msg || `重命名失败(${res.status})`)
+  }
 }
 
 // ── SSE 事件流(全局广播,一个连接驱动当前会话渲染)─────────

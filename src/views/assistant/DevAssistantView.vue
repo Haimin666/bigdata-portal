@@ -225,16 +225,25 @@
         </div>
       </div>
       <div class="da-files-list">
-        <div v-for="f in fileEntries" :key="f.path" class="da-file-row" :class="{ 'da-file-row--dir': f.type === 'dir' }" @click="f.type === 'dir' && (fileCurPath = f.path, reloadFiles())">
+        <div v-for="f in fileEntries" :key="f.path" class="da-file-row" :class="{ 'da-file-row--dir': f.type === 'dir' }" @click="f.type === 'dir' ? (fileCurPath = f.path, reloadFiles()) : openFile(f)">
           <el-icon class="da-file-row__icon">
             <FolderOpened v-if="f.type === 'dir'" /><Document v-else />
           </el-icon>
           <span class="da-file-row__name">{{ f.name }}</span>
           <span v-if="f.type === 'file'" class="da-file-row__size">{{ fmtSize(f.size) }}</span>
+          <span v-if="f.type === 'file'" class="da-file-row__ops" @click.stop>
+            <el-button size="small" text type="primary" @click="onRenameFile(f)">重命名</el-button>
+            <el-button size="small" text type="danger" @click="onDeleteFile(f)">删除</el-button>
+          </span>
         </div>
         <div v-if="!fileEntries.length" class="da-empty">空目录</div>
       </div>
       <div v-if="fileErr" class="da-upload-msg" style="color: #f56c6c">{{ fileErr }}</div>
+
+      <!-- 文件内容预览 -->
+      <el-dialog v-model="filePreviewOpen" :title="'文件 · ' + filePreviewPath" width="680px" append-to-body>
+        <pre class="da-file-preview">{{ filePreviewContent }}</pre>
+      </el-dialog>
       <div v-if="fileNew" class="da-files-new">
         <input
           v-model="newName"
@@ -255,6 +264,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
   CaretBottom,
@@ -285,6 +295,7 @@ import {
   createProjectFile,
   createSession,
   deleteProject,
+  deleteProjectFile,
   deleteSession,
   getBranches,
   listMessages,
@@ -292,6 +303,8 @@ import {
   listProjects,
   listSessions,
   mkdirProject,
+  readProjectFile,
+  renameProjectFile,
   uploadToProject,
   runCommand,
   stopChat,
@@ -366,17 +379,25 @@ function selectProject(p: AssistantProject | null) {
 async function onCreateProject() {
   const name = newProjName.value.trim()
   if (!name) return
-  const p = await createProject(name)
-  projects.value.push(p)
-  newProjName.value = ''
-  curProjectId.value = p.id
-  projOpen.value = false
+  try {
+    const p = await createProject(name)
+    projects.value.push(p)
+    newProjName.value = ''
+    curProjectId.value = p.id
+    projOpen.value = false
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
 }
 
 async function onDeleteProject(p: AssistantProject) {
-  await deleteProject(p.id)
-  projects.value = projects.value.filter((x) => x.id !== p.id)
-  if (curProjectId.value === p.id) curProjectId.value = null
+  try {
+    await deleteProject(p.id)
+    projects.value = projects.value.filter((x) => x.id !== p.id)
+    if (curProjectId.value === p.id) curProjectId.value = null
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
 }
 
 /** 会话归属当前项目 */
@@ -483,6 +504,62 @@ function fmtSize(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
+
+// ── 文件查看 / 重命名 / 删除 ──────────────────────────────
+const filePreviewOpen = ref(false)
+const filePreviewPath = ref('')
+const filePreviewContent = ref('')
+
+async function openFile(f: { name: string; path: string; type: 'dir' | 'file'; size: number }) {
+  if (!curProject.value) return
+  try {
+    const d = await readProjectFile(curProject.value.id, f.path)
+    if (d.binary) {
+      ElMessage.info('二进制文件,仅展示大小')
+      return
+    }
+    filePreviewPath.value = f.path
+    filePreviewContent.value = d.content ?? ''
+    filePreviewOpen.value = true
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function onRenameFile(f: { name: string; path: string }) {
+  if (!curProject.value) return
+  const rel = fileCurPath.value
+  const name = f.name
+  try {
+    const { value } = await ElMessageBox.prompt('新名称', '重命名文件', {
+      inputValue: name,
+      inputValidator: (v: string) => (v && v.trim() ? true : '名称不能为空')
+    })
+    const newName = value.trim()
+    if (newName === name) return
+    await renameProjectFile(curProject.value.id, rel, name, newName)
+    await reloadFiles()
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function onDeleteFile(f: { name: string; path: string }) {
+  if (!curProject.value) return
+  try {
+    await ElMessageBox.confirm(`确认删除「${f.name}」?`, '删除文件', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
+  try {
+    await deleteProjectFile(curProject.value.id, f.path)
+    await reloadFiles()
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
+}
+
 const lastMsgId = computed(() => messages.value[messages.value.length - 1]?.id ?? '')
 
 // ── 会话管理 ─────────────────────────────────────────────
@@ -495,17 +572,28 @@ async function loadSessions() {
 }
 
 async function onNewSession() {
-  const s = await createSession()
-  sessions.value.unshift(s)
-  await selectSession(s.id)
+  try {
+    const s = await createSession()
+    sessions.value.unshift(s)
+    await selectSession(s.id)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  }
 }
 
 async function onSelect(id: string) {
-  if (id !== activeId.value) await selectSession(id)
+  if (id !== activeId.value) {
+    try {
+      await selectSession(id)
+    } catch (e) {
+      ElMessage.error(e instanceof Error ? e.message : String(e))
+    }
+  }
 }
 
 async function selectSession(id: string) {
   stop()
+  turnSessionId.value = null // 忽略旧 turn 的后续事件
   activeId.value = id
   messages.value = await listMessages(id)
   await nextTick()
@@ -513,12 +601,16 @@ async function selectSession(id: string) {
 }
 
 async function onDelete(id: string) {
-  await deleteSession(id)
-  sessions.value = sessions.value.filter((s) => s.id !== id)
-  if (id === activeId.value) {
-    activeId.value = ''
-    messages.value = []
-    if (sessions.value.length) await selectSession(sessions.value[0].id)
+  try {
+    await deleteSession(id)
+    sessions.value = sessions.value.filter((s) => s.id !== id)
+    if (id === activeId.value) {
+      activeId.value = ''
+      messages.value = []
+      if (sessions.value.length) await selectSession(sessions.value[0].id)
+    }
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
   }
 }
 
@@ -555,8 +647,10 @@ async function send() {
   // 提交后内容由全局 SSE 事件流推送(onTurnStart 建助手消息 / onText·onReasoning 增量 / onTurnDone 结束)
   try {
     await submitChat(sid, payload)
-  } catch {
+  } catch (e) {
     generating.value = false
+    turnSessionId.value = null
+    ElMessage.error(`发送失败:${e instanceof Error ? e.message : String(e)}`)
   }
 }
 
@@ -846,13 +940,17 @@ async function resolveApproval(ap: { id: string }, payload: { allow: boolean; se
 
 // ── SSE 事件流(全局广播驱动当前会话渲染)──────────────────
 let disconnectEvents: (() => void) | null = null
+/** 当前正在生成的事件归属会话;切换会话后置空,丢弃旧 turn 的增量 */
+const turnSessionId = ref<string | null>(null)
 
 function handleTurnStart() {
+  turnSessionId.value = activeId.value
   generating.value = true
   messages.value.push({ id: genId(), role: 'assistant', content: '', thinking: '', createdAt: Date.now() })
   scrollBottom(true)
 }
 function handleReasoning(delta: string) {
+  if (turnSessionId.value !== activeId.value) return // 会话已切换,忽略旧增量
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'assistant') {
     last.thinking = (last.thinking || '') + delta
@@ -860,15 +958,18 @@ function handleReasoning(delta: string) {
   }
 }
 function handleText(delta: string) {
+  if (turnSessionId.value !== activeId.value) return
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'assistant') {
     last.content += delta
     scrollBottom()
   }
 }
-function handleTurnDone() {
+function handleTurnDone(err?: string) {
   generating.value = false
+  turnSessionId.value = null
   approvals.value = []
+  if (err) ElMessage.error(`生成失败:${err}`)
   // 标题/轮次由服务端生成,静默刷新列表(保留 activeId 选中态)
   void listSessions().then((list) => { sessions.value = list }).catch(() => {})
 }
@@ -884,7 +985,7 @@ disconnectEvents = connectAssistantEvents({
   onTurnStart: handleTurnStart,
   onReasoning: handleReasoning,
   onText: handleText,
-  onTurnDone: handleTurnDone,
+  onTurnDone: (err?: string) => handleTurnDone(err),
   onApproval: handleApproval
 })
 
@@ -1563,11 +1664,37 @@ onUnmounted(() => {
   border-radius: 6px;
   cursor: default;
 }
+.da-file-row:hover {
+  background: var(--bd-panel-sub);
+}
 .da-file-row--dir {
   cursor: pointer;
 }
 .da-file-row--dir:hover {
   background: var(--bd-panel-sub);
+}
+.da-file-row__ops {
+  margin-left: auto;
+  display: none;
+}
+.da-file-row:hover .da-file-row__ops {
+  display: inline-flex;
+  align-items: center;
+}
+.da-file-preview {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bd-panel-sub);
+  border: 1px solid var(--bd-border);
+  border-radius: 6px;
+  color: var(--bd-text);
 }
 .da-file-row__icon {
   color: var(--bd-primary);

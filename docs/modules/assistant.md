@@ -55,14 +55,15 @@ SSE 事件 `kind`:`turn_started` / `reasoning` / `text` / `message` / `turn_done
 | POST | `/api/assistant/projects` | `{name}` | 建项目,自动在 workspace 建目录(`dirCreated` 标记是否成功) |
 | DELETE | `/api/assistant/projects/:id` | — | 删项目(保留文件) |
 | GET | `/api/assistant/projects/:id/files` | `?rel=` | 列目录(文件/文件夹条目) |
-| POST | `/api/assistant/projects/:id/dir` | `{rel, name}` | 新建文件夹 |
-| POST | `/api/assistant/projects/:id/file` | `{rel, name, content}` | 新建文件 |
-| POST | `/api/assistant/projects/:id/upload` | `{name, contentBase64}` | 上传文件(limit 20mb) |
+| GET | `/api/assistant/projects/:id/file` | `?rel=` | **读文件内容**(文本返回 `content`;二进制返回 `{binary:true,size}`,黑名单扩展名拦截) |
+| PATCH | `/api/assistant/projects/:id/file` | `{rel, name, newName}` | **重命名/移动文件**(目标存在返回 409) |
+| DELETE | `/api/assistant/projects/:id/file` | `?rel=` | **删除文件或空目录**(非空目录 409) |
+| POST | `/api/assistant/projects/:id/dir` | `{rel, name}` | 新建文件夹(已存在 409) |
+| POST | `/api/assistant/projects/:id/file` | `{rel, name, content}` | 新建文件(已存在 409;自动递归创建父目录) |
+| POST | `/api/assistant/projects/:id/upload` | `{name, contentBase64}` | 上传文件(base64 严格校验,≤10MB,同名 409) |
 | PUT | `/api/assistant/projects/session` | `{sessionId, projectId}` | 会话↔项目绑定(`projectId` 空=解绑) |
 
-**已知缺口**:
-- 无 `GET /api/assistant/projects/:id/file?rel=`(读文件内容)——前端文件面板只有列表/新建/上传,**不能打开文件查看内容**;如需查看需补该路由 + `readFile()` 方法(注意路径穿越防护,复用 `_safeRel`/`_base`)
-- 无文件/文件夹**删除与重命名**(用户此前提过诉求,未做)
+**鉴权(2026-08 加固)**:`/api/assistant` 已加入 `PROTECTED_PREFIXES`(未登录 401);项目/文件/目录/上传/会话绑定等写操作(POST/PUT/PATCH/DELETE)纳入 `EXEC_GATES`(module `assistant`,viewer 一律 403,配置了模块白名单的用户需含 `assistant`)。所有落盘路径经 `_resolve()` 的 `path.resolve` + `path.relative` 双重校验,项目名 `.`/`..` 直接拒绝,杜绝逃逸 `assistantWorkspace`。
 
 ### C. 错误码约定
 
