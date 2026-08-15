@@ -1649,29 +1649,26 @@ async function copyAllTsv() {
         :icon="DocumentChecked"
         class="save-btn"
         :disabled="loading"
+        title="保存脚本(Cmd+S)"
         @click="saveActive"
-      >{{ activeTab && activeTab.file ? `保存 ${activeTab.name}` : '保存' }}</el-button>
-      <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
-      <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
+      />
+      <el-button class="font-btn" text title="减小字号" @click="adjustFont(-1)">A−</el-button>
+      <el-button class="font-btn" text title="增大字号" @click="adjustFont(1)">A+</el-button>
       <el-divider direction="vertical" />
       <template v-if="engine === 'flinksql'">
         <el-radio-group v-model="flinkMode" size="small" class="flink-mode">
           <el-radio-button value="batch">批</el-radio-button>
           <el-radio-button value="stream">流</el-radio-button>
         </el-radio-group>
-        <el-button size="small" :icon="MagicStick" @click="showFlinkConn = true">连接器</el-button>
-        <el-button size="small" :icon="VideoPause" @click="showFlinkJobs = true">流任务</el-button>
-        <el-button size="small" :icon="Promotion" @click="showFlinkPreJob = true">PreJob</el-button>
+        <el-button size="small" :icon="MagicStick" title="连接器管理" @click="showFlinkConn = true" />
+        <el-button size="small" :icon="VideoPause" title="流任务管理" @click="showFlinkJobs = true" />
+        <el-button size="small" :icon="Promotion" title="PreJob 提交/管理" @click="showFlinkPreJob = true" />
         <el-divider direction="vertical" />
       </template>
-      <el-button :icon="MagicStick" @click="formatSql">格式化</el-button>
-      <el-button :icon="Promotion" @click="runExplain">EXPLAIN</el-button>
-      <el-button v-if="loading" type="danger" :icon="VideoPause" @click="stopQuery">
-        停止
-      </el-button>
-      <el-button type="primary" :icon="CaretRight" :loading="loading" @click="runQuery">
-        执行<kbd class="exec-kbd">⌘↵</kbd>
-      </el-button>
+      <el-button :icon="MagicStick" title="格式化 SQL(Cmd+Shift+F)" @click="formatSql" />
+      <el-button :icon="Promotion" title="执行计划(EXPLAIN)" @click="runExplain" />
+      <el-button v-if="loading" type="danger" :icon="VideoPause" title="停止" @click="stopQuery" />
+      <el-button type="primary" :icon="CaretRight" :loading="loading" title="执行(Cmd+Enter)" @click="runQuery" />
       <el-divider direction="vertical" />
       <el-button class="theme-btn" text :title="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" @click="toggleTheme">
         <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
