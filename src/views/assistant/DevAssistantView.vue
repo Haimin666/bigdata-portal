@@ -89,7 +89,7 @@
         </div>
       </div>
 
-      <!-- 消息流 -->
+      <!-- 消息流(终端会话流风格) -->
       <div v-else ref="chatBox" class="da-chat" @click="onMainClick">
         <div
           v-for="m in messages"
@@ -97,22 +97,21 @@
           class="da-msg"
           :class="m.role === 'user' ? 'da-msg--user' : 'da-msg--assistant'"
         >
-          <div class="da-msg__bubble">
-            <template v-if="m.role === 'assistant'">
-              <div v-if="m.thinking" class="da-think" @click="toggleThink(m)">
-                <span class="da-think__head">
-                  <el-icon class="da-think__icon">
-                    <CaretRight v-if="m.thinkCollapsed" /><CaretBottom v-else />
-                  </el-icon>
-                  思考过程
-                </span>
-                <div v-if="!m.thinkCollapsed" class="da-think__body">{{ m.thinking }}</div>
-              </div>
-              <div class="da-md" v-html="renderMd(m.content)"></div>
-              <span v-if="generating && m.id === lastMsgId" class="da-cursor">▍</span>
-            </template>
-            <template v-else>{{ m.content }}</template>
-          </div>
+          <template v-if="m.role === 'user'">
+            <span class="da-msg__caret">›</span>
+            <div class="da-msg__text">{{ m.content }}</div>
+          </template>
+          <template v-else>
+            <div v-if="m.thinking" class="da-think" @click="toggleThink(m)">
+              <span class="da-think__head">
+                <span class="da-think__chevron" :class="{ 'da-think__chevron--open': !m.thinkCollapsed }">▶</span>
+                思考过程
+              </span>
+              <div v-if="!m.thinkCollapsed" class="da-think__body">{{ m.thinking }}</div>
+            </div>
+            <div class="da-msg__text da-md" v-html="renderMd(m.content)"></div>
+            <span v-if="generating && m.id === lastMsgId" class="da-cursor">▍</span>
+          </template>
         </div>
         <!-- 工具审批卡片(agent 调用工具等待审批) -->
         <div v-for="ap in approvals" :key="ap.id" class="da-approval">
@@ -267,8 +266,6 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
-  CaretBottom,
-  CaretRight,
   Delete,
   Document,
   DocumentAdd,
@@ -1226,48 +1223,50 @@ onUnmounted(() => {
   font-family: var(--bd-font);
 }
 
-/* 消息流 */
+/* 消息流(终端会话流风格,对齐官方 serve 页:用户=› caret+文本,助手=纯文本流) */
 .da-chat {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 22px 18px 10px;
+  padding: 26px 20px 10px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .da-msg {
-  display: flex;
   max-width: 860px;
   width: 100%;
+  margin: 0 auto;
+  animation: da-msg-in 0.22s ease;
+}
+@keyframes da-msg-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
 }
 .da-msg--user {
-  justify-content: flex-end;
-  align-self: flex-end;
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
 }
-.da-msg--assistant {
-  justify-content: flex-start;
-  align-self: flex-start;
+.da-msg__caret {
+  color: var(--bd-primary);
+  font-family: var(--bd-font);
+  font-weight: 600;
+  flex-shrink: 0;
+  font-size: 15px;
 }
-.da-msg__bubble {
-  max-width: 100%;
-  border-radius: 12px;
-  padding: 10px 14px;
-  line-height: 1.65;
+.da-msg__text {
   white-space: pre-wrap;
   word-break: break-word;
+  line-height: 1.65;
 }
-.da-msg--user .da-msg__bubble {
-  background: var(--bd-primary);
-  color: #fff;
-  border-bottom-right-radius: 4px;
-}
-.da-msg--assistant .da-msg__bubble {
-  background: var(--bd-panel);
-  border: 1px solid var(--bd-border);
-  border-bottom-left-radius: 4px;
+.da-msg--user .da-msg__text {
+  font-weight: 500;
   color: var(--bd-text);
-  white-space: normal;
+}
+.da-msg--assistant .da-msg__text {
+  font-weight: 400;
+  color: var(--bd-text);
 }
 .da-cursor {
   display: inline-block;
@@ -1278,6 +1277,46 @@ onUnmounted(() => {
   50% {
     opacity: 0;
   }
+}
+
+/* 思考过程(折叠块,左竖线) */
+.da-think {
+  margin-bottom: 8px;
+}
+.da-think__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--bd-muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  transition: color 0.18s ease;
+}
+.da-think__head:hover {
+  color: var(--bd-text);
+}
+.da-think__chevron {
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+.da-think__chevron--open {
+  transform: rotate(90deg);
+}
+.da-think__body {
+  margin-top: 5px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--bd-border);
+  border-radius: 0 6px 6px 0;
+  background: var(--bd-panel-sub);
+  color: var(--bd-muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 /* 工具审批卡片 */
@@ -1350,35 +1389,6 @@ onUnmounted(() => {
 }
 
 /* 思考折叠块 */
-.da-think {
-  margin-bottom: 10px;
-  border: 1px dashed var(--bd-border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  background: var(--bd-panel-sub);
-}
-.da-think__head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--bd-muted);
-  cursor: pointer;
-  user-select: none;
-}
-.da-think__icon {
-  font-size: 12px;
-  transition: transform 0.15s ease;
-}
-.da-think__body {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--bd-muted);
-  white-space: pre-wrap;
-  border-top: 1px dashed var(--bd-border);
-  padding-top: 6px;
-}
-
 /* markdown 渲染 */
 .da-md {
   font-size: 13px;
