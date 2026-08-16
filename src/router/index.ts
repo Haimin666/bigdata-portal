@@ -86,14 +86,23 @@ router.beforeEach(async (to) => {
   if (!auth.loggedIn) {
     return to.path === '/login' ? true : '/login'
   }
-  if (to.path === '/login') return '/'
+  /** 用户可访问的第一个 native 菜单页(登录落地/模块回退目标;无匹配回默认首页,后端 EXEC_GATES 门禁兜底) */
+  const firstAllowedPath = (): string => {
+    const mods = auth.modules
+    if (!Array.isArray(mods) || mods.length === 0) return '/yarn'
+    const hit = menus.find((m) => m.kind === 'native' && mods.includes(m.name))
+    return hit ? hit.path : '/yarn'
+  }
+  if (to.path === '/login') return firstAllowedPath()
   if (to.meta.adminOnly && !auth.isAdmin) return '/'
-  // 模块白名单:菜单 name 不在用户可访问模块内 → 回首页(后端有执行门禁兜底,前端配合隐藏)
+  // 模块白名单:菜单 name 不在用户可访问模块内 → 跳用户首个可访问页(避免回 '/' 造成无限重定向)
   // admin 的 modules 为 null(全部),跳过校验
   const mods = auth.modules
   const name = String(to.name || '')
   if (mods && Array.isArray(mods) && mods.length > 0 && name && !mods.includes(name)) {
-    return '/'
+    const fallback = firstAllowedPath()
+    if (to.path === fallback) return true // 兜底目标放行,避免循环
+    return fallback
   }
   return true
 })
