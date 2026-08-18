@@ -983,6 +983,25 @@ function selectPane(pane: number) {
   pageCurrent.value = 1
 }
 
+/** 关闭某个结果 tab(从 results 移除;日志 tab 恒为第 0 个不可关) */
+function closeResultTab(idx: number) {
+  if (idx < 0 || idx >= results.value.length) return
+  results.value.splice(idx, 1)
+  // 修正当前激活 pane:关闭的是当前面板 → 落到相邻(优先前一个)结果;无结果则回日志
+  if (activePane.value === idx + 1) {
+    if (results.value.length === 0) activePane.value = 0
+    else activePane.value = Math.min(idx + 1, results.value.length)
+  } else if (activePane.value > idx + 1) {
+    activePane.value -= 1 // 关闭的 tab 在当前面板之前,后面面板整体前移
+  }
+  pageCurrent.value = 1
+  // 若在编辑单元格、关闭的是它所在结果,退出编辑态
+  if (editingCell.value) {
+    const r = results.value.find((x) => x.rows.includes(editingCell.value?.row as Record<string, unknown>))
+    if (!r) editingCell.value = null
+  }
+}
+
 // ── 结果单元格行内编辑(仅表预览结果 editable)──────────────────
 // editingCell:当前正在编辑的单元格(row 为 rows 中真实行对象引用,rowIdx 为 indexOf 结果)
 const editingCell = ref<{ row: Record<string, unknown>; rowIdx: number; col: string; val: string } | null>(null)
@@ -1852,6 +1871,11 @@ async function copyAllTsv() {
               <el-icon><Download /></el-icon>
             </span>
           </el-tooltip>
+          <el-tooltip content="关闭" placement="top">
+            <span class="tab-close" @click.stop="closeResultTab(idx)">
+              <el-icon><Close /></el-icon>
+            </span>
+          </el-tooltip>
         </div>
       </div>
       <!-- 下方当前面板内容 -->
@@ -2536,6 +2560,20 @@ async function copyAllTsv() {
 
   &:hover {
     color: $primary;
+  }
+}
+
+/* 结果 tab 关闭按钮(与导出同款,略小) */
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: $muted;
+  cursor: pointer;
+  margin-left: 2px;
+
+  &:hover {
+    color: #f56c6c;
   }
 }
 

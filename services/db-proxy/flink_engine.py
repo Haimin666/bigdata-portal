@@ -460,7 +460,7 @@ class FlinkEngine:
             except Exception:
                 self._current_job_client = None
             columns = _extract_columns_schema(result)
-            rows, truncated = self._collect_rows(result, limit, mode)
+            rows, truncated = self._collect_rows(result, columns, limit, mode)
             return {"columns": columns, "rows": rows, "truncated": truncated}
 
         # DML:INSERT INTO ...(流模式下提交常驻任务)
@@ -498,12 +498,13 @@ class FlinkEngine:
             self._current_job_client = None
         return None
 
-    def _collect_rows(self, result, limit: int, mode: str) -> Tuple[List[List[Any]], bool]:
+    def _collect_rows(self, result, columns: List[str], limit: int, mode: str) -> Tuple[List[Dict[str, Any]], bool]:
         """收集结果行,带超时与取消(防 CDC/kafka 流式源无限阻塞)。
 
+        与 spark 引擎返回格式一致:每行是 `{列名: 值}` 对象数组,前端 el-table 直接 `:prop` 取值。
         流模式下 SELECT 通常也是无限流,超时后 cancel 并返回已收行。
         """
-        collected: List[List[Any]] = []
+        collected: List[Dict[str, Any]] = []
         stop = threading.Event()
         job_client = None
         try:
@@ -516,7 +517,8 @@ class FlinkEngine:
                 for row in result.collect():
                     if stop.is_set() or self._cancel_flag.is_set():
                         break
-                    collected.append([_fmt_value(v) for v in row])
+                    vals = [_fmt_value(v) for v in row]
+                    collected.append(dict(zip(columns, vals)))
                     if len(collected) >= limit:
                         break
             except Exception:
