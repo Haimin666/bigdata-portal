@@ -1279,12 +1279,9 @@ if (config.dbProxyUrl) {
     catch (e) { console.error('[flink/jobs/:id/stop]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink 任务停止失败' }) }
   })
 
-  // PreJob 提交(真实占用 YARN 资源,一律要求解锁)
+  // PreJob 提交(真实占用 YARN 资源)。已移除用户解锁要求:
+  // 写凭证由网关自动携带(db-proxy 侧校验共享密钥,防直连绕过)
   app.post('/api/flink/prejob/jobs', async (req, res) => {
-    const tk = req.get('X-Spark-Token')
-    if (!tk || !sparkTokenValid(tk)) {
-      return res.status(403).json({ code: 403, msg: 'Flink PreJob 提交需要解锁,请先输入密码(与 Spark 同一密码)' })
-    }
     try {
       const data = await prejobSubmit({
         name: String(req.body?.name || ''),

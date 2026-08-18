@@ -23,9 +23,10 @@
 | 引擎 | 通道 | 写权限 | 超时 | 备注 |
 |---|---|---|---|---|
 | mysql/oracle/doris | db-proxy `/query`(同步)/ `/jobs`(异步任务) | **写权限密码验证已移除**:库访问权由数据权限矩阵管控,数据源 `readOnly` 与 db-proxy 资源护栏兑底;写操作(UPDATE/INSERT/DELETE/DDL)记审计日志 | db-proxy `queryTimeout`;异步默认 1h 可配 | 直连;异步任务提交由网关专用路由处理(非透传),EXEC_GATES 拦 viewer |
-| sparksql | db-proxy `/spark/query`(常驻 client session) | 需 `X-Spark-Token`(isSparkWriteSql 检测) | **前端/门户/db-proxy 统一 120s**,超时自动 cancelJobGroup | 串行锁;FileNotFound 自动 REFRESH 重试一次 |
-| pyspark | 同上 `kind=pyspark` | 必须解锁 | 同上 | 前端已移除入口,后端保留给 Jupyter |
-| flinksql | db-proxy `/flink/query` | 必须解锁(所有 flink 任务) | `queryTimeout`(默认 300s) | 流/批双模式;流查询 collect 到 limit 行返回 |
+| sparksql | db-proxy `/spark/query`(常驻 client session) | 写语句需网关写拦截(isSparkWriteSql);**已移除独立解锁弹窗**,权限由数据权限矩阵 + db-proxy 护栏管控 | **前端/门户/db-proxy 统一 120s**,超时自动 cancelJobGroup | 串行锁;FileNotFound 自动 REFRESH 重试一次 |
+| pyspark | 同上 `kind=pyspark` | 同上(与 sparksql 同通道) | 同上 | 前端已移除入口,后端保留给 Jupyter |
+| flinksql | db-proxy `/flink/query` | 同上(写权限同 spark 体系) | `queryTimeout`(默认 300s) | 流/批双模式;流查询 collect 到 limit 行返回 |
+| flink prejob | db-proxy `/flink/prejob/jobs`(yarn-per-job) | **已移除解锁要求**:直接提交,写凭证由网关自动携带(db-proxy 侧共享密钥校验防直连) | `submitTimeout`(默认 120s) | pyflink 脚本封装;作业列表/日志/停止走 PREJOB 管理 |
 
 ## 4. 核心机制
 

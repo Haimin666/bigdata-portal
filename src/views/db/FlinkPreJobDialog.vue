@@ -1,63 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, VideoPause, Promotion, View, Lock } from '@element-plus/icons-vue'
-import { sparkAuth, flinkPrejobSubmit, flinkPrejobJobs, flinkPrejobLogs, flinkPrejobCancel, type FlinkPreJob } from '@/api/db'
+import { Refresh, VideoPause, Promotion, View } from '@element-plus/icons-vue'
+import { flinkPrejobSubmit, flinkPrejobJobs, flinkPrejobLogs, flinkPrejobCancel, type FlinkPreJob } from '@/api/db'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>()
 
-// ── 解锁(与 Spark 共用同一密码与 token,同一个 sessionStorage key)──
-const SPARK_TOKEN_KEY = 'bigdata-portal.spark-token'
-const writeToken = ref(sessionStorage.getItem(SPARK_TOKEN_KEY) || '')
-const showAuth = ref(false)
-const pwd = ref('')
-const authLoading = ref(false)
-
-async function ensureUnlock(): Promise<string | null> {
-  if (writeToken.value) return writeToken.value
-  const tk = await new Promise<string | null>((resolve) => {
-    const done = (v: string | null) => {
-      showAuth.value = false
-      pwd.value = ''
-      authLoading.value = false
-      resolve(v)
-    }
-    authResolve = done
-    showAuth.value = true
-  })
-  return tk
-}
-let authResolve: ((v: string | null) => void) | null = null
-
-async function submitAuth() {
-  if (!pwd.value) {
-    ElMessage.warning('请输入密码')
-    return
-  }
-  authLoading.value = true
-  try {
-    const { token } = await sparkAuth(pwd.value)
-    writeToken.value = token
-    sessionStorage.setItem(SPARK_TOKEN_KEY, token)
-    ElMessage.success('已解锁(12 小时内有效)')
-    authResolve?.(token)
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
-    authResolve?.(null)
-  }
-}
-
-function cancelAuth() {
-  authResolve?.(null)
-}
-
-/** 弹窗完全关闭(含 ESC):resolve 挂起的 promise,避免 ensureUnlock 永久挂起 */
-function onAuthClosed() {
-  authResolve?.(null)
-}
-
-// ── 提交表单 ──────────────────────────────────────────────
+// ── 提交 ──────────────────────────────────────────────────
 const name = ref('')
 const queue = ref('')
 const sqlText = ref('')
@@ -69,14 +19,9 @@ async function submitJob() {
     ElMessage.warning('请输入要提交的 Flink SQL 脚本')
     return
   }
-  const tk = await ensureUnlock()
-  if (!tk) {
-    ElMessage.warning('已取消:PreJob 提交需先解锁')
-    return
-  }
   submitting.value = true
   try {
-    const job = await flinkPrejobSubmit(name.value.trim() || `prejob-${Date.now()}`, sql, tk, queue.value.trim() || undefined)
+    const job = await flinkPrejobSubmit(name.value.trim() || `prejob-${Date.now()}`, sql, undefined, queue.value.trim() || undefined)
     ElMessage.success(`已提交 ${job.jobId} (${job.appId || '等待 appId'})`)
     sqlText.value = ''
     name.value = ''
@@ -183,14 +128,7 @@ watch(() => props.modelValue, (v) => {
     <!-- 提交区 -->
     <div class="submit-box">
       <div class="submit-head">
-        <span class="submit-tip">SQL 会包装成 pyflink 脚本以 yarn-per-job 提交为独立作业(真实占用 YARN 资源,需解锁,与 Spark 同一密码)。</span>
-        <el-button
-          size="small"
-          :icon="writeToken ? Lock : Promotion"
-          :type="writeToken ? 'success' : 'warning'"
-          text
-          @click="ensureUnlock"
-        >{{ writeToken ? '已解锁' : '点击解锁' }}</el-button>
+        <span class="submit-tip">SQL 会包装成 pyflink 脚本以 yarn-per-job 提交为独立作业(真实占用 YARN 资源)。</span>
       </div>
       <div class="submit-row">
         <el-input v-model="name" size="small" placeholder="作业名(可选,默认 prejob-时间戳)" style="width: 220px" />
@@ -254,22 +192,6 @@ watch(() => props.modelValue, (v) => {
       <el-alert v-if="logData.error" :title="logData.error" type="error" :closable="false" class="log-alert" />
       <pre class="log-pre">{{ logData.logs || '(无日志输出)' }}</pre>
     </el-drawer>
-
-    <!-- 解锁弹窗(与 Spark 共用同一密码) -->
-    <el-dialog v-model="showAuth" title="解锁 Flink 写权限" width="360px" append-to-body
-      :close-on-click-modal="false" :close-on-press-escape="false" @closed="onAuthClosed">
-      <el-input
-        v-model="pwd"
-        type="password"
-        placeholder="输入密码(与 Spark 写权限同一密码)"
-        show-password
-        @keyup.enter="submitAuth"
-      />
-      <template #footer>
-        <el-button @click="cancelAuth">取消</el-button>
-        <el-button type="primary" :loading="authLoading" @click="submitAuth">验证</el-button>
-      </template>
-    </el-dialog>
   </el-dialog>
 </template>
 
