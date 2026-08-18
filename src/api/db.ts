@@ -398,6 +398,7 @@ export interface FlinkAsyncJob {
 export async function flinkAsyncSubmit(sql: string, mode: 'batch' | 'stream' = 'batch'): Promise<{ jobId: string }> {
   return flinkRequest('/async', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, // 必须显式声明,否则 fetch 默认 text/plain → 网关不解析 body
     body: JSON.stringify({ sql, mode, timeoutMs: 600000 })
   })
 }
