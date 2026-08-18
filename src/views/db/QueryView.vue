@@ -141,15 +141,89 @@ interface EditorTab {
   dirty: boolean
 }
 let tabSeq = 0
-function newTab(name: string, content: string): EditorTab {
-  return { id: `tab-${++tabSeq}`, file: null, name, content, dirty: false }
+function newTab(name: string, content: string, id?: string): EditorTab {
+  return { id: id || `tab-${++tabSeq}`, file: null, name, content, dirty: false }
+}
+
+// ── 临时 query 草稿(未命名 tab 也自动保存到 localStorage)──────
+const TEMP_KEY = 'db-query-temp-tabs'
+interface TempDraft {
+  id: string
+  name: string
+  content: string
+  ts: number
+}
+function readTempDrafts(): TempDraft[] {
+  try {
+    const raw = localStorage.getItem(TEMP_KEY)
+    if (!raw) return []
+    const p = JSON.parse(raw)
+    return Array.isArray(p) ? p.filter((d) => d && typeof d.content === 'string') : []
+  } catch {
+    return []
+  }
+}
+function writeTempDrafts(list: TempDraft[]) {
+  try {
+    localStorage.setItem(TEMP_KEY, JSON.stringify(list.slice(0, MAX_TABS)))
+  } catch {
+    /* localStorage 不可用(Safari 隐私模式等)时静默忽略 */
+  }
+}
+/** 保存/更新一个临时 tab 草稿(刷新页面后可恢复) */
+function saveTempDraft(tab: EditorTab) {
+  const list = readTempDrafts().filter((d) => d.id !== tab.id)
+  list.unshift({ id: tab.id, name: tab.name, content: tab.content, ts: Date.now() })
+  writeTempDrafts(list)
+}
+function removeTempDraft(id: string) {
+  writeTempDrafts(readTempDrafts().filter((d) => d.id !== id))
+}
+
+/** 初始化 tab:优先恢复上次会话的临时草稿(最多 MAX_TABS 个,最近在前);没有草稿则建一个空 tab */
+function initTabs() {
+  const drafts = readTempDrafts()
+  if (drafts.length) {
+    for (const d of drafts) {
+      tabs.value.push(newTab(d.name || '未命名查询', d.content, d.id))
+      if (tabs.value.length >= MAX_TABS) break
+    }
+    activeTabId.value = tabs.value[tabs.value.length - 1].id // 激活最近一次编辑的草稿
+  } else {
+    tabs.value.push(newTab('未命名查询', ''))
+    activeTabId.value = tabs.value[0].id
+  }
+}
+
+/** 防抖自动保存:停止输入 2s 后落盘(绑定文件)或写草稿(临时 query) */
+let autoSaveTimer: number | undefined
+function scheduleAutoSave(tab: EditorTab) {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  autoSaveTimer = window.setTimeout(() => {
+    autoSaveTimer = undefined
+    void autoSaveTab(tab)
+  }, 2000)
+}
+async function autoSaveTab(tab: EditorTab) {
+  if (!tabs.value.includes(tab)) return // tab 已关闭
+  tab.content = cm?.getValue() ?? tab.content
+  if (tab.file) {
+    try {
+      await saveScriptContent(tab.file.id, tab.content)
+      tab.dirty = false
+    } catch {
+      // 自动保存失败静默保留 dirty;手动 Ctrl+S 仍可重试并提示
+    }
+  } else {
+    saveTempDraft(tab)
+    tab.dirty = false
+  }
 }
 const tabs = ref<EditorTab[]>([])
 const activeTabId = ref('')
 const activeTab = computed(() => tabs.value.find((t) => t.id === activeTabId.value) ?? null)
-// 初始一个未命名 tab
-tabs.value.push(newTab('未命名查询', ''))
-activeTabId.value = tabs.value[0].id
+// 初始 tab(优先恢复临时草稿)
+initTabs()
 
 /** 把当前编辑器内容写回当前 tab(切换/关闭前调用) */
 function flushActiveContent() {
@@ -184,6 +258,7 @@ async function closeTab(id: string) {
   const idx = tabs.value.indexOf(tab)
   flushActiveContent()
   tabs.value.splice(idx, 1)
+  if (!tab.file) removeTempDraft(tab.id) // 临时 tab 关闭即丢弃草稿
   if (activeTabId.value === id) {
     if (tabs.value.length === 0) {
       const nt = newTab('未命名查询', '')
@@ -211,6 +286,14 @@ function newQuery() {
   activeTabId.value = nt.id
   cm?.setValue('')
   cm?.focus()
+}
+
+/** 保存当前所有临时 tab 草稿(离开页面前兜底,防抖未触发时) */
+function flushTempDrafts() {
+  flushActiveContent()
+  for (const t of tabs.value) {
+    if (!t.file) saveTempDraft(t)
+  }
 }
 
 /** 打开文件:已打开则切到对应 tab;否则新开 tab(最多 MAX_TABS 个) */
@@ -449,10 +532,15 @@ async function initEditor() {
   // 等 DOM 稳定后强制 refresh 重算布局。
   await nextTick()
   cm.refresh()
-  // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)
-  cm.on('change', () => {
+  // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)+ 防抖自动保存
+  cm.on('change', (_c, change) => {
+    if (change.origin === 'setValue') return // 程序性 setValue(切换 tab/打开文件)不触发自动保存
     const t = activeTab.value
-    if (t) t.dirty = true
+    if (t) {
+      t.dirty = true
+      t.content = cm?.getValue() ?? t.content // 立即同步快照,防抖触发时即使已切走也不会取错内容
+      scheduleAutoSave(t)
+    }
   })
   // ── 补全触发:输入字母/下划线后 300ms 防抖弹出(仅候选非空);浮层打开时 Tab 选词 ──
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
@@ -535,6 +623,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = undefined
+  }
+  flushTempDrafts()
   stopSparkLogPolling()
   logResizeObserver?.disconnect()
   logResizeObserver = null
@@ -871,6 +964,8 @@ interface QueryResultItem {
 }
 
 const results = ref<QueryResultItem[]>([])
+// 结果最多保留多少条(每次执行追加一个新结果 tab,超出裁掉最旧)
+const MAX_RESULTS = 20
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
@@ -1312,9 +1407,8 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   }
 }
 
-/** 执行单条 SQL 并记录结果 */
 /** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
-async function execOne(sql: string, index: number, seq: number): Promise<void> {
+async function execOne(sql: string, item: QueryResultItem, seq: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
   const isFlink = engine.value === 'flinksql'
   const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
@@ -1330,18 +1424,16 @@ async function execOne(sql: string, index: number, seq: number): Promise<void> {
     if (seq !== runSeq) return // 旧批次已失效,丢弃结果
     // 执行成功 → 写入历史(任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 50)
     pushHistory(sql)
-    // 保留表预览(可编辑)元数据:重查后仍可继续编辑,pendingEdits 随本次清空
-    const prev = results.value[index]
-    results.value[index] = {
-      ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
-      sql,
-      ...r
-    }
+    // 追加模式下 item 是新 push 的结果对象,直接用最新结果覆盖它(不保留旧 editable 元数据;
+    // 表预览的可编辑标记由 onOpenTable 在执行成功后对最新结果设置)
+    const idx = results.value.indexOf(item)
+    if (idx < 0) return // 已被裁剪(结果超上限删旧),丢弃
+    results.value[idx] = { sql, ...r, running: false }
   } catch (e) {
     if (seq !== runSeq) return
-    const prev = results.value[index]
-    results.value[index] = {
-      ...(prev?.editable ? { editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[] } : {}),
+    const idx = results.value.indexOf(item)
+    if (idx < 0) return
+    results.value[idx] = {
       sql,
       columns: [],
       rows: [],
@@ -1398,21 +1490,29 @@ function pushHistory(sql: string) {
   }
 }
 
-/** 执行目标 SQL 段列表(逐条 FIFO 串行执行) */
+/** 执行目标 SQL 段列表(逐条 FIFO 串行执行;每次执行结果追加为新 tab,整体最多保留 MAX_RESULTS 个) */
 async function execSegments(segs: string[], seq: number) {
-  results.value = segs.map((sql, i) => {
-    // 旧结果若是表预览(可编辑),保留编辑元数据(重查后 pendingEdits 清空)
-    const prev = results.value[i]
-    return prev?.editable
-      ? { sql, columns: [], rows: [], costMs: 0, truncated: false, editable: true, db: prev.db, table: prev.table, engine: prev.engine, pkCols: prev.pkCols, pendingEdits: [] as PendingEdit[], running: true }
-      : { sql, columns: [], rows: [], costMs: 0, truncated: false, running: true }
-  })
+  // 追加新结果段:不复用旧 tab,每个查询独立一个新结果(最多 20 个,超出裁掉最旧的)
+  const items = segs.map((sql) => ({
+    sql, columns: [], rows: [], costMs: 0, truncated: false, running: true
+  })) as QueryResultItem[]
+  results.value.push(...items)
+  if (results.value.length > MAX_RESULTS) {
+    results.value.splice(0, results.value.length - MAX_RESULTS)
+  }
   for (let i = 0; i < segs.length; i++) {
-    if (batchCancelled) break
-    await execOne(segs[i], i, seq)
+    if (batchCancelled) {
+      // 中断剩余段:标记为已停止(不保持 running 死转)
+      for (const it of items.slice(i)) {
+        const idx = results.value.indexOf(it)
+        if (idx >= 0) results.value[idx] = { ...results.value[idx], running: false, error: '已停止' }
+      }
+      break
+    }
+    await execOne(segs[i], items[i], seq)
   }
   // 默认展示最后一个 tab(最新执行的结果;日志 tab 恒为第一个)
-  if (seq === runSeq) activePane.value = results.value.length
+  if (seq === runSeq && results.value.length) activePane.value = results.value.length
 }
 
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
@@ -1438,9 +1538,13 @@ async function runQuery() {
     loading.value = true
     error.value = ''
     try {
-      results.value = [{ sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true }]
-      await execOne(target, 0, seq)
-      if (seq === runSeq) activePane.value = 1
+      const item = { sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true } as QueryResultItem
+      results.value.push(item)
+      if (results.value.length > MAX_RESULTS) {
+        results.value.splice(0, results.value.length - MAX_RESULTS)
+      }
+      await execOne(target, item, seq)
+      if (seq === runSeq) activePane.value = results.value.indexOf(item) + 1
     } finally {
       loading.value = false
     }
@@ -1645,34 +1749,41 @@ async function copyAllTsv() {
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       <div class="toolbar-spacer" />
-      <el-button
-        :icon="DocumentChecked"
-        class="save-btn"
-        :disabled="loading"
-        title="保存脚本(Cmd+S)"
-        @click="saveActive"
-      />
-      <el-button class="font-btn" text title="减小字号" @click="adjustFont(-1)">A−</el-button>
-      <el-button class="font-btn" text title="增大字号" @click="adjustFont(1)">A+</el-button>
+      <el-tooltip content="保存脚本(Cmd+S)" placement="top">
+        <el-button
+          :icon="DocumentChecked"
+          class="save-btn"
+          :disabled="loading"
+          @click="saveActive"
+        />
+      </el-tooltip>
+      <el-tooltip content="减小字号" placement="top">
+        <el-button class="font-btn" text @click="adjustFont(-1)">A−</el-button>
+      </el-tooltip>
+      <el-tooltip content="增大字号" placement="top">
+        <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
+      </el-tooltip>
       <el-divider direction="vertical" />
       <template v-if="engine === 'flinksql'">
         <el-radio-group v-model="flinkMode" size="small" class="flink-mode">
           <el-radio-button value="batch">批</el-radio-button>
           <el-radio-button value="stream">流</el-radio-button>
         </el-radio-group>
-        <el-button size="small" :icon="MagicStick" title="连接器管理" @click="showFlinkConn = true" />
-        <el-button size="small" :icon="VideoPause" title="流任务管理" @click="showFlinkJobs = true" />
-        <el-button size="small" :icon="Promotion" title="PreJob 提交/管理" @click="showFlinkPreJob = true" />
+        <el-tooltip content="连接器管理" placement="top"><el-button size="small" :icon="MagicStick" @click="showFlinkConn = true" /></el-tooltip>
+        <el-tooltip content="流任务管理" placement="top"><el-button size="small" :icon="VideoPause" @click="showFlinkJobs = true" /></el-tooltip>
+        <el-tooltip content="PreJob 提交/管理" placement="top"><el-button size="small" :icon="Promotion" @click="showFlinkPreJob = true" /></el-tooltip>
         <el-divider direction="vertical" />
       </template>
-      <el-button :icon="MagicStick" title="格式化 SQL(Cmd+Shift+F)" @click="formatSql" />
-      <el-button :icon="Promotion" title="执行计划(EXPLAIN)" @click="runExplain" />
-      <el-button v-if="loading" type="danger" :icon="VideoPause" title="停止" @click="stopQuery" />
-      <el-button type="primary" :icon="CaretRight" :loading="loading" title="执行(Cmd+Enter)" @click="runQuery" />
+      <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" @click="formatSql" /></el-tooltip>
+      <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" @click="runExplain" /></el-tooltip>
+      <el-tooltip v-if="loading" content="停止" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery" /></el-tooltip>
+      <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" @click="runQuery" /></el-tooltip>
       <el-divider direction="vertical" />
-      <el-button class="theme-btn" text :title="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" @click="toggleTheme">
-        <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
-      </el-button>
+      <el-tooltip :content="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" placement="top">
+        <el-button class="theme-btn" text @click="toggleTheme">
+          <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
+        </el-button>
+      </el-tooltip>
     </div>
 
     <!-- SQL 文件 tab 栏(最多 10 个) -->
@@ -1688,7 +1799,7 @@ async function copyAllTsv() {
         <el-icon class="file-tab-icon"><Document /></el-icon>
         <span class="file-tab-name">{{ t.name }}</span>
         <span v-if="t.dirty" class="file-tab-dirty" title="有未保存的修改">●</span>
-        <el-icon class="file-tab-close" title="关闭" @click.stop="closeTab(t.id)"><Close /></el-icon>
+        <el-tooltip content="关闭" placement="top"><el-icon class="file-tab-close" @click.stop="closeTab(t.id)"><Close /></el-icon></el-tooltip>
       </div>
       <div class="file-tab file-tab-add" title="新建查询" @click="newQuery">
         <el-icon><Plus /></el-icon>
@@ -1736,9 +1847,11 @@ async function copyAllTsv() {
           <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
           <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
           <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
-          <span v-if="!r.error" class="tab-export" title="导出 CSV" @click.stop="exportCsv(idx)">
-            <el-icon><Download /></el-icon>
-          </span>
+          <el-tooltip v-if="!r.error" content="导出 CSV" placement="top">
+            <span class="tab-export" @click.stop="exportCsv(idx)">
+              <el-icon><Download /></el-icon>
+            </span>
+          </el-tooltip>
         </div>
       </div>
       <!-- 下方当前面板内容 -->
