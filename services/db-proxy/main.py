@@ -957,19 +957,16 @@ class SparkQueryReq(BaseModel):
 
 def _check_spark_write_creds(write_unlocked: bool, req_token: Optional[str]) -> None:
     """写解锁凭证服务端校验(S1):
-    writeUnlocked=true 必须携带与配置一致的 X-Spark-Write 头(共享密钥,
-    仅门户网关持有,与 datasources.json spark.writeToken 一致)。
-    堵死直连 db-proxy 的调用者伪造 writeUnlocked 绕过门户鉴权。
-    未配置 writeToken → 一律拒绝写(安全默认)。
+    writeUnlocked=true 时必须携带与配置一致的 X-Spark-Write 头(共享密钥)。
+    **未配置 spark.writeToken 时放行(默认不拦截)** —— 门户权限矩阵仍是第一道
+    防线;配置了 token 则强校验,堵死直连 db-proxy 伪造 writeUnlocked。
     """
     if not write_unlocked:
         return
     cfg_token = str(SPARK_CFG.get("writeToken", "") or "")
     if not cfg_token:
-        raise HTTPException(
-            status_code=403,
-            detail="spark write disabled on db-proxy (datasources.json spark.writeToken 未配置)",
-        )
+        # 未配置共享密钥:门户侧已做权限管控,不额外拦截(用户无需解锁)
+        return
     if not req_token or not secrets.compare_digest(cfg_token, req_token):
         raise HTTPException(
             status_code=403, detail="spark write token mismatch (无法自行解锁写权限)"
@@ -1012,6 +1009,8 @@ def spark_query(
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    except HTTPException:
+        raise  # 凭证校验等已构造的 4xx 错误原样透传,避免被兜底吞成 502
     except Exception as e:  # 兜底:任何异常都透传可读信息,避免 500 Internal Server Error
         raise HTTPException(status_code=502, detail=str(e)[:1000])
     return {"code": 0, "data": result}
@@ -1138,6 +1137,8 @@ def flink_query(
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise  # 凭证校验等已构造的 4xx 错误原样透传,避免被兜底吞成 502
     except Exception as e:
         if log:
             log.exception("flink query failed: %.200s", str(e))
@@ -1299,6 +1300,8 @@ def flink_prejob_submit(
         raise HTTPException(status_code=403, detail=str(e))
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise  # 凭证校验等已构造的 4xx 错误原样透传,避免被兜底吞成 502
     except Exception as e:
         log.exception("flink prejob submit failed: %.200s", str(e))
         raise HTTPException(status_code=502, detail=str(e))
