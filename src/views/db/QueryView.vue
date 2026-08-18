@@ -504,7 +504,7 @@ function adjustFont(delta: number) {
 async function initEditor() {
   if (!cmRef.value || cm) return
   cm = CodeMirror(cmRef.value, {
-    value: DEFAULT_SQL,
+    value: activeTab.value?.content ?? DEFAULT_SQL,
     mode: 'text/x-sql',
     lineNumbers: true,
     indentWithTabs: false,
