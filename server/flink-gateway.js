@@ -96,6 +96,26 @@ export async function jobStop(jobId) {
 }
 
 // ── PreJob 提交(yarn-per-job 独立作业)────────────────────
+// ── 异步任务通道(流式 SELECT / 大结果,避免撞网关 60s 超时 504)────
+export async function asyncSubmit(sql, { mode = 'batch', writeUnlocked = false, timeoutMs = 600000 } = {}) {
+  const headers = { 'X-Spark-Write': config.dbProxyWriteToken }
+  const res = await proxy('/flink/async', {
+    method: 'POST',
+    body: JSON.stringify({ sql, mode, writeUnlocked, timeoutMs }),
+    headers,
+    timeoutMs: 10000 // 提交本身秒级,不必长等
+  })
+  return res.data
+}
+export async function asyncStatus(jobId) {
+  const res = await proxy(`/flink/async/${jobId}`, { timeoutMs: 10000 })
+  return res.data
+}
+export async function asyncCancel(jobId) {
+  const res = await proxy(`/flink/async/${jobId}/cancel`, { method: 'POST', timeoutMs: 10000 })
+  return res.data
+}
+
 export async function prejobSubmit(payload, timeoutMs = 180000) {
   // prejob 提交一律为执行类:门户 /api/flink/prejob/jobs 已强制 X-Spark-Token 解锁,
   // 这里带上写解锁凭证供 db-proxy 侧服务端校验(直连 8756 者无法伪造)

@@ -655,3 +655,92 @@ class FlinkEngine:
                 return {"content": content, "offset": offset + len(content.encode("utf-8")), "total": total}
         except FileNotFoundError:
             return {"content": "", "offset": offset, "total": 0}
+
+
+class FlinkJobManager:
+    """异步 Flink 任务管理:提交即返回 jobId,后台线程执行,状态可查询/取消。
+
+    动机:公司网关固定 60s 读超时,流式 SQL(SELECT 无限流 / 大结果)同步挂起
+    会被掐断返回 504。异步化后提交/查询/取消都是秒级往返,永不撞超时。
+    与 SparkJobManager 同构;引擎内部 _lock 串行,多 job 天然排队(state=queued)。
+    """
+
+    def __init__(self, engine: Any, max_jobs: int = 200, ttl: int = 3600) -> None:
+        self._engine = engine
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._max_jobs = max_jobs
+        self._ttl = ttl
+
+    def submit(self, sql: str, mode: str = "batch", limit: int = 0,
+               write_unlocked: bool = False, timeout_ms: int = 600000) -> str:
+        with self._lock:
+            self._seq += 1
+            job_id = "flk_%d_%04d" % (int(time.time()), self._seq)
+            self._jobs[job_id] = {
+                "id": job_id, "state": "queued", "sql": sql, "mode": mode,
+                "limit": limit, "write_unlocked": write_unlocked, "timeout_ms": timeout_ms,
+                "created_at": time.time(), "started_at": None, "finished_at": None,
+                "result": None, "error": None,
+            }
+        threading.Thread(target=self._run, args=(job_id,), daemon=True, name="flink-job-%s" % job_id).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        j = self._jobs.get(job_id)
+        if not j:
+            return
+        j["state"] = "running"
+        j["started_at"] = time.time()
+        try:
+            result = self._engine.execute_script(
+                j["sql"], j["limit"], mode=j["mode"], write_unlocked=j["write_unlocked"]
+            )
+            j["result"] = result
+            j["state"] = "done"
+        except Exception as e:
+            j["error"] = str(e)[:2000]
+            j["state"] = "failed"
+        finally:
+            j["finished_at"] = time.time()
+            self._gc()
+
+    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j:
+                return None
+            return {
+                "id": j["id"], "state": j["state"], "sql": j["sql"][:500],
+                "mode": j["mode"], "createdAt": j["created_at"],
+                "startedAt": j["started_at"], "finishedAt": j["finished_at"],
+                "result": j["result"], "error": j["error"],
+            }
+
+    def cancel(self, job_id: str) -> bool:
+        """取消 queued/running 的 job(引擎 _cancel_flag + JobClient.cancel 双路)。"""
+        with self._lock:
+            j = self._jobs.get(job_id)
+            if not j or j["state"] not in ("queued", "running"):
+                return False
+        try:
+            self._engine.cancel()
+            return True
+        except Exception:
+            return False
+
+    def _gc(self) -> None:
+        with self._lock:
+            now = time.time()
+            stale = [
+                i for i, j in self._jobs.items()
+                if j["state"] in ("done", "failed") and (now - (j["finished_at"] or 0)) > self._ttl
+            ]
+            for i in stale:
+                del self._jobs[i]
+            done_ids = [i for i, j in self._jobs.items() if j["state"] in ("done", "failed")]
+            overflow = len(done_ids) - self._max_jobs
+            if overflow > 0:
+                for i in sorted(done_ids, key=lambda x: self._jobs[x]["finished_at"] or 0)[:overflow]:
+                    del self._jobs[i]

@@ -13,6 +13,7 @@ import {
   query as flinkQuery, cancel as flinkCancel, status as flinkStatus,
   connectors as flinkConnectors, probeSchema as flinkProbeSchema, generateDdl as flinkGenerateDdl,
   jobs as flinkJobs, jobStatus as flinkJobStatus, jobStop as flinkJobStop,
+  asyncSubmit as flinkAsyncSubmit, asyncStatus as flinkAsyncStatus, asyncCancel as flinkAsyncCancel,
   prejobSubmit, prejobJobs, prejobStatus, prejobLogs, prejobCancel, prejobConfig
 } from './flink-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
@@ -1228,6 +1229,41 @@ if (config.dbProxyUrl) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[flink/query]', msg)
       res.status(502).json({ code: 502, msg: `flink 查询失败: ${msg.slice(0, 300)}` })
+    }
+  })
+
+  // 异步任务通道:流式 SELECT / 大结果提交即返回 jobId,前端轮询(网关 60s 超时安全)
+  app.post('/api/flink/async', async (req, res) => {
+    checkFlinkAccess(req)
+    try {
+      const data = await flinkAsyncSubmit(String(req.body?.sql || ''), {
+        mode: req.body?.mode === 'stream' ? 'stream' : 'batch',
+        writeUnlocked: true,
+        timeoutMs: Math.min(Number(req.body?.timeoutMs) || 600000, 3600000)
+      })
+      res.json({ code: 0, data })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[flink/async]', msg)
+      res.status(502).json({ code: 502, msg: `flink 异步提交失败: ${msg.slice(0, 300)}` })
+    }
+  })
+  app.get('/api/flink/async/:jobId', async (req, res) => {
+    try {
+      res.json({ code: 0, data: await flinkAsyncStatus(req.params.jobId) })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[flink/async/:id]', msg)
+      res.status(502).json({ code: 502, msg: `flink 任务状态获取失败: ${msg.slice(0, 300)}` })
+    }
+  })
+  app.post('/api/flink/async/:jobId/cancel', async (req, res) => {
+    try {
+      res.json({ code: 0, data: await flinkAsyncCancel(req.params.jobId) })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[flink/async/cancel]', msg)
+      res.status(502).json({ code: 502, msg: `flink 任务停止失败: ${msg.slice(0, 300)}` })
     }
   })
 

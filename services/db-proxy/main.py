@@ -123,6 +123,8 @@ FLINK_PREJOB = FlinkPreJobManager(
     fallback=FLINK_CFG,
 )
 if FLINK_CFG.get("enabled"):
+    from flink_engine import FlinkJobManager
+    FLINK_JOBS = FlinkJobManager(FLINK_ENGINE)
     log.info("flink engine enabled (yarnAppId=%s, allowWrite=%s)",
              FLINK_CFG.get("yarnAppId"), FLINK_CFG.get("allowWrite"))
 if FLINK_PREJOB.enabled:
@@ -1144,6 +1146,59 @@ def flink_query(
             log.exception("flink query failed: %.200s", str(e))
         raise HTTPException(status_code=502, detail=str(e)[:1000])
     return {"code": 0, "data": result}
+
+
+@app.post("/flink/async")
+def flink_job_submit(
+    req: FlinkQueryReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_spark_write: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """异步提交 flink 任务(流式 SELECT/大结果):立即返回 jobId,后台线程执行。
+
+    动机:公司网关固定 60s 读超时,流式 SQL 同步挂起会被掐断 504;
+    异步化后提交/查状态/取消均为秒级往返。
+    """
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    mode = req.mode if req.mode in ("batch", "stream") else "batch"
+    _check_spark_write_creds(req.writeUnlocked, x_spark_write)
+    if not req.sql or not str(req.sql).strip():
+        raise HTTPException(status_code=400, detail="sql is required")
+    job_id = FLINK_JOBS.submit(
+        str(req.sql), mode=mode, limit=req.limit or 0,
+        write_unlocked=req.writeUnlocked, timeout_ms=req.timeoutMs
+    )
+    log.info("flink job submitted: %s mode=%s", job_id, mode)
+    return {"code": 0, "data": {"jobId": job_id}}
+
+
+@app.get("/flink/async/{job_id}")
+def flink_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    j = FLINK_JOBS.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
+    return {"code": 0, "data": j}
+
+
+@app.post("/flink/async/{job_id}/cancel")
+def flink_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not FLINK_CFG.get("enabled"):
+        raise HTTPException(
+            status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
+        )
+    if not FLINK_JOBS.cancel(job_id):
+        raise HTTPException(status_code=404, detail="job not found or already finished: %s" % job_id)
+    return {"code": 0, "data": {"cancelled": True}}
 
 
 @app.post("/flink/cancel")

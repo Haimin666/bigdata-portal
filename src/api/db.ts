@@ -381,6 +381,37 @@ export async function flinkJobStop(jobId: string): Promise<{ stopped: boolean }>
   return flinkRequest('/jobs/' + jobId + '/stop', { method: 'POST' })
 }
 
+// ── Flink 异步任务通道(流式 SELECT / 大结果,避免网关 60s 超时 504)──
+export interface FlinkAsyncJob {
+  id: string
+  state: 'queued' | 'running' | 'done' | 'failed'
+  sql?: string
+  mode?: string
+  createdAt?: number
+  startedAt?: number | null
+  finishedAt?: number | null
+  result?: DbQueryResult | null
+  error?: string | null
+}
+
+/** 异步提交 Flink SQL(提交即返回 jobId) */
+export async function flinkAsyncSubmit(sql: string, mode: 'batch' | 'stream' = 'batch'): Promise<{ jobId: string }> {
+  return flinkRequest('/async', {
+    method: 'POST',
+    body: JSON.stringify({ sql, mode, timeoutMs: 600000 })
+  })
+}
+
+/** 查询异步任务状态(结果在 state=done 时返回) */
+export async function flinkAsyncStatus(jobId: string): Promise<FlinkAsyncJob> {
+  return flinkRequest('/async/' + jobId)
+}
+
+/** 取消异步任务 */
+export async function flinkAsyncCancel(jobId: string): Promise<{ cancelled: boolean }> {
+  return flinkRequest('/async/' + jobId + '/cancel', { method: 'POST' })
+}
+
 /** Flink 引擎状态 */
 export async function flinkStatus(): Promise<Record<string, unknown>> {
   return flinkRequest('/status')

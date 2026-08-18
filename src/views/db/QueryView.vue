@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -1357,11 +1357,37 @@ function onInsertFlinkDdl(ddls: string[]) {
   ElMessage.success(`已插入 ${ddls.length} 条 CREATE TABLE`)
 }
 
-/** Flink 执行:所有 flink 任务都要解锁(与 Spark 共用同一密码/token);
- *  未解锁先弹密码框;token 过期(网关 403)自动重新解锁后重试一次 */
+/** Flink 执行:流模式(SELECT 无限流/大结果)走异步任务通道(提交即返回 jobId,
+ *  前端轮询,避免网关 60s 超时 504);batch 模式同步秒回。 */
+const currentFlinkJobId = ref('')
 async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  // 写权限密码验证已移除(网关库权限矩阵管控),直接执行
-  return queryFlink(sql, flinkMode.value)
+  // batch:同步执行(秒回)
+  if (flinkMode.value !== 'stream') {
+    return queryFlink(sql, 'batch')
+  }
+  // stream:异步提交 + 轮询(3s 一次,低频)
+  const { jobId } = await flinkAsyncSubmit(sql, 'stream')
+  currentFlinkJobId.value = jobId
+  const deadline = Date.now() + 60 * 60 * 1000 // 上限 1 小时(与 db-proxy timeoutMs 一致)
+  try {
+    for (;;) {
+      const j = await flinkAsyncStatus(jobId)
+      if (j.state === 'done') {
+        if (j.result) return j.result
+        return { columns: [], rows: [], costMs: 0, truncated: true }
+      }
+      if (j.state === 'failed') {
+        throw new Error(j.error || '任务执行失败')
+      }
+      if (Date.now() > deadline) {
+        try { await flinkAsyncCancel(jobId) } catch { /* ignore */ }
+        throw new Error('任务超时(1 小时),已自动取消')
+      }
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+  } finally {
+    currentFlinkJobId.value = ''
+  }
 }
 
 /** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
@@ -1590,7 +1616,17 @@ async function stopQuery() {
   runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
   try {
     if (engine.value === 'flinksql') {
-      await cancelFlink()
+      // 流式异步任务:精确取消当前 job;batch 同步查询走 cancelFlink
+      if (currentFlinkJobId.value) {
+        try {
+          await flinkAsyncCancel(currentFlinkJobId.value)
+        } catch {
+          /* 忽略 */
+        }
+        currentFlinkJobId.value = ''
+      } else {
+        await cancelFlink()
+      }
     } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
       // 异步任务:优先精确取消当前 job,再兜底取消引擎当前 job group
       if (currentSparkJobId.value) {
