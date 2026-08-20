@@ -427,20 +427,36 @@ export interface FlinkPreJob {
   finalStatus: string
   trackingUrl: string
   queue: string
+  resources: Record<string, string | number>
+  enabled: boolean
   submittedAt: string
   updatedAt: string
   error: string
   sql?: string
 }
 
+/** PreJob 资源配置 */
+export interface FlinkPreJobResources {
+  parallelism?: number
+  jobManagerMemory?: string
+  taskManagerMemory?: string
+  slotsPerTaskManager?: number
+}
+
 /** 提交 Flink PreJob(需解锁;会真实向 YARN 提交独立作业) */
-export async function flinkPrejobSubmit(name: string, sql: string, writeToken?: string, queue?: string): Promise<FlinkPreJob> {
+export async function flinkPrejobSubmit(
+  name: string,
+  sql: string,
+  writeToken?: string,
+  queue?: string,
+  resources?: FlinkPreJobResources
+): Promise<FlinkPreJob> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
   return flinkRequest<FlinkPreJob>('/prejob/jobs', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ name, sql, ...(queue ? { queue } : {}) })
+    body: JSON.stringify({ name, sql, ...(queue ? { queue } : {}), ...(resources ? { resources } : {}) })
   })
 }
 
@@ -463,6 +479,28 @@ export async function flinkPrejobLogs(jobId: string, tail = 200): Promise<{ appI
 /** 停止 PreJob 作业 */
 export async function flinkPrejobCancel(jobId: string): Promise<{ cancelled: boolean }> {
   return flinkRequest('/prejob/jobs/' + jobId + '/cancel', { method: 'POST' })
+}
+
+/** 下线 PreJob(停止运行 + 标记停用) */
+export async function flinkPrejobDisable(jobId: string): Promise<{ disabled: boolean }> {
+  return flinkRequest('/prejob/jobs/' + jobId + '/disable', { method: 'POST' })
+}
+
+/** 上线 PreJob(按定义重新提交 + 标记启用) */
+export async function flinkPrejobEnable(jobId: string): Promise<FlinkPreJob> {
+  return flinkRequest('/prejob/jobs/' + jobId + '/enable', { method: 'POST' })
+}
+
+/** 编辑 PreJob 定义(改 sql/name/queue/resources,持久化) */
+export async function flinkPrejobUpdate(
+  jobId: string,
+  patch: { name?: string; sql?: string; queue?: string; resources?: FlinkPreJobResources }
+): Promise<FlinkPreJob> {
+  return flinkRequest('/prejob/jobs/' + jobId, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch)
+  })
 }
 
 /** PreJob 配置快照 */

@@ -158,7 +158,8 @@ class FlinkPreJobManager:
     # ── 提交 ────────────────────────────────────────────
     def submit(self, name: str, sql: str, queue: Optional[str] = None,
                extra_conf: Optional[Dict[str, str]] = None,
-               write_unlocked: bool = False) -> Dict[str, Any]:
+               write_unlocked: bool = False,
+               resources: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.enabled:
             raise PermissionError("flink prejob disabled (datasources.json flink.prejob.enabled=false)")
         # S2:与交互引擎一致的写判定 —— prejob 提交前逐条检查,受 allowWrite 且需门户解锁(write_unlocked)
@@ -194,6 +195,8 @@ class FlinkPreJobManager:
                 "finalStatus": "UNDEFINED",
                 "trackingUrl": "",
                 "queue": queue or self._queue,
+                "resources": resources or {},
+                "enabled": True,
                 "submittedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "scriptPath": script_path,
@@ -236,15 +239,31 @@ class FlinkPreJobManager:
         flink_bin = os.path.join(self._flink_home, "bin", "flink")
         if not os.path.exists(flink_bin):
             raise FileNotFoundError("flink CLI not found: %s (prejob.flinkHome)" % flink_bin)
-        return [
+        cmd = [
             flink_bin, "run",
             "-t", "yarn-per-job",
             "-d",
             "-D", "python.client.executable=%s" % self._python_bin,
             "-D", "yarn.application.name=%s" % str(record.get("name", "flink-prejob"))[:100],
             "-yqu", record.get("queue") or self._queue,
-            "-py", record.get("scriptPath", ""),
         ]
+        # 资源配置(parallelism / JM-TM 内存 / slots),缺省给 Flink 默认
+        res = record.get("resources") or {}
+        parallelism = res.get("parallelism")
+        if parallelism:
+            cmd += ["-p", str(parallelism)]
+            cmd += ["-D", "pipeline.parallelism=%s" % parallelism]
+        jm_mem = res.get("jobManagerMemory")
+        if jm_mem:
+            cmd += ["-D", "jobmanager.memory.process.size=%s" % jm_mem]
+        tm_mem = res.get("taskManagerMemory")
+        if tm_mem:
+            cmd += ["-D", "taskmanager.memory.process.size=%s" % tm_mem]
+        slots = res.get("slotsPerTaskManager")
+        if slots:
+            cmd += ["-D", "taskmanager.numberOfTaskSlots=%s" % slots]
+        cmd += ["-py", record.get("scriptPath", "")]
+        return cmd
 
     def _build_env(self) -> Dict[str, str]:
         env = dict(os.environ)
@@ -330,6 +349,71 @@ class FlinkPreJobManager:
         except Exception as e:
             raise RuntimeError("%s: %s" % (type(e).__name__, e))
 
+    def disable(self, job_id: str) -> bool:
+        """下线:停止当前运行并标记停用(enabled=False)。未运行则仅置标记。"""
+        with self._lock:
+            jobs = self._load_jobs()
+            r = jobs.get(job_id)
+            if not r:
+                raise KeyError("prejob not found: %s" % job_id)
+            r["enabled"] = False
+            r["updatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._persist(r)
+        try:
+            if r.get("appId") and r.get("status") not in (
+                "SUBMIT_FAILED", "FINISHED", "FAILED", "KILLED",
+            ):
+                self.cancel(job_id)
+        except Exception as e:
+            if log:
+                log.warning("prejob disable: stop failed: %s :: %s", job_id, e)
+        return True
+
+    def enable(self, job_id: str) -> Dict[str, Any]:
+        """上线:按已持久化的 sql/queue/resources 重新提交并标记启用。"""
+        with self._lock:
+            jobs = self._load_jobs()
+            r = jobs.get(job_id)
+            if not r:
+                raise KeyError("prejob not found: %s" % job_id)
+            sql = r.get("sql", "")
+            name = r.get("name", job_id)
+            queue = r.get("queue", None)
+            resources = r.get("resources", {})
+        if not sql:
+            raise RuntimeError("no sql definition for %s" % job_id)
+        return self.submit(
+            name, sql, queue=queue, resources=resources, write_unlocked=True,
+        )
+
+    def update(self, job_id: str, name: Optional[str] = None,
+               sql: Optional[str] = None, queue: Optional[str] = None,
+               resources: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """编辑任务定义(sql/name/queue/resources 持久化)。已运行需先下线再上线生效。"""
+        with self._lock:
+            jobs = self._load_jobs()
+            r = jobs.get(job_id)
+            if not r:
+                raise KeyError("prejob not found: %s" % job_id)
+            if name is not None:
+                r["name"] = name or r.get("name", "")
+            if sql is not None:
+                r["sql"] = sql
+                # 同步重写脚本文件
+                try:
+                    with open(r["scriptPath"], "w", encoding="utf-8") as f:
+                        f.write(self._build_script(sql))
+                except Exception as e:
+                    if log:
+                        log.error("prejob update: rewrite script failed: %s", e)
+            if queue is not None:
+                r["queue"] = queue
+            if resources is not None:
+                r["resources"] = resources
+            r["updatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._persist(r)
+            return self._public(r, detail=True)
+
     def _refresh(self, record: Dict[str, Any]) -> None:
         app_id = record.get("appId", "")
         if not app_id or not self._rm_url:
@@ -362,6 +446,8 @@ class FlinkPreJobManager:
             "finalStatus": r.get("finalStatus", "UNDEFINED"),
             "trackingUrl": r.get("trackingUrl", ""),
             "queue": r.get("queue", ""),
+            "resources": r.get("resources", {}),
+            "enabled": bool(r.get("enabled", True)),
             "submittedAt": r.get("submittedAt", ""),
             "updatedAt": r.get("updatedAt", ""),
             "error": r.get("error", ""),

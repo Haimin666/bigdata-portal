@@ -29,7 +29,6 @@ import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
-import FlinkJobsDialog from './FlinkJobsDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
 
 defineOptions({ name: 'DbQueryView' })
@@ -1404,7 +1403,6 @@ async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
 const flinkMode = ref<'batch' | 'stream'>('batch')
 const showFlinkConn = ref(false)
-const showFlinkJobs = ref(false)
 const showFlinkPreJob = ref(false)
 
 /** 连接器弹窗生成 DDL → 插入编辑器(多段用空行分隔) */
@@ -1913,7 +1911,6 @@ async function copyAllTsv() {
           <el-radio-button value="stream">流</el-radio-button>
         </el-radio-group>
         <el-tooltip content="连接器管理" placement="top"><el-button size="small" :icon="MagicStick" @click="showFlinkConn = true" /></el-tooltip>
-        <el-tooltip content="流任务管理" placement="top"><el-button size="small" :icon="VideoPause" @click="showFlinkJobs = true" /></el-tooltip>
         <el-tooltip content="PreJob 提交/管理" placement="top"><el-button size="small" :icon="Promotion" @click="showFlinkPreJob = true" /></el-tooltip>
         <el-divider direction="vertical" />
       </template>
@@ -2139,7 +2136,7 @@ async function copyAllTsv() {
                 plain
                 @click="commitEdits"
               >提交修改 ({{ currentResult.pendingEdits?.length ?? 0 }})</el-button>
-              <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkJobs = true">查看状态</el-button>
+              <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkPreJob = true">流任务管理</el-button>
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
@@ -2176,9 +2173,6 @@ async function copyAllTsv() {
 
   <!-- Flink 连接器批量建表弹窗 -->
   <FlinkConnectorDialog v-model="showFlinkConn" @insert="onInsertFlinkDdl" />
-
-  <!-- Flink 流式任务管理弹窗 -->
-  <FlinkJobsDialog v-model="showFlinkJobs" />
 
   <!-- Flink PreJob 提交/管理弹窗 -->
   <FlinkPreJobDialog v-model="showFlinkPreJob" />

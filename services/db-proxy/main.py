@@ -1344,6 +1344,14 @@ class FlinkPreJobReq(BaseModel):
     sql: str
     queue: Optional[str] = None
     writeUnlocked: bool = False  # 写类 prejob 需门户解锁后置位(服务端校验 X-Spark-Write)
+    resources: Optional[Dict[str, Any]] = None  # {parallelism, jobManagerMemory, taskManagerMemory, slotsPerTaskManager}
+
+
+class FlinkPreJobUpdateReq(BaseModel):
+    name: Optional[str] = None
+    sql: Optional[str] = None
+    queue: Optional[str] = None
+    resources: Optional[Dict[str, Any]] = None
 
 
 def _prejob_guard() -> None:
@@ -1376,7 +1384,8 @@ def flink_prejob_submit(
         # 写凭证校验:与 spark/flink 交互同密钥体系,防直连伪造 writeUnlocked 向 YARN 提交写作业
         _check_spark_write_creds(req.writeUnlocked, x_spark_write)
         return {"code": 0, "data": FLINK_PREJOB.submit(
-            req.name, req.sql, queue=req.queue, write_unlocked=req.writeUnlocked
+            req.name, req.sql, queue=req.queue, write_unlocked=req.writeUnlocked,
+            resources=req.resources,
         )}
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -1427,6 +1436,48 @@ def flink_prejob_cancel(job_id: str, x_db_token: Optional[str] = Header(default=
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"code": 0, "data": {"cancelled": cancelled}}
+
+
+@app.post("/flink/prejob/jobs/{job_id}/disable")
+def flink_prejob_disable(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    _prejob_guard()
+    try:
+        ok = FLINK_PREJOB.disable(job_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 0, "data": {"disabled": ok}}
+
+
+@app.post("/flink/prejob/jobs/{job_id}/enable")
+def flink_prejob_enable(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    _prejob_guard()
+    try:
+        job = FLINK_PREJOB.enable(job_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 0, "data": job}
+
+
+@app.put("/flink/prejob/jobs/{job_id}")
+def flink_prejob_update(
+    job_id: str, req: FlinkPreJobUpdateReq,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    _prejob_guard()
+    try:
+        job = FLINK_PREJOB.update(
+            job_id, name=req.name, sql=req.sql, queue=req.queue, resources=req.resources,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"code": 0, "data": job}
 
 
 # ── 脚本存储(我的目录:保存 SQL 脚本)────────────────────────────

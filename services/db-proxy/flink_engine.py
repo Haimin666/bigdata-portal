@@ -453,6 +453,29 @@ class FlinkEngine:
         # 查询类
         is_query = bool(re.match(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b", stmt_s, re.IGNORECASE))
 
+        # 非 paimon 的 CREATE TABLE 自动转为 TEMPORARY:
+        # 默认 catalog 是 paimon_hive_store 时,Paimon 只接收 paimon connector 表;
+        # datagen / mysql-cdc / kafka / print 等连接器必须建在临时 catalog(session 级)。
+        # 仅改写「无 catalog/库前缀」的裸 CREATE TABLE,不碰 USE/CREATE TEMPORARY 及显式指定 paimon 库。
+        ct = re.match(
+            r"^\s*CREATE\s+(?:TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([^\s(]+)", stmt_s, re.IGNORECASE
+        )
+        if ct:
+            table_ref = ct.group(1).strip("`")
+            is_explicit_paimon = "." in table_ref and (
+                "paimon" in table_ref.lower() or table_ref.lower().startswith("paimon_hive_store")
+            )
+            is_already_temp = bool(re.match(r"^\s*CREATE\s+TEMPORARY\b", stmt_s, re.IGNORECASE))
+            non_paimon_connector = bool(
+                re.search(r"['\"]?connector['\"]?\s*=\s*'(?!paimon\b)[^']*'", stmt_s, re.IGNORECASE)
+            ) or bool(re.search(r"'\s*=\s*'(datagen|print|kafka|mysql-cdc|jdbc)'", stmt_s, re.IGNORECASE))
+            if not is_already_temp and not is_explicit_paimon and non_paimon_connector:
+                stmt_s = re.sub(
+                    r"^\s*CREATE\s+TABLE", "CREATE TEMPORARY TABLE", stmt_s, count=1, flags=re.IGNORECASE
+                )
+                if log:
+                    log.info("flink auto TEMPORARY: %.120s", stmt_s)
+
         if is_query:
             result = t_env.execute_sql(stmt_s)
             try:
