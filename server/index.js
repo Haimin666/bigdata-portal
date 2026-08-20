@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
-import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, cancel as sparkCancel, submitJob as sparkSubmitJob, jobStatus as sparkJobStatus, cancelJob as sparkCancelJob } from './spark-gateway.js'
+import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, stagesStatus as sparkStages, cancel as sparkCancel, submitJob as sparkSubmitJob, jobStatus as sparkJobStatus, cancelJob as sparkCancelJob } from './spark-gateway.js'
 import {
   query as flinkQuery, cancel as flinkCancel, status as flinkStatus,
   connectors as flinkConnectors, probeSchema as flinkProbeSchema, generateDdl as flinkGenerateDdl,
@@ -1154,8 +1154,9 @@ if (config.dbProxyUrl) {
   // Spark driver 日志透传(增量),供前端查询页日志面板展示
   app.get('/api/spark/logs', async (req, res) => {
     try {
-      const offset = Number(req.query.offset) || 0
-      const data = await sparkReadLogs(offset)
+      // 前端按 jvm/audit 两个文件各传增量 offset;必须原样透传,
+      // 否则固定从 0 读整个文件 → 日志面板每次都显示全部历史(叠加)
+      const data = await sparkReadLogs({ jvm: Number(req.query.jvm) || 0, audit: Number(req.query.audit) || 0 })
       res.json({ code: 0, data })
     } catch (e) {
       console.error('[spark/logs]', e instanceof Error ? e.message : e)
@@ -1171,6 +1172,17 @@ if (config.dbProxyUrl) {
     } catch (e) {
       console.error('[spark/status]', e instanceof Error ? e.message : e)
       res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
+    }
+  })
+
+  // Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条轮询)
+  app.get('/api/spark/stages', async (req, res) => {
+    try {
+      const data = await sparkStages()
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[spark/stages]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark stage 进度获取失败' })
     }
   })
 

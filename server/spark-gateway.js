@@ -102,6 +102,12 @@ export async function status() {
   return res.data
 }
 
+/** Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条) */
+export async function stagesStatus() {
+  const res = await proxy('/spark/stages', { timeoutMs: 10000 })
+  return res.data
+}
+
 /** 取消当前正在执行的 spark 查询/代码(前端"停止"按钮) */
 export async function cancel() {
   const res = await proxy('/spark/cancel', { method: 'POST', timeoutMs: 10000 })
