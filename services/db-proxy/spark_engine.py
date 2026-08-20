@@ -240,6 +240,24 @@ class SparkEngine:
             pass
         log.info("spark audit: %s", msg)
 
+    def _context_stopped(self) -> bool:
+        """安全判断 SparkContext 是否已停止。
+
+        pyspark 的 Python SparkContext 没有 isStopped 属性(那是 Java 侧
+        `_jsc.sc().isStopped()`),直接访问会抛 AttributeError —— 曾导致
+        stages_status/snapshot 常年静默失败。这里走 Java 侧并兜底:
+        异常/存疑时按存活处理,不破坏调用方。
+        """
+        if self._spark is None:
+            return True
+        try:
+            jsc = self._spark.sparkContext._jsc
+            if jsc is None:  # Python 侧 stop() 已把 _jsc 置空
+                return True
+            return bool(jsc.sc().isStopped())
+        except Exception:
+            return False
+
     def _ensure_initialized(self) -> None:
         """首次使用时创建 SparkSession(懒加载,避免 db-proxy 启动即依赖 spark)。
 
@@ -249,13 +267,9 @@ class SparkEngine:
         with self._init_lock:
             # 兜底:context 被外部 stop(异常中断/YARN 回收)→ 置空走重建,避免
             # "Cannot call methods on a stopped SparkContext" 卡死后续查询
-            if self._spark is not None:
-                try:
-                    if self._spark.sparkContext.isStopped:
-                        log.warning("spark context is stopped, rebuilding session")
-                        self._spark = None
-                except Exception:
-                    pass
+            if self._spark is not None and self._context_stopped():
+                log.warning("spark context is stopped, rebuilding session")
+                self._spark = None
             if self._spark is not None:
                 return
             self._session_state = "starting"
@@ -624,7 +638,7 @@ class SparkEngine:
         [stage] 行格式: [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name>
         """
         try:
-            if self._spark is None or self._spark.sparkContext.isStopped:
+            if self._context_stopped():
                 return
             st = self._spark.sparkContext.statusTracker()
             jobs: Dict[int, str] = {}
@@ -685,7 +699,7 @@ class SparkEngine:
         """
         empty: Dict[str, Any] = {"activeJobs": [], "stages": [], "numActiveJobs": 0, "numActiveStages": 0}
         try:
-            if self._spark is None or self._spark.sparkContext.isStopped:
+            if self._context_stopped():
                 with self._stages_lock:
                     return self._last_stage_snapshot or dict(empty)
             st = self._spark.sparkContext.statusTracker()
