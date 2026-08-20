@@ -3,6 +3,8 @@ datasources.json
 .env.local
 # 网关 JSON 配置(唯一配置源,含账号/令牌,不入库)
 server/config.local.json
+# 网关配置备份(含账号/令牌,不入库)
+server/config.local.json.*-bak
 # docker compose 变量替换文件(内网构建参数等,按环境定制)
 .env
 .reasonix
@@ -19,6 +21,9 @@ dist/
 # npmctl 运行时产物(进程 PID 与日志)
 .portal.pid
 .portal.log
+# db-proxy 引擎运行时日志(spark driver log4j 落盘 / flink 本地日志,不入库)
+services/db-proxy/spark-logs/
+services/db-proxy/flink-logs/
 
 # playwright-cli 会话产物(快照/截图)
 .playwright-cli/
@@ -42,6 +47,7 @@ tmp/
 demo-query-ui/
 # MCP 本地配置(含本机绝对路径)
 .mcp.json
-# Python 编译缓存
+# Python 编译缓存与虚拟环境
 __pycache__/
 *.pyc
+.venv/

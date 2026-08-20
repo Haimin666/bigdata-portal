@@ -90,6 +90,22 @@ def _format_spark_error(e: BaseException) -> str:
     return msg[:500]
 
 
+def _infer_stage_status(num: int, done: int, failed: int, active: int, job_statuses: Dict[int, str]) -> str:
+    """从 statusTracker 的 stage 计数推断状态(SparkStageInfo 无 status 字段)。
+
+    已完成优先;其次看所属 job 是否失败;再按活跃 task 判断运行中。
+    """
+    if num > 0 and done >= num:
+        return "SUCCEEDED"
+    if any(s in ("FAILED", "KILLED") for s in job_statuses.values()):
+        return "FAILED"
+    if active > 0:
+        return "RUNNING"
+    if done > 0 or failed > 0:
+        return "RUNNING"
+    return "PENDING"
+
+
 def _extract_tables(sql: str) -> List[str]:
     """从 SQL 中提取可能涉及的表名(db.table 或 table),用于 REFRESH。
 
@@ -145,6 +161,10 @@ class SparkEngine:
         self._session_state = "disabled"  # disabled|starting|idle|error
         self._last_error: Optional[str] = None
         self._current_job_group: Optional[str] = None  # 当前执行中的 Spark jobGroup(可取消)
+        self._last_job_group: Optional[str] = None  # 最近一次查询的 jobGroup(查询结束后仍可追溯 stage)
+        self._last_stage_snapshot: Optional[Dict[str, Any]] = None  # 最近一次有 stage 的快照(会话停止时兜底)
+        self._stages_lock = threading.Lock()  # 保护 _last_stage_snapshot 读写
+        self._audit_lock = threading.Lock()  # 串行化 audit 文件追加(执行/保活/HTTP 多线程)
         self._cancel_flag = threading.Event()  # 手动/超时取消标记
         self._keepalive_thread: Optional[threading.Thread] = None
         self._log_dir = os.path.join(base_dir, str(cfg.get("logDir", "spark-logs")))
@@ -213,8 +233,9 @@ class SparkEngine:
     def _audit(self, msg: str) -> None:
         line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
         try:
-            with open(self._audit_file, "a", encoding="utf-8") as f:
-                f.write(line)
+            with self._audit_lock:  # 多线程(执行线程/保活线程/HTTP 日志读取)追加不互相截断
+                with open(self._audit_file, "a", encoding="utf-8") as f:
+                    f.write(line)
         except Exception:
             pass
         log.info("spark audit: %s", msg)
@@ -341,6 +362,10 @@ class SparkEngine:
         gid = "dbp-%d-%d" % (int(time.time() * 1000), threading.get_ident())
         self._current_job_group = gid
         self._cancel_flag.clear()
+        # 新查询开始:丢弃上一查询的 stage 快照与 group 回查,避免新旧 stage 在面板上混杂
+        with self._stages_lock:
+            self._last_stage_snapshot = None
+        self._last_job_group = None
         try:
             # interruptOnCancel:取消时中断 driver 侧线程,让 collect() 快速返回而非卡死
             self._spark.sparkContext.setJobGroup(gid, "db-proxy query", interruptOnCancel=True)
@@ -349,7 +374,12 @@ class SparkEngine:
         return gid
 
     def _end_job(self) -> None:
+        gid = self._current_job_group
+        if gid:
+            # 查询结束:把该 jobGroup 的 stage 汇总写入 audit 日志并缓存快照(完成后仍可追溯)
+            self._snapshot_and_log_stages(gid)
         self._current_job_group = None
+        self._last_job_group = gid or self._last_job_group  # 保留供 /spark/stages 查询结束后继续回读
         self._cancel_flag.clear()
         try:
             self._spark.sparkContext.clearJobGroup()
@@ -587,30 +617,91 @@ class SparkEngine:
                 self._end_job()
 
     # ── Stage 进度(statusTracker)──────────────────────────────
+    def _snapshot_and_log_stages(self, gid: str) -> None:
+        """查询结束时:把该 jobGroup 的 stage 汇总写成 [stage] 行写入 audit 日志,并缓存快照。
+
+        供前端日志面板解析展示(完成后仍可追溯);不依赖 log4j 是否生效。
+        [stage] 行格式: [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name>
+        """
+        try:
+            if self._spark is None or self._spark.sparkContext.isStopped:
+                return
+            st = self._spark.sparkContext.statusTracker()
+            jobs: Dict[int, str] = {}
+            stage_ids: set = set()
+            for jid in st.getJobIdsForGroup(gid):
+                info = st.getJobInfo(jid)
+                if info is None:
+                    continue
+                jobs[jid] = str(getattr(info, "status", "UNKNOWN") or "UNKNOWN")
+                stage_ids.update(getattr(info, "stageIds", []) or [])
+            stages: List[Dict[str, Any]] = []
+            for sid in sorted(stage_ids):
+                info = st.getStageInfo(sid)
+                if info is None:
+                    continue
+                num = int(getattr(info, "numTasks", 0) or 0)
+                done = int(getattr(info, "numCompletedTasks", 0) or 0)
+                failed = int(getattr(info, "numFailedTasks", 0) or 0)
+                active = int(getattr(info, "numActiveTasks", 0) or 0)
+                name = str(getattr(info, "name", "") or "")
+                stages.append(
+                    {
+                        "stageId": sid,
+                        "name": name,
+                        "status": _infer_stage_status(num, done, failed, active, jobs),
+                        "numTasks": num,
+                        "completedTasks": done,
+                        "failedTasks": failed,
+                    }
+                )
+            for s in stages:
+                self._audit(
+                    "[stage] done stage=%d status=%s tasks=%d/%d name=%s"
+                    % (s["stageId"], s["status"], s["completedTasks"], s["numTasks"], s["name"])
+                )
+            if stages:
+                with self._stages_lock:
+                    self._last_stage_snapshot = {
+                        "activeJobs": [],
+                        "stages": stages,
+                        "numActiveJobs": 0,
+                        "numActiveStages": 0,
+                    }
+        except Exception as e:
+            log.warning("snapshot/log stages failed: %s", e)
+
     def stages_status(self) -> Dict[str, Any]:
         """Spark 活跃 job/stage 进度(供前端日志面板展示进度条)。
 
         依赖 sparkContext.statusTracker()(Spark 2.1+);local 模式 / session 未启动时降级为空。
+        查询结束后通过保留最近 jobGroup + 缓存快照,仍能读到已完成 stage(可追溯);
+        大查询受 spark.ui.retainedStages(默认 1000)限制,超限的旧 stage 会被回收。
         """
         empty: Dict[str, Any] = {"activeJobs": [], "stages": [], "numActiveJobs": 0, "numActiveStages": 0}
         try:
             if self._spark is None or self._spark.sparkContext.isStopped:
-                return empty
+                with self._stages_lock:
+                    return self._last_stage_snapshot or dict(empty)
             st = self._spark.sparkContext.statusTracker()
             job_ids: set = set(st.getActiveJobIds())
-            gid = self._current_job_group
-            if gid:
-                job_ids.update(st.getJobIdsForGroup(gid))
+            # 当前 jobGroup + 最近一次已完成 group:让已完成 stage 在查询结束后仍能读到
+            for gid in (self._current_job_group, self._last_job_group):
+                if gid:
+                    job_ids.update(st.getJobIdsForGroup(gid))
             jobs: List[Dict[str, Any]] = []
+            job_status: Dict[int, str] = {}
             stage_ids: set = set()
             for jid in sorted(job_ids):
                 info = st.getJobInfo(jid)
                 if info is None:
                     continue
+                status = str(getattr(info, "status", "UNKNOWN") or "UNKNOWN")
+                job_status[jid] = status
                 jobs.append(
                     {
                         "jobId": jid,
-                        "status": str(getattr(info, "status", "UNKNOWN")),
+                        "status": status,
                         "stageIds": list(getattr(info, "stageIds", []) or []),
                     }
                 )
@@ -622,24 +713,32 @@ class SparkEngine:
                     continue
                 num = int(getattr(info, "numTasks", 0) or 0)
                 done = int(getattr(info, "numCompletedTasks", 0) or 0)
+                failed = int(getattr(info, "numFailedTasks", 0) or 0)
+                active = int(getattr(info, "numActiveTasks", 0) or 0)
                 stages.append(
                     {
                         "stageId": sid,
                         "name": str(getattr(info, "name", "") or ""),
-                        "status": str(getattr(info, "status", "UNKNOWN")),
+                        # SparkStageInfo 无 status 字段,由 task 计数 + 所属 job 状态推断
+                        "status": _infer_stage_status(num, done, failed, active, job_status),
                         "numTasks": num,
                         "completedTasks": done,
-                        "failedTasks": int(getattr(info, "numFailedTasks", 0) or 0),
+                        "failedTasks": failed,
                     }
                 )
-            return {
+            data: Dict[str, Any] = {
                 "activeJobs": jobs,
                 "stages": stages,
                 "numActiveJobs": len([j for j in jobs if j["status"] == "RUNNING"]),
                 "numActiveStages": len([s for s in stages if s["status"] == "RUNNING"]),
             }
+            if stages:
+                with self._stages_lock:
+                    self._last_stage_snapshot = data
+            return data
         except Exception as e:  # statusTracker 在部分部署/版本不可用,不影响查询本身
-            return {"error": str(e), **empty}
+            with self._stages_lock:
+                return self._last_stage_snapshot or {"error": str(e), **empty}
 
     # ── 日志透传 ──────────────────────────────────────────────
     def read_logs(self, offsets: Optional[Dict[str, int]] = None) -> Dict[str, Any]:

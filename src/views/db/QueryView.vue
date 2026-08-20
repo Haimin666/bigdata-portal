@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -663,6 +663,8 @@ function stageStatusClass(s: string): string {
 const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度动态计算,填满即滚动打印
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
+const sparkLogFileSizes = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 }) // 最近一次 poll 返回的文件大小,clear 时作为新基线
+let sparkLogBaselineSet = false // 会话/新查询首拉只建基线:跳过文件里既有历史日志(含旧查询的 [stage] 行)
 let logResizeObserver: ResizeObserver | null = null
 const LOG_LINE_HEIGHT = 20 // 12px 字体 × 1.55 行高 ≈ 18.6px,取整留余量
 
@@ -707,24 +709,80 @@ watch(sparkLogText, () => {
   if (activePane.value === 0) scrollLogToBottom()
 })
 
+/** [stage] 完成行解析(由 db-proxy 在查询结束时写入 audit 日志):
+ *   [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name> */
+const stageDoneLineRe = /\[stage\] done stage=(\d+) status=(\w+) tasks=(\d+)\/(\d+) name=(.*)$/
+function parseStageDoneLines(chunk: string): SparkStage[] {
+  const out: SparkStage[] = []
+  for (const line of chunk.split('\n')) {
+    const m = line.match(stageDoneLineRe)
+    if (!m) continue
+    const done = Number(m[3])
+    const total = Number(m[4])
+    out.push({
+      stageId: Number(m[1]),
+      name: m[5],
+      status: m[2].toUpperCase(),
+      numTasks: total,
+      completedTasks: done,
+      failedTasks: 0
+    })
+  }
+  return out
+}
+/** 把 [stage] 完成行合并进面板状态(终态,直接覆盖/新增;完成后仍可追溯) */
+function applyParsedStages(stages: SparkStage[]) {
+  if (!stages.length) return
+  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
+  for (const s of stages) map.set(s.stageId, s)
+  sparkStageData.value = {
+    ...sparkStageData.value,
+    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
+  }
+}
+/** 把 statusTracker 活跃 stage 合并进面板状态(终态不被 RUNNING 覆盖) */
+function applySparkStages(st: SparkStagesData) {
+  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
+  for (const s of st.stages) {
+    const prev = map.get(s.stageId)
+    if (prev && (prev.status === 'SUCCEEDED' || prev.status === 'FAILED')) continue
+    map.set(s.stageId, s)
+  }
+  sparkStageData.value = {
+    activeJobs: st.activeJobs,
+    numActiveJobs: st.numActiveJobs,
+    numActiveStages: st.numActiveStages,
+    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
+  }
+}
+
 /** 拉取 spark 日志增量并追加 */
 async function pollSparkLogs() {
   const seq = sparkLogSeq
   try {
     const data = await sparkLogs(sparkLogOffsets.value)
     if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
+    sparkLogFileSizes.value = data.files
+    if (!sparkLogBaselineSet) {
+      // 会话/新查询首次拉取:只建立基线,丢弃文件里既有的历史日志(含旧查询的 [stage] 行)
+      sparkLogBaselineSet = true
+      sparkLogOffsets.value = data.offsets
+      return
+    }
     if (data.content) {
       sparkLogText.value += data.content
       // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
       const lines = sparkLogText.value.split('\n')
       if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
+      // 解析 [stage] 完成行 → 更新 Stage 进度(查询结束后由 db-proxy 写入)
+      applyParsedStages(parseStageDoneLines(data.content))
     }
     sparkLogOffsets.value = data.offsets
-    // spark 引擎:同节奏轮询 job/stage 进度(statusTracker)
+    // spark 引擎:同节奏轮询 job/stage 进度(statusTracker,与 [stage] 行按 stageId 合并)
     if (engine.value === 'sparksql' || engine.value === 'pyspark') {
       try {
         const st = await sparkStages()
-        if (seq === sparkLogSeq) sparkStageData.value = st
+        if (seq === sparkLogSeq) applySparkStages(st)
       } catch {
         /* stage 接口不可用不影响日志 */
       }
@@ -751,8 +809,10 @@ function stopSparkLogPolling() {
 function clearSparkLogs() {
   sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
   sparkLogText.value = ''
-  sparkLogOffsets.value = { jvm: 0, audit: 0 }
   sparkStageData.value = { activeJobs: [], stages: [], numActiveJobs: 0, numActiveStages: 0 }
+  // 基线重打 + offset 跳到已知文件末尾:新查询只展示新增日志,不重读旧内容(含旧 [stage] 行)
+  sparkLogBaselineSet = false
+  sparkLogOffsets.value = { ...sparkLogFileSizes.value }
 }
 
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
@@ -1489,7 +1549,15 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
     }
   } finally {
     // 仅本批次仍有效时才停日志轮询(否则会停掉新批次的轮询)
-    if (isSpark && seq === runSeq) stopSparkLogPolling()
+    if (isSpark && seq === runSeq) {
+      // 收尾:补一次最终拉取,读到最后写入的 [stage] 完成行与保留的 stage 快照(完成后可追溯)
+      try {
+        await pollSparkLogs()
+      } catch {
+        /* 日志失败不影响结果 */
+      }
+      stopSparkLogPolling()
+    }
   }
 }
 
