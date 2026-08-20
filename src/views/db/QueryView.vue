@@ -1665,6 +1665,24 @@ async function runQuery() {
     }
     return
   }
+  // flinksql 流式模式:整段作为一个整体提交给 pyflink(由后端 execute_script 内部按分号拆分
+  // 逐条执行,使 CREATE TABLE 与 INSERT 在同一 t_env 会话生效),绝不在此拆段
+  if (engine.value === 'flinksql' && flinkMode.value === 'stream') {
+    loading.value = true
+    error.value = ''
+    try {
+      const item = { sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true } as QueryResultItem
+      results.value.push(item)
+      if (results.value.length > MAX_RESULTS) {
+        results.value.splice(0, results.value.length - MAX_RESULTS)
+      }
+      await execOne(target, item, seq)
+      if (seq === runSeq) activePane.value = results.value.indexOf(item) + 1
+    } finally {
+      loading.value = false
+    }
+    return
+  }
   // 目标内容按分号拆段:选中多段/一段都逐条执行
   const segs = getSegments(target)
   if (!segs.length) {

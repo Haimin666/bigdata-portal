@@ -1281,7 +1281,20 @@ def flink_jobs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, An
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
-    return {"code": 0, "data": {"jobs": FLINK_ENGINE.list_jobs()}}
+    jobs = FLINK_ENGINE.list_jobs()
+    # 合并 prejob(yarn-per-job)任务到统一流任务列表,使「流任务管理」也能看到并停止
+    prejob_jobs = FLINK_PREJOB.list_jobs() if FLINK_PREJOB.enabled else []
+    for p in prejob_jobs:
+        jobs.append({
+            "jobId": p.get("jobId", ""),
+            "sql": p.get("name", "") or p.get("appId", "") or p.get("jobId", ""),
+            "status": p.get("status", "UNKNOWN"),
+            "submittedAt": p.get("submittedAt", ""),
+            "mode": "prejob",
+        })
+    terminal = {"FINISHED", "FAILED", "CANCELED", "KILLED", "SUBMIT_FAILED"}
+    jobs.sort(key=lambda x: (x["status"] in terminal, x["submittedAt"]), reverse=False)
+    return {"code": 0, "data": {"jobs": jobs}}
 
 
 @app.get("/flink/jobs/{job_id}")
@@ -1291,10 +1304,17 @@ def flink_job_status(job_id: str, x_db_token: Optional[str] = Header(default=Non
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
+    # 先查交互会话任务,再查 prejob(yarn-per-job);统一由「流任务管理」查看
     try:
         return {"code": 0, "data": FLINK_ENGINE.job_status(job_id)}
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except KeyError:
+        pass
+    if FLINK_PREJOB.enabled:
+        try:
+            return {"code": 0, "data": FLINK_PREJOB.job_status(job_id)}
+        except KeyError:
+            pass
+    raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
 
 
 @app.post("/flink/jobs/{job_id}/stop")
@@ -1304,6 +1324,13 @@ def flink_job_stop(job_id: str, x_db_token: Optional[str] = Header(default=None)
         raise HTTPException(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
+    # prejob 任务由 FlinkPreJobManager 停止(yarn application -kill,无需密码)
+    if FLINK_PREJOB.enabled:
+        try:
+            stopped = FLINK_PREJOB.cancel(job_id)
+            return {"code": 0, "data": {"stopped": stopped}}
+        except KeyError:
+            pass
     try:
         stopped = FLINK_ENGINE.stop_job(job_id)
     except KeyError as e:

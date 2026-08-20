@@ -1355,10 +1355,8 @@ if (config.dbProxyUrl) {
     catch (e) { console.error('[flink/prejob/logs]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 日志获取失败' }) }
   })
   app.post('/api/flink/prejob/jobs/:id/cancel', async (req, res) => {
-    const tk = req.get('X-Spark-Token')
-    if (!tk || !sparkTokenValid(tk)) {
-      return res.status(403).json({ code: 403, msg: 'Flink PreJob 停止需要解锁,请先输入密码(与 Spark 同一密码)' })
-    }
+    // 停止不再要求用户解锁(与提交一致):停止是运维管控操作,无需密码。
+    // 网关仅注入 db-proxy 鉴权 token(proxy 统一附加 X-DB-Token),防直连绕过靠 db-proxy 侧。
     try { res.json({ code: 0, data: await prejobCancel(req.params.id) }) }
     catch (e) { console.error('[flink/prejob/cancel]', e instanceof Error ? e.message : e); res.status(502).json({ code: 502, msg: 'flink PreJob 停止失败' }) }
   })
