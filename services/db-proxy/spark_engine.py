@@ -780,20 +780,27 @@ class SparkEngine:
                 size = os.path.getsize(fp)
             except OSError:
                 size = 0
-            file_sizes[name] = size
             prev = int(offsets.get(name, 0))
             if prev < 0:
                 prev = 0
             if prev >= size:
+                # 无新内容或文件被截断/轮转:位置重置到当前大小
+                file_sizes[name] = size
                 new_offsets[name] = size
                 continue
             try:
                 with open(fp, "r", encoding="utf-8", errors="replace") as f:
                     f.seek(prev)
-                    content += f.read()
+                    chunk = f.read()
+                content += chunk
+                # 用实际读到的末尾作 offset:文件读取期间可能继续增长,
+                # 用读前 getsize 会让 offset 偏小 → 下次重读尾部 → 上一 execution 日志漏进下一个
+                end = prev + len(chunk.encode("utf-8"))
+                file_sizes[name] = end
+                new_offsets[name] = end
             except OSError:
-                pass
-            new_offsets[name] = size
+                file_sizes[name] = size
+                new_offsets[name] = size
         return {
             "content": content,
             "offsets": new_offsets,
