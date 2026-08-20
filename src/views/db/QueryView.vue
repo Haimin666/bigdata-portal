@@ -664,7 +664,6 @@ const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度�
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
 const sparkLogFileSizes = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 }) // 最近一次 poll 返回的文件大小,clear 时作为新基线
-let sparkLogBaselineSet = false // 会话/新查询首拉只建基线:跳过文件里既有历史日志(含旧查询的 [stage] 行)
 let logResizeObserver: ResizeObserver | null = null
 const LOG_LINE_HEIGHT = 20 // 12px 字体 × 1.55 行高 ≈ 18.6px,取整留余量
 
@@ -756,19 +755,13 @@ function applySparkStages(st: SparkStagesData) {
   }
 }
 
-/** 拉取 spark 日志增量并追加 */
+/** 拉取 spark 日志增量并追加(基线由 clearSparkLogs 在查询开始前建立,这里读到的都是新增) */
 async function pollSparkLogs() {
   const seq = sparkLogSeq
   try {
     const data = await sparkLogs(sparkLogOffsets.value)
     if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
     sparkLogFileSizes.value = data.files
-    if (!sparkLogBaselineSet) {
-      // 会话/新查询首次拉取:只建立基线,丢弃文件里既有的历史日志(含旧查询的 [stage] 行)
-      sparkLogBaselineSet = true
-      sparkLogOffsets.value = data.offsets
-      return
-    }
     if (data.content) {
       sparkLogText.value += data.content
       // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
@@ -806,12 +799,20 @@ function stopSparkLogPolling() {
   }
 }
 
-function clearSparkLogs() {
+/** 清空并建立新基线:offset 跳到已知文件末尾,新查询只展示新增日志。
+ *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志(含旧查询的 [stage] 行)。 */
+async function clearSparkLogs() {
   sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
   sparkLogText.value = ''
   sparkStageData.value = { activeJobs: [], stages: [], numActiveJobs: 0, numActiveStages: 0 }
-  // 基线重打 + offset 跳到已知文件末尾:新查询只展示新增日志,不重读旧内容(含旧 [stage] 行)
-  sparkLogBaselineSet = false
+  if (sparkLogFileSizes.value.jvm === 0 && sparkLogFileSizes.value.audit === 0) {
+    try {
+      const base = await sparkLogs({ jvm: 0, audit: 0 })
+      sparkLogFileSizes.value = base.files
+    } catch {
+      /* 探基线失败则沿用 {0,0},代价是本次会读到历史日志 */
+    }
+  }
   sparkLogOffsets.value = { ...sparkLogFileSizes.value }
 }
 
@@ -1518,7 +1519,7 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   const isFlink = engine.value === 'flinksql'
   const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
   if (isSpark) {
-    clearSparkLogs()
+    await clearSparkLogs()
     startSparkLogPolling()
   }
   try {
@@ -1991,7 +1992,7 @@ async function copyAllTsv() {
               <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
               <span class="spark-logs-actions">
                 <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
-                <el-button text size="small" @click="clearSparkLogs">清空</el-button>
+                <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
               </span>
             </div>
             <div v-if="sparkStageData.stages.length" class="spark-stages">

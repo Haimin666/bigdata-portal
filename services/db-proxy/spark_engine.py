@@ -195,7 +195,7 @@ class SparkEngine:
                         continue  # 尚未初始化,等待首次使用
                     # 轻量保活查询;context 死时 collect 抛异常 → 走 except 重建
                     self._spark.sql("select 1").collect()
-                    self._audit("spark keepalive ok")
+                    # 成功不写 audit(避免每 5 分钟刷一条噪音);失败才记
                 except Exception as e:
                     self._audit("spark keepalive failed: %s" % str(e)[:200])
                     try:
@@ -660,6 +660,9 @@ class SparkEngine:
                     "[stage] done stage=%d status=%s tasks=%d/%d name=%s"
                     % (s["stageId"], s["status"], s["completedTasks"], s["numTasks"], s["name"])
                 )
+            if not stages and jobs:
+                # 有 job 但取不到 stage 信息:可能 status store 未及时就绪,或已被 retainedStages 回收
+                self._audit("[stage] snapshot found %d job(s) but no stage info (store 未就绪/已回收)" % len(jobs))
             if stages:
                 with self._stages_lock:
                     self._last_stage_snapshot = {
@@ -669,6 +672,8 @@ class SparkEngine:
                         "numActiveStages": 0,
                     }
         except Exception as e:
+            # 错误打进 audit 日志(前端日志面板可见),而非仅 console
+            self._audit("[stage] snapshot FAILED: %s" % str(e)[:300])
             log.warning("snapshot/log stages failed: %s", e)
 
     def stages_status(self) -> Dict[str, Any]:
