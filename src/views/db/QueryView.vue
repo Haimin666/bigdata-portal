@@ -687,11 +687,6 @@ function scrollLogToBottom() {
   })))
 }
 
-// 激活日志面板(切回/首次显示)时滚到底,避免面板停在上方需手动下拖
-// 用 getter 形式避免在 activePane 声明(见下)之前同步读取导致 TDZ 报错
-watch(() => activePane.value, (pane) => {
-  if (pane === 0) scrollLogToBottom()
-})
 // 日志容器挂载(首次渲染)后滚到底,并挂 ResizeObserver 跟踪容器尺寸变化
 watch(sparkLogBox, (el) => {
   logResizeObserver?.disconnect()
@@ -1030,6 +1025,12 @@ const MAX_RESULTS = 20
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
+// 激活日志面板(切回/首次显示)时滚到底,避免面板停在上方需手动下拖。
+// 注意:必须在 activePane 声明之后定义,watch 创建时会立即同步读取源 getter,
+// 若放在 activePane 之前会因 const 的 TDZ 报 "Cannot access before initialization"。
+watch(() => activePane.value, (pane) => {
+  if (pane === 0) scrollLogToBottom()
+})
 // 结果表格翻页(默认 15 条/页)
 const pageSize = ref(15)
 const pageCurrent = ref(1)
