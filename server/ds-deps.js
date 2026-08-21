@@ -27,17 +27,54 @@ const REFRESH_INTERVAL = config.dsDepsRefreshInterval
 const CONCURRENCY = 10
 
 // ── 数据模型 ──────────────────────────────────────────────────
-// node: 一个工作流定义
+// node: 一个工作流定义(仅缓存定时状态为 ONLINE 的工作流)
 // {
 //   projectId, projectName, processId, processName,
-//   tasks: [{id, name, type}],          // 工作流内任务节点
-//   connects: [{from, to}],             // 任务 DAG 边
+//   creator, modifier,                    // 创建人/修改人
+//   releaseState, scheduleReleaseState,   // 发布状态/定时状态
+//   lastUpdateTime,                       // 最后修改时间
+//   tasks: [{id, name, type}],            // 工作流内任务节点
+//   connects: [{from, to}],               // 任务 DAG 边
 //   upstream: [{projectId, processId, taskName}]  // 工作流间依赖(DEPENDENT → 上游)
 // }
 
 let cache = {
   updatedAt: null,
   nodes: new Map() // processId → node
+}
+
+// ── 实例状态日级缓存 ──────────────────────────────────────────
+// 成功实例缓存到当天结束,次日自动过期;减少对海豚 API 的请求。
+// key: `${projectName}|${processId}`;value: {instance(可能为 null=当天无实例), date, _ts, _ttlMs}
+//  - SUCCESS 实例:长 TTL(到当天结束),当天复用不再请求
+//  - 确认"当天无实例"(null):短 TTL(默认 60s),既减少重复请求,又不至于一直滞后
+const instanceCache = new Map()
+const NO_INSTANCE_TTL = 60 * 1000 // 无实例结果缓存 60s,避免反复打海豚
+function todayKey() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+function getCachedInstance(projectName, processId) {
+  const k = `${projectName}|${processId}`
+  const c = instanceCache.get(k)
+  if (!c) return { found: false, instance: null }
+  // 跨天失效 或 TTL 过期 → 清除
+  const expired = c.date !== todayKey() || Date.now() - c._ts > c._ttlMs
+  if (expired) {
+    instanceCache.delete(k)
+    return { found: false, instance: null }
+  }
+  return { found: true, instance: c.instance }
+}
+function setCachedInstance(projectName, processId, instance, ttlMs) {
+  const k = `${projectName}|${processId}`
+  instanceCache.set(k, { instance, date: todayKey(), _ts: Date.now(), _ttlMs: ttlMs })
+}
+// 当天剩余毫秒(到 23:59:59.999),用于成功实例的长 TTL
+function msUntilEndOfDay() {
+  const now = new Date()
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+  return Math.max(end.getTime() - now.getTime(), 1000)
 }
 
 // ── HTTP 工具(直连海豚,带 token)────────────────────────────
@@ -146,7 +183,7 @@ function parseProcessDefinition(data) {
 
 // ── 采集 ──────────────────────────────────────────────────────
 async function fetchAllProcessIds(projectName) {
-  // 分页拉全量工作流列表,返回 [{id, name, releaseState, scheduleReleaseState}]
+  // 分页拉全量工作流列表,返回扩展字段含创建人/修改人/状态/定时状态/最后修改时间
   const out = []
   let page = 1
   const PAGE_SIZE = 100
@@ -157,7 +194,15 @@ async function fetchAllProcessIds(projectName) {
     })
     const list = d?.data?.totalList || []
     for (const p of list) {
-      out.push({ id: p.id, name: p.name, releaseState: p.releaseState, scheduleReleaseState: p.scheduleReleaseState })
+      out.push({
+        id: p.id,
+        name: p.name,
+        releaseState: p.releaseState,
+        scheduleReleaseState: p.scheduleReleaseState,
+        creator: p.createUser || p.creator || '',
+        modifier: p.modifyUser || p.modifier || '',
+        lastUpdateTime: p.updateTime || p.lastUpdateTime || null
+      })
     }
     if (!list.length || list.length < PAGE_SIZE) break
     page++
@@ -179,8 +224,8 @@ async function collect() {
     const projRes = await dsApi('/projects/query-project-list')
     const projects = projRes?.data || []
   console.log(`[ds-deps] 项目数: ${projects.length}`)
-  // 2. 每项目的工作流列表(收集 processId + 名称)
-  const allWorkflows = [] // {projectId, projectName, id, name}
+  // 2. 每项目的工作流列表(收集 processId + 名称 + 扩展字段)
+  const allWorkflows = [] // {projectId, projectName, id, name, creator, modifier, lastUpdateTime}
   const crontabMap = new Map() // processDefinitionId → crontab(调度列表收集,全局合并)
   for (const p of projects) {
     try {
@@ -190,7 +235,15 @@ async function collect() {
         // 手动执行/定时未上线的工作流不会自动被拉起,不纳入依赖树/级联重跑
         // (releaseState=ONLINE 只表示工作流定义发布,不代表定时启用)
         if (String(f.scheduleReleaseState).toUpperCase() !== 'ONLINE') continue
-        allWorkflows.push({ projectId: p.id, projectName: p.name, processId: f.id, processName: f.name })
+        allWorkflows.push({
+          projectId: p.id,
+          projectName: p.name,
+          processId: f.id,
+          processName: f.name,
+          creator: f.creator,
+          modifier: f.modifier,
+          lastUpdateTime: f.lastUpdateTime
+        })
       }
       // 每项目拉一次调度列表,收集 crontab 映射(processDefinitionId → crontab)
       // 避免逐个工作流查调度(2344 次),每项目 1 次即可(156 次)
@@ -238,6 +291,11 @@ async function collect() {
             projectName: wf.projectName,
             processId: wf.processId,
             processName: wf.processName,
+            creator: wf.creator,
+            modifier: wf.modifier,
+            releaseState: 'ONLINE',
+            scheduleReleaseState: 'ONLINE',
+            lastUpdateTime: wf.lastUpdateTime,
             crontab: crontabMap.get(String(wf.processId)) || null,
             ...parsed
           })
@@ -347,27 +405,83 @@ function buildFullTree(processId) {
   }
 }
 
-/** 查某工作流最近实例(按 defId + 时间倒序),返回最新一条或 null */
-async function fetchLatestInstance(projectName, processId, days = 7) {
+/** 本地时段时间串 YYYY-MM-DD HH:mm:ss */
+function fmtLocal(d) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/**
+ * 查某工作流当天最新一次执行实例(按 processDefinitionCode 精准匹配 + 取 startTime 最新一条)。
+ * 不传 dates 时默认查当天;成功实例会进入日级缓存,减少海豚 API 请求。
+ */
+async function fetchLatestInstance(projectName, processName, processId, dates = null) {
+  // 1. 检查日级缓存(成功实例长 TTL 当天复用;"当天无实例"短 TTL 60s 复用)
+  const cached = getCachedInstance(projectName, processId)
+  if (cached.found) return cached.instance
+
   try {
-    const now = Date.now()
-    const start = new Date(now - days * 86400000).toISOString().slice(0, 19).replace('T', ' ')
-    const end = new Date(now).toISOString().slice(0, 19).replace('T', ' ')
+    const now = new Date()
+    let start, end
+    if (dates && dates.start && dates.end) {
+      start = dates.start
+      end = dates.end
+    } else {
+      // 默认:当天 00:00:00 → 现在
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+      const p = (n) => String(n).padStart(2, '0')
+      start = `${todayStart.getFullYear()}-${p(todayStart.getMonth() + 1)}-${p(todayStart.getDate())} 00:00:00`
+      end = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
+    }
+    // 不传 searchVal,拉当天实例后用 processDefinitionId 精准匹配
+    // 注意:该海豚实例接口的 processDefinitionCode=null,只有 processDefinitionId 可用;
+    // 不依赖 processDefinitionCode,避免该字段一旦返回大整数 code 导致匹配失败(静默全 null)。
+    const qs = { pageNo: 1, pageSize: 50, startDate: start, endDate: end }
     const d = await dsApi(
       `/projects/${encodeURIComponent(projectName)}/instance/list-paging`,
-      { pageNo: 1, pageSize: 1, processDefinitionId: processId, startDate: start, endDate: end }
+      qs
     )
     const list = d?.data?.totalList || []
-    if (!list.length) return null
-    const i = list[0]
-    return {
-      instanceId: i.id,
-      name: i.name,
-      state: i.state,
-      // 实例开始时间(展示"最近执行时间")
-      startTime: i.startTime || null
+    if (!list.length) {
+      // 当天该工作流确实无实例 → 短 TTL 缓存 null,减少重复请求
+      setCachedInstance(projectName, processId, null, NO_INSTANCE_TTL)
+      return null
     }
-  } catch {
+    // 按 processDefinitionId 精准匹配目标工作流,取 startTime 最新的一条
+    const idStr = String(processId || '')
+    let best = null
+    let bestTime = ''
+    for (const i of list) {
+      // 优先 processDefinitionId(小整数,与缓存 processId 一致);防御性地兼容 processDefinitionCode
+      const id = String(i.processDefinitionId || '')
+      const code = String(i.processDefinitionCode || '')
+      if (id !== idStr && code !== idStr) continue
+      const st = i.startTime || ''
+      if (!best || st > bestTime) {
+        best = i
+        bestTime = st
+      }
+    }
+    if (!best) {
+      // 有实例但都不属于该工作流 → 该工作流当天无执行记录,短 TTL 缓存 null
+      setCachedInstance(projectName, processId, null, NO_INSTANCE_TTL)
+      return null
+    }
+    const instance = {
+      instanceId: best.id,
+      name: best.name,
+      state: best.state,
+      startTime: best.startTime || null,
+      endTime: best.endTime || null,
+      duration: typeof best.duration === 'number' ? best.duration : null
+    }
+    // SUCCESS 实例进入日级缓存(到当天结束;次日自动过期)
+    if (best.state === 'SUCCESS') {
+      setCachedInstance(projectName, processId, instance, msUntilEndOfDay())
+    }
+    return instance
+  } catch (e) {
+    console.warn(`[ds-deps] fetchLatestInstance 失败 ${projectName}/${processName}(pid=${processId}): ${e.message}`)
     return null
   }
 }
@@ -434,54 +548,124 @@ export function initDsDeps() {
   load()
 }
 
+/**
+ * 给依赖树上下游节点标注"当天最新一次"实例状态(成功/失败/运行中/无实例)。
+ * 当日本工作流实例执行多次时以其最新一次为准;成功实例进入日级缓存减少海豚 API 请求。
+ */
+async function annotateWorkflowTree(tree, dates = null) {
+  const CONCURRENCY = 6
+  let active = 0
+  const queue = [] // 待执行的下游实例查询任务
+  const runQueued = () => {
+    while (active < CONCURRENCY && queue.length) {
+      const task = queue.shift()
+      if (!task) break
+      active++
+      task().finally(() => {
+        active--
+        runQueued()
+      })
+    }
+  }
+  const done = new Set() // 防同一节点上游/下游重复标注(重复查海豚)
+  const annotate = async (nodes) => {
+    for (const n of nodes || []) {
+      const key = String(n.processId)
+      if (done.has(key)) continue
+      done.add(key)
+      queue.push(async () => {
+        // 指定日期区间(或默认当天)内最近一次执行实例状态
+        n.instance = await fetchLatestInstance(n.projectName, n.processName, n.processId, dates)
+        // 补 crontab(每天执行时间)到节点
+        const node = findNode(n.processId)
+        n.crontab = node?.crontab || null
+      })
+      if (n.downstream && n.downstream.length) await annotate(n.downstream)
+      if (n.upstream && n.upstream.length) await annotate(n.upstream)
+    }
+  }
+  const task = (async () => {
+    // 当前工作流自身也标注指定日期区间内最近一次执行实例状态(前端当前节点需显示)
+    queue.push(async () => {
+      tree.instance = await fetchLatestInstance(tree.projectName, tree.processName, tree.processId, dates)
+      const node = findNode(tree.processId)
+      tree.crontab = node?.crontab || null
+    })
+    // 上游 + 下游都标注指定日期区间内实例状态(跨项目完整依赖链可观测)
+    await annotate(tree.upstream)
+    await annotate(tree.downstream)
+    runQueued()
+    // 等待队列中的实例查询全部完成(否则响应返回时 instance 还没填充)
+    while (queue.length || active > 0) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  })()
+  try {
+    // 完整等待全部实例查询完成(单个请求已有 15s 超时兜底),
+    // 不用整体硬超时——否则部分下游节点标注未完成就被返回成 null("未执行")
+    await task
+  } catch {
+    /* 实例查询失败不影响树 */
+  }
+  return tree
+}
+
+/**
+ * 从请求 query 解析日期区间。前端可传:
+ *  - query.days=N        → 近 N 天(截止现在)
+ *  - query.start & end   → 指定 start→end(YYYY-MM-DD[ HH:mm:ss])
+ * 都不传 → 返回 null(默认近 90 天最近一次)
+ */
+function parseDates(query = {}) {
+  if (query.start && query.end) {
+    return { start: String(query.start).trim(), end: String(query.end).trim() }
+  }
+  if (query.days) {
+    const now = new Date()
+    const d = Number(query.days)
+    const start = new Date(now.getTime() - (d > 0 ? d : 1) * 86400000)
+    const p = (x) => String(x).padStart(2, '0')
+    return {
+      start: `${start.getFullYear()}-${p(start.getMonth() + 1)}-${p(start.getDate())} 00:00:00`,
+      end: `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
+    }
+  }
+  return null
+}
+
 // ── Express 路由 ──────────────────────────────────────────────
 export function dsDepsRouter() {
   const router = Router()
 
   // 依赖树(工作流级):最上游→当前→最下游,下游节点附最近实例状态
-  // 频率控制:下游实例查询限并发 3,总超时 8s,避免打垮海豚
+  // 支持 ?start=YYYY-MM-DD HH:mm:ss&end=... 指定日期区间(否则默认近 90 天最近一次)
   router.get('/workflow-tree/:processId', async (req, res) => {
     const tree = buildFullTree(req.params.processId)
     if (!tree) return res.status(404).json({ code: 404, msg: '工作流不在依赖缓存中' })
-    const CONCURRENCY = 3
-    let active = 0
-    const queue = [] // 待执行的下游实例查询任务
-    const runQueued = () => {
-      while (active < CONCURRENCY && queue.length) {
-        const task = queue.shift()
-        if (!task) break
-        active++
-        task().finally(() => {
-          active--
-          runQueued()
-        })
-      }
-    }
-    const annotate = async (nodes) => {
-      for (const n of nodes || []) {
-        queue.push(async () => {
-          // 近 1 天实例状态(成功/失败/运行中/无实例)
-          n.instance = await fetchLatestInstance(n.projectName, n.processId, 1)
-          // 补 crontab(每天执行时间)到节点
-          const node = findNode(n.processId)
-          n.crontab = node?.crontab || null
-        })
-        await annotate(n.downstream)
-      }
-    }
-    const task = (async () => {
-      await annotate(tree.downstream)
-      runQueued()
-      // 等待队列中的实例查询全部完成(否则响应返回时 instance 还没填充)
-      while (queue.length || active > 0) {
-        await new Promise((r) => setTimeout(r, 100))
-      }
-    })()
+    const dates = parseDates(req.query)
+    await annotateWorkflowTree(tree, dates)
+    res.json({ code: 0, data: tree, updatedAt: cache.updatedAt })
+  })
+
+  // 任务实例 → 其所属工作流定义 id → 依赖树:按 processInstanceId 反查所属工作流,再返回其上下游依赖树(当天最新实例状态)
+  router.get('/workflow-tree-by-instance/:projectName/:processInstanceId', async (req, res) => {
+    const { projectName, processInstanceId } = req.params
+    let processId = null
     try {
-      await Promise.race([task, new Promise((r) => setTimeout(r, 15000))])
+      const detail = await dsApi(
+        `/projects/${encodeURIComponent(projectName)}/instance/query-by-id`,
+        { processInstanceId }
+      )
+      const d = detail?.data || {}
+      processId = d.processDefinitionCode || d.processDefinitionId || null
     } catch {
-      /* 实例查询失败/超时不影响树 */
+      /* 反查失败按无处理 */
     }
+    if (!processId) return res.status(404).json({ code: 404, msg: '无法定位该实例所属工作流' })
+    const tree = buildFullTree(processId)
+    if (!tree) return res.status(404).json({ code: 404, msg: '工作流不在依赖缓存中' })
+    const dates = parseDates(req.query)
+    await annotateWorkflowTree(tree, dates)
     res.json({ code: 0, data: tree, updatedAt: cache.updatedAt })
   })
 
@@ -525,7 +709,15 @@ export function dsDepsRouter() {
 
   // 缓存状态(不暴露服务器绝对路径)
   router.get('/status', (req, res) => {
-    res.json({ code: 0, data: { updatedAt: cache.updatedAt, count: cache.nodes.size } })
+    res.json({
+      code: 0,
+      data: {
+        updatedAt: cache.updatedAt,
+        count: cache.nodes.size,
+        instanceCacheCount: instanceCache.size,
+        collecting
+      }
+    })
   })
 
   // 跨项目搜索工作流(按工作流名/任务名/项目名,基于缓存)
@@ -585,8 +777,15 @@ export function dsDepsRouter() {
       try {
         let instanceId = n.instanceId
         if (!instanceId) {
-          // 无实例 → 查最近实例(近 3 天),有则复用,无则新建
-          const latest = await fetchLatestInstance(n.projectName, n.processId, 3)
+          // 无实例 → 查近 90 天最近实例,有则复用,无则按今天新建
+          const now = new Date()
+          const p = (n) => String(n).padStart(2, '0')
+          const start90 = new Date(now.getTime() - 90 * 86400000)
+          const dates90 = {
+            start: `${start90.getFullYear()}-${p(start90.getMonth() + 1)}-${p(start90.getDate())} 00:00:00`,
+            end: `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
+          }
+          const latest = await fetchLatestInstance(n.projectName, n.processName, n.processId, dates90)
           instanceId = latest?.instanceId
         }
         if (instanceId) {
