@@ -110,7 +110,7 @@ export default {
   // 存储路径(默认项目内 data/,docker 挂载 ./data:/app/data 自动对齐)
   dbScriptsDir: pick(fileCfg.dbScriptsDir, 'DB_SCRIPTS_DIR', path.join(import.meta.dirname, '../data/scripts')),
   dsDepsCacheFile: pick(fileCfg.dsDepsCacheFile, 'DS_DEPS_CACHE_FILE', path.join(import.meta.dirname, '../data/ds-deps.json')),
-  dsDepsRefreshInterval: pickInt(fileCfg.dsDepsRefreshInterval, 'DS_DEPS_REFRESH_INTERVAL', 60 * 60 * 1000),
+  dsDepsRefreshInterval: pickInt(fileCfg.dsDepsRefreshInterval, 'DS_DEPS_REFRESH_INTERVAL', 24 * 60 * 60 * 1000),
   // 前端模块显隐:白名单(菜单 name 列表,如 ["yarn","hdfs","dbQuery"])。
   // 缺省(空/未配置)表示全部模块展示;配置后仅展示名单内模块。
   enabledModules: Array.isArray(fileCfg.enabledModules) ? fileCfg.enabledModules.map(String) : [],

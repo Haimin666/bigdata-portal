@@ -32,7 +32,7 @@
   },
   "dbScriptsDir": "",
   "dsDepsCacheFile": "",
-  "dsDepsRefreshInterval": 3600000,
+  "dsDepsRefreshInterval": 86400000,
   "_enabledModules说明": "前端模块显隐白名单(菜单 name):yarn/dsTask/hdfs/dbQuery/stingray/ds/streamx/jupyter/omd。留空 [] 或省略 = 全部展示;配置后仅展示名单内模块。",
   "enabledModules": [],
   "dbProxyWriteToken": "",

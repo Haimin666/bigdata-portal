@@ -542,10 +542,21 @@ function searchWorkflows(keyword) {
 
 // ── 初始化 ────────────────────────────────────────────────────
 export function initDsDeps() {
-  // 只加载缓存文件,不做自动采集/定时刷新(依赖数据仅手动刷新,
-  // 避免全量扫描 4000+ 工作流对海豚产生大量请求)。
-  // 手动刷新入口:/api/ds-deps/refresh(全量)或 ?processId=xxx(单工作流)
+  // 启动:加载缓存文件 + 定时全量刷新(默认每天一次,可配置)。
+  // 依赖数据更新频率不高(工作流/依赖结构变化少),无需频繁全量扫描 4000+ 工作流。
+  // 手动刷新入口:/api/ds-deps/refresh(全量)或 ?processId=xxx(单工作流,可随时触发)
   load()
+
+  // 首次后台全量采集:保证服务启动后有最新依赖数据(等 3s 错开启动高峰)
+  setTimeout(() => {
+    if (!collecting) collect().catch((e) => console.error('[ds-deps] 启动采集失败:', e.message))
+  }, 3000)
+
+  // 定时全量刷新(默认每天一次;加锁防与手动刷新重入)
+  setInterval(() => {
+    if (collecting) return
+    collect().catch((e) => console.error('[ds-deps] 定时刷新失败:', e.message))
+  }, REFRESH_INTERVAL)
 }
 
 /**
