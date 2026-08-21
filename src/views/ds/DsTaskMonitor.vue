@@ -127,6 +127,33 @@ function rangeDates(): { start?: string; end?: string } {
 // 请求序号:防止快速切换筛选/项目/分页时旧响应覆盖新结果
 let loadSeq = 0
 
+/**
+ * 默认项目:从项目列表前 PROBE 个里挑第一个"当天有实例"的(仅在工作流实例视图探测,
+ * 串行、命中即停,避免每个项目都发请求)。找不到(当天全空)回退第一个项目,页面展示空态引导。
+ */
+const DEFAULT_PROBE = 5
+async function findDefaultProject(list: { name: string }[]): Promise<string> {
+  if (!list.length) return ''
+  if (list.length === 1) return list[0].name
+  const { start, end } = rangeDates()
+  const last = list.slice(0, DEFAULT_PROBE)
+  for (const p of last) {
+    try {
+      const d = await listProcessInstances(p.name, {
+        pageNo: 1,
+        pageSize: 1,
+        startDate: start,
+        endDate: end
+      })
+      if ((d.total ?? 0) > 0) return p.name
+    } catch {
+      /* 该探测失败,继续下一个(不阻断默认选中) */
+    }
+  }
+  // 前几个当天都没实例:回退第一个(保持确定性),页面显示找到数据前的空态/引导
+  return list[0].name
+}
+
 async function load() {
   const seq = ++loadSeq
   loading.value = true
@@ -504,8 +531,9 @@ onMounted(async () => {
   }
   try {
     projects.value = await listProjects()
-    // 默认"全部项目"(空 projectName),跨项目检索
-    projectName.value = ''
+    // 默认选中第一个"当天有实例"的项目(仅探测前 5 个,串行限频,找到即停),
+    // 避免默认落在一个当天没跑的空项目上导致列表空白。找不到则回退第一个。
+    projectName.value = await findDefaultProject(projects.value)
     await load()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
