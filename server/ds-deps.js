@@ -306,6 +306,25 @@ async function collect() {
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+  // 计算并写盘 downstream(谁依赖我):扫描所有节点的 upstream 反向索引。
+  // 依赖修改是低频场景(每日更新一次),downstream 一并落盘以保留完整链路全貌,
+  // 而非运行时临时反查。
+  const upIndex = new Map() // processId → 依赖它的节点列表
+  for (const [pid, node] of nodes) {
+    for (const up of node.upstream || []) {
+      const k = String(up.processId)
+      if (!upIndex.has(k)) upIndex.set(k, [])
+      upIndex.get(k).push({
+        projectId: node.projectId,
+        projectName: node.projectName,
+        processId: node.processId,
+        processName: node.processName
+      })
+    }
+  }
+  for (const [pid, node] of nodes) {
+    node.downstream = upIndex.get(pid) || []
+  }
   cache = { updatedAt: new Date().toISOString(), nodes }
   persist()
   console.log(`[ds-deps] 采集完成: ${nodes.size} 个工作流, 耗时 ${((Date.now() - start) / 1000).toFixed(1)}s`)
@@ -373,17 +392,22 @@ function buildDownstreamChain(processId, visited = new Set()) {
   const key = String(processId)
   if (visited.has(key)) return []
   visited.add(key)
+  const node = findNode(processId)
+  const cached = node?.downstream || []
   const downs = []
-  for (const [id, node] of cache.nodes) {
-    const depsOnMe = (node.upstream || []).filter((u) => String(u.processId) === key)
-    if (depsOnMe.length) {
-      downs.push({
-        processId: node.processId,
-        processName: node.processName,
-        projectName: node.projectName,
-        depTasks: depsOnMe.map((d) => d.taskName).join(',')
-      })
-    }
+  const seen = new Set() // 按 processId 去重(同一下游被 DEPENDENT 多次声明时只展一个)
+  for (const d of cached) {
+    if (seen.has(String(d.processId))) continue
+    seen.add(String(d.processId))
+    const dnNode = findNode(d.processId)
+    // depTasks:该下游节点 upstream 里针对本 pid 的任务名
+    const depsOnMe = (dnNode?.upstream || []).filter((u) => String(u.processId) === key)
+    downs.push({
+      processId: d.processId,
+      processName: d.processName || dnNode?.processName || `工作流#${d.processId}`,
+      projectName: d.projectName || dnNode?.projectName || `项目#${d.projectId}`,
+      depTasks: depsOnMe.map((x) => x.taskName).filter(Boolean).join(',')
+    })
   }
   for (const d of downs) {
     const chain = buildDownstreamChain(d.processId, visited)
