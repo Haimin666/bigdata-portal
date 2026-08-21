@@ -69,6 +69,10 @@ function getCachedInstance(projectName, processId) {
 function setCachedInstance(projectName, processId, instance, ttlMs) {
   const k = `${projectName}|${processId}`
   instanceCache.set(k, { instance, date: todayKey(), _ts: Date.now(), _ttlMs: ttlMs })
+  // SUCCESS 实例(长 TTL 当天有效)标记需要落盘,供跨重启复用
+  if (instance && ttlMs > NO_INSTANCE_TTL) {
+    instancesDirty = true
+  }
 }
 // 当天剩余毫秒(到 23:59:59.999),用于成功实例的长 TTL
 function msUntilEndOfDay() {
@@ -334,6 +338,49 @@ async function collect() {
 }
 
 // ── 缓存持久化 ────────────────────────────────────────────────
+// 实例缓存(SUCCESS)落盘:按天文件 data/ds-deps-instances-<date>.json,
+// 当天 SUCCESS 实例跨重启复用;非 SUCCESS 不落盘。dirty 标记攒批写,避免每节点一次 IO。
+let instancesDirty = false
+function instancesFile() {
+  const dir = path.dirname(CACHE_FILE)
+  return path.join(dir, `ds-deps-instances-${todayKey()}.json`)
+}
+function persistInstances() {
+  if (!instancesDirty) return
+  try {
+    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true })
+    // 只落当天有效 SUCCESS(长 TTL)实例;null(无实例短 TTL)不落盘
+    const map = {}
+    for (const [k, c] of instanceCache) {
+      if (c.date === todayKey() && c.instance && c._ttlMs > NO_INSTANCE_TTL) {
+        map[k] = c.instance
+      }
+    }
+    fs.writeFileSync(instancesFile(), JSON.stringify({ date: todayKey(), map }))
+    instancesDirty = false
+  } catch (e) {
+    console.warn(`[ds-deps] 实例缓存落盘失败: ${e.message}`)
+  }
+}
+function loadInstances() {
+  try {
+    const f = instancesFile()
+    if (fs.existsSync(f)) {
+      const raw = JSON.parse(fs.readFileSync(f, 'utf8'))
+      if (raw.date === todayKey()) {
+        let n = 0
+        for (const [k, inst] of Object.entries(raw.map || {})) {
+          instanceCache.set(k, { instance: inst, date: todayKey(), _ts: Date.now(), _ttlMs: msUntilEndOfDay() })
+          n++
+        }
+        console.log(`[ds-deps] 加载当天实例缓存: ${n} 个`)
+      }
+    }
+  } catch (e) {
+    console.warn(`[ds-deps] 实例缓存加载失败: ${e.message}`)
+  }
+}
+
 function persist() {
   try {
     fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true })
@@ -503,6 +550,7 @@ async function fetchLatestInstance(projectName, processName, processId, dates = 
     // SUCCESS 实例进入日级缓存(到当天结束;次日自动过期)
     if (best.state === 'SUCCESS') {
       setCachedInstance(projectName, processId, instance, msUntilEndOfDay())
+      persistInstances() // 单节点查询也落盘,跨重启复用
     }
     return instance
   } catch (e) {
@@ -571,6 +619,7 @@ export function initDsDeps() {
   // 依赖数据更新频率不高(工作流/依赖结构变化少),无需频繁全量扫描 4000+ 工作流。
   // 手动刷新入口:/api/ds-deps/refresh(全量)或 ?processId=xxx(单工作流,可随时触发)
   load()
+  loadInstances() // 加载当天已落盘的 SUCCESS 实例缓存,跨重启复用
 
   // 首次后台全量采集:保证服务启动后有最新依赖数据(等 3s 错开启动高峰)
   setTimeout(() => {
@@ -586,11 +635,12 @@ export function initDsDeps() {
 
 /**
  * 给依赖树上下游节点标注"当天最新一次"实例状态(成功/失败/运行中/无实例)。
- * 采用"按项目聚合"优化:一次请求拉取某项目当天全部实例,本地按 processDefinitionId
- * 批量匹配该项目的所有节点,而不是每节点一次请求(树大时请求数从几十次降到项目数)。
+ * 采用"searchVal 精准查询":对每个去重节点用 searchVal=工作流名 查该工作流当天实例,
+ * 服务端按名称过滤(命中 workflowname-<0..7>-<ts> 的所有实例),返回仅该工作流几条,
+ * 不再整项目拉几百条再循环匹配。并发 6;SUCCESS 写日级缓存。
  */
 async function annotateWorkflowTree(tree, dates = null) {
-  // 1. 收集树中所有去重节点(含当前节点) → 按 projectName 分组
+  // 1. 收集树中所有去重节点(含当前节点)
   const nodesById = new Map() // `${project}|${processId}` → 节点引用
   const collect = (list) => {
     for (const n of list || []) {
@@ -602,64 +652,46 @@ async function annotateWorkflowTree(tree, dates = null) {
   }
   collect(tree.upstream)
   collect(tree.downstream)
-  // 加当前节点
   const selfKey = `${tree.projectName}|${tree.processId}`
   if (!nodesById.has(selfKey)) nodesById.set(selfKey, tree)
 
-  // 2. 按项目分组,每组只发一次"当天实例列表"请求(处理翻页)
-  const byProject = new Map()
-  for (const n of nodesById.values()) {
-    if (!byProject.has(n.projectName)) byProject.set(n.projectName, [])
-    byProject.get(n.projectName).push(n)
-  }
-
-  // 3. 并发拉取各项目当天实例列表(限并发),再本地批量匹配
-  const projectList = [...byProject.entries()]
-  const instancesByProject = new Map() // projectName → 当天实例数组
+  // 2. 并发按节点 searchVal 精准查询(限并发)
+  const nodeList = [...nodesById.values()]
   const CONCURRENCY = 6
   let cursor = 0
+  const results = new Map() // `${project}|${processId}` → {instance|null}
   const worker = async () => {
-    while (cursor < projectList.length) {
-      const [projectName] = projectList[cursor++]
-      // loadProjectInstances 内部已 try-catch + 缓存回退,不会抛错
-      const list = await loadProjectInstances(projectName, dates)
-      instancesByProject.set(projectName, list)
+    while (cursor < nodeList.length) {
+      const n = nodeList[cursor++]
+      results.set(`${n.projectName}|${n.processId}`, await loadNodeInstance(n, dates))
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, projectList.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, nodeList.length) }, worker))
 
-  // 4. 本地批量匹配赋值;SUCCESS 实例写回日级缓存(到当天结束),供单节点查询/同树复用,
-  //    非 SUCCESS(失败/运行中)不缓存实时查;无实例不缓存(避免截断误判固化)
+  // 3. 赋值 + SUCCESS 写日级缓存
   for (const n of nodesById.values()) {
-    const list = instancesByProject.get(n.projectName) || []
-    const inst = matchLatestInstance(list, n.processId)
-    if (inst) {
-      n.instance = inst
-      // 仅 SUCCESS 进日级缓存(当天结束自动过期)
-      if (inst.state === 'SUCCESS') {
-        setCachedInstance(n.projectName, n.processId, inst, msUntilEndOfDay())
-      }
-    } else {
-      n.instance = null
+    const inst = results.get(`${n.projectName}|${n.processId}`)
+    n.instance = inst
+    if (inst && inst.state === 'SUCCESS') {
+      setCachedInstance(n.projectName, n.processId, inst, msUntilEndOfDay())
     }
-    // 补 crontab(每天执行时间)
     const node = findNode(n.processId)
     n.crontab = node?.crontab || null
   }
+  // 攒批落盘当天 SUCCESS 实例缓存(跨重启复用)
+  persistInstances()
   return tree
 }
 
 /**
- * 拉取某项目指定日期区间内全部实例(翻页合并,pageSize=500)。dates 为 null 时用当天 00:00→现在。
- * 返回:实例数组(totalList 合并)。
- * 加"项目级当天实例列表"短缓存(60s):同一棵树多个节点同项目只需拉一次;海豚偶发失败时回退缓存,
- * 避免整批节点因单次请求失败被误判"未执行"。
+ * 按工作流名(searchVal)查某工作流当天最新一次实例。返回实例结构或 null。
+ * 节点级短缓存(60s):同一树重复节点/近时复用,海豚偶发失败回退。
  */
-const projectInstanceCache = new Map() // `${project}|${dateKey}` → {instances, _ts}
-const PROJECT_INSTANCE_TTL = 60 * 1000
-async function loadProjectInstances(projectName, dates = null) {
+const nodeInstanceCache = new Map() // `${project}|${processId}|${dateKey}` → {instance|null, _ts}
+const NODE_INSTANCE_TTL = 60 * 1000
+async function loadNodeInstance(n, dates = null) {
   const now = new Date()
-  const p = (n) => String(n).padStart(2, '0')
+  const p = (x) => String(x).padStart(2, '0')
   let start, end
   if (dates && dates.start && dates.end) {
     start = dates.start
@@ -669,35 +701,39 @@ async function loadProjectInstances(projectName, dates = null) {
     start = `${todayStart.getFullYear()}-${p(todayStart.getMonth() + 1)}-${p(todayStart.getDate())} 00:00:00`
     end = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
   }
-  const dayKey = start.slice(0, 10) // YYYY-MM-DD
-  const ck = `${projectName}|${dayKey}`
+  const dayKey = start.slice(0, 10)
+  const ck = `${n.projectName}|${n.processId}|${dayKey}`
 
-  // 命中短缓存(60s 内):直接复用
-  const hit = projectInstanceCache.get(ck)
-  if (hit && Date.now() - hit._ts < PROJECT_INSTANCE_TTL) return hit.instances
+  // 命中短缓存
+  const hit = nodeInstanceCache.get(ck)
+  if (hit && Date.now() - hit._ts < NODE_INSTANCE_TTL) return hit.instance
+
+  // 命中跨重启的日级 SUCCESS 缓存(当天已确认成功,直接复用,不再查海豚)
+  const cached = getCachedInstance(n.projectName, n.processId)
+  if (cached.found && cached.instance) return cached.instance
 
   try {
-    const out = []
-    const pageSize = 500
-    for (let pageNo = 1; pageNo <= 5; pageNo++) {
-      const d = await dsApi(`/projects/${encodeURIComponent(projectName)}/instance/list-paging`, {
-        pageNo,
+    // 用 searchVal=工作流名:服务端按名称过滤,命中该工作流所有实例(名称-<0..7>-<ts>)
+    const pageSize = 50 // 单个工作流当天实例量级小,足够
+    const d = await dsApi(
+      `/projects/${encodeURIComponent(n.projectName)}/instance/list-paging`,
+      {
+        pageNo: 1,
         pageSize,
+        searchVal: n.processName,
         startDate: start,
         endDate: end
-      })
-      const list = d?.data?.totalList || []
-      const total = d?.data?.total || 0
-      out.push(...list)
-      if (out.length >= total || list.length < pageSize) break
-    }
-    projectInstanceCache.set(ck, { instances: out, _ts: Date.now() })
-    return out
+      }
+    )
+    const list = d?.data?.totalList || []
+    // 本地按 processDefinitionId 确认(防 searchVal 误匹配同名),取 startTime 最新
+    const inst = matchLatestInstance(list, n.processId)
+    nodeInstanceCache.set(ck, { instance: inst, _ts: Date.now() })
+    return inst
   } catch (e) {
-    // 拉取失败:回退短缓存(若有),否则返回空(不阻断树)
-    const fallback = projectInstanceCache.get(ck)
-    console.warn(`[ds-deps] loadProjectInstances 失败 ${projectName}: ${e.message}`)
-    return fallback ? fallback.instances : []
+    const fallback = nodeInstanceCache.get(ck)
+    console.warn(`[ds-deps] loadNodeInstance 失败 ${n.projectName}/${n.processName}: ${e.message}`)
+    return fallback ? fallback.instance : null
   }
 }
 
