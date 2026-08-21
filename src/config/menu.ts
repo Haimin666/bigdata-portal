@@ -8,6 +8,8 @@ export interface MenuItem {
   login?: 'ds' | 'omd' | 'stingray'
   /** 原生 iframe 直连(同源代理或跨源直连) */
   iframe?: boolean
+  /** 仅开发态展示的试验性功能(如 demo) */
+  dev?: boolean
 }
 
 export const menus: MenuItem[] = [

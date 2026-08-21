@@ -403,10 +403,11 @@ async function onExecute(inst: DsProcessInstance, executeType: string) {
   }
 }
 
-// ── 工作流依赖查看 / 级联调起(右栏面板)──────────────────────
+// ── 工作流依赖查看 / 级联调起(右侧抽屉侧边栏)────────────────
 const depsTarget = ref<{ processId: number; processName: string; projectName: string; instanceId?: number; instanceName?: string } | null>(null)
+const depsVisible = ref(false)
 
-/** 在右栏展示该实例的跨项目依赖树 */
+/** 展开右侧抽屉展示该实例的跨项目依赖树 */
 function showDeps(inst: DsProcessInstance) {
   if (!inst.processDefinitionId) {
     ElMessage.warning('该实例缺少工作流定义 ID,无法查看依赖')
@@ -419,6 +420,7 @@ function showDeps(inst: DsProcessInstance) {
     instanceId: inst.id,
     instanceName: inst.name
   }
+  depsVisible.value = true
 }
 
 // ── 当日统计概览(基于当前加载实例)───────────────────────────
@@ -430,13 +432,14 @@ const stats = computed(() => {
   return { total: list.length, success, failure, running, other: list.length - success - failure - running }
 })
 
-/** 依赖树节点点击 → 跳到对应工作流实例(切项目+搜索工作流名) */
+/** 依赖树节点点击 → 跳到对应工作流实例(切项目+搜索工作流名)+ 关闭抽屉 */
 function onDepsJump(node: { projectName: string; processName: string }) {
   projectName.value = node.projectName
   searchProcess.value = node.processName
   searchTask.value = ''
   viewMode.value = 'process'
   pageNo.value = 1
+  depsVisible.value = false
   load()
 }
 
@@ -858,21 +861,27 @@ async function onRefreshDeps() {
       />
     </div>
       </div><!-- /left-pane -->
-
-      <!-- 右栏:工作流跨项目依赖树 + 一键级联调起(选中实例后加载) -->
-      <div v-if="viewMode === 'process'" class="right-pane">
-        <DsDepsPanel
-          :process-id="depsTarget?.processId"
-          :process-name="depsTarget?.processName"
-          :project-name="depsTarget?.projectName"
-          :instance-id="depsTarget?.instanceId"
-          @jump="onDepsJump"
-        />
-      </div>
-      <div v-else class="right-pane right-pane--empty">
-        <el-empty description="任务视图无依赖树,请切换到工作流实例视图" />
-      </div>
     </div><!-- /main-split -->
+
+    <!-- 右侧依赖侧边栏:点击"依赖·级联"展开(样式沿用面板自带,非常驻) -->
+    <el-drawer
+      v-model="depsVisible"
+      title="工作流依赖 · 级联"
+      direction="rtl"
+      size="46%"
+      :with-header="false"
+      class="deps-drawer"
+      destroy-on-close
+    >
+      <DsDepsPanel
+        :process-id="depsTarget?.processId"
+        :process-name="depsTarget?.processName"
+        :project-name="depsTarget?.projectName"
+        :instance-id="depsTarget?.instanceId"
+        :instance-name="depsTarget?.instanceName"
+        @jump="onDepsJump"
+      />
+    </el-drawer>
 
     <!-- 日志弹窗 -->
     <el-dialog v-model="logVisible" title="任务日志" width="70%" top="4vh">
@@ -1070,26 +1079,11 @@ async function onRefreshDeps() {
   padding-bottom: 2px;
 }
 
-.right-pane {
-  width: 46%;
-  min-width: 460px;
-  flex-shrink: 0;
-  min-height: 0;
+/* 右侧依赖抽屉内嵌依赖面板:占满抽屉,去掉默认内边距让面板接管 */
+.deps-drawer :deep(.el-drawer__body) {
+  padding: 0;
   overflow: hidden;
-  display: flex;
   background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 10px;
-  box-sizing: border-box;
-}
-
-.right-pane--empty {
-  align-items: center;
-  justify-content: center;
-  width: 36%;
-  min-width: 320px;
-  color: $muted;
 }
 
 .log-box {
