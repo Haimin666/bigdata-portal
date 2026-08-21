@@ -436,14 +436,15 @@ async function fetchLatestInstance(projectName, processName, processId, dates = 
     // 不传 searchVal,拉当天实例后用 processDefinitionId 精准匹配
     // 注意:该海豚实例接口的 processDefinitionCode=null,只有 processDefinitionId 可用;
     // 不依赖 processDefinitionCode,避免该字段一旦返回大整数 code 导致匹配失败(静默全 null)。
-    const qs = { pageNo: 1, pageSize: 50, startDate: start, endDate: end }
+    // pageSize 取大(500):多天实例可能 >50,截断会导致漏匹配而误判"未执行"。
+    const qs = { pageNo: 1, pageSize: 500, startDate: start, endDate: end }
     const d = await dsApi(
       `/projects/${encodeURIComponent(projectName)}/instance/list-paging`,
       qs
     )
     const list = d?.data?.totalList || []
     if (!list.length) {
-      // 当天该工作流确实无实例 → 短 TTL 缓存 null,减少重复请求
+      // 当天该工作流确实无实例(项目当天无任何实例)→ 短 TTL 缓存 null,减少重复请求
       setCachedInstance(projectName, processId, null, NO_INSTANCE_TTL)
       return null
     }
@@ -463,8 +464,8 @@ async function fetchLatestInstance(projectName, processName, processId, dates = 
       }
     }
     if (!best) {
-      // 有实例但都不属于该工作流 → 该工作流当天无执行记录,短 TTL 缓存 null
-      setCachedInstance(projectName, processId, null, NO_INSTANCE_TTL)
+      // 有实例但都不属于该工作流:可能因列表截断没取到,也可能是真的没跑。
+      // 不写 null 缓存——若是截断漏匹配,写入会固化错误"未执行";下次标注会再实时查。
       return null
     }
     const instance = {
@@ -561,64 +562,145 @@ export function initDsDeps() {
 
 /**
  * 给依赖树上下游节点标注"当天最新一次"实例状态(成功/失败/运行中/无实例)。
- * 当日本工作流实例执行多次时以其最新一次为准;成功实例进入日级缓存减少海豚 API 请求。
+ * 采用"按项目聚合"优化:一次请求拉取某项目当天全部实例,本地按 processDefinitionId
+ * 批量匹配该项目的所有节点,而不是每节点一次请求(树大时请求数从几十次降到项目数)。
  */
 async function annotateWorkflowTree(tree, dates = null) {
+  // 1. 收集树中所有去重节点(含当前节点) → 按 projectName 分组
+  const nodesById = new Map() // `${project}|${processId}` → 节点引用
+  const collect = (list) => {
+    for (const n of list || []) {
+      const k = `${n.projectName}|${n.processId}`
+      if (!nodesById.has(k)) nodesById.set(k, n)
+      collect(n.upstream)
+      collect(n.downstream)
+    }
+  }
+  collect(tree.upstream)
+  collect(tree.downstream)
+  // 加当前节点
+  const selfKey = `${tree.projectName}|${tree.processId}`
+  if (!nodesById.has(selfKey)) nodesById.set(selfKey, tree)
+
+  // 2. 按项目分组,每组只发一次"当天实例列表"请求(处理翻页)
+  const byProject = new Map()
+  for (const n of nodesById.values()) {
+    if (!byProject.has(n.projectName)) byProject.set(n.projectName, [])
+    byProject.get(n.projectName).push(n)
+  }
+
+  // 3. 并发拉取各项目当天实例列表(限并发),再本地批量匹配
+  const projectList = [...byProject.entries()]
+  const instancesByProject = new Map() // projectName → 当天实例数组
   const CONCURRENCY = 6
-  let active = 0
-  const queue = [] // 待执行的下游实例查询任务
-  const runQueued = () => {
-    while (active < CONCURRENCY && queue.length) {
-      const task = queue.shift()
-      if (!task) break
-      active++
-      task().finally(() => {
-        active--
-        runQueued()
-      })
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < projectList.length) {
+      const [projectName] = projectList[cursor++]
+      // loadProjectInstances 内部已 try-catch + 缓存回退,不会抛错
+      const list = await loadProjectInstances(projectName, dates)
+      instancesByProject.set(projectName, list)
     }
   }
-  const done = new Set() // 防同一节点上游/下游重复标注(重复查海豚)
-  const annotate = async (nodes) => {
-    for (const n of nodes || []) {
-      const key = String(n.processId)
-      if (done.has(key)) continue
-      done.add(key)
-      queue.push(async () => {
-        // 指定日期区间(或默认当天)内最近一次执行实例状态
-        n.instance = await fetchLatestInstance(n.projectName, n.processName, n.processId, dates)
-        // 补 crontab(每天执行时间)到节点
-        const node = findNode(n.processId)
-        n.crontab = node?.crontab || null
-      })
-      if (n.downstream && n.downstream.length) await annotate(n.downstream)
-      if (n.upstream && n.upstream.length) await annotate(n.upstream)
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, projectList.length) }, worker))
+
+  // 4. 本地批量匹配赋值;SUCCESS 实例写回日级缓存(到当天结束),供单节点查询/同树复用,
+  //    非 SUCCESS(失败/运行中)不缓存实时查;无实例不缓存(避免截断误判固化)
+  for (const n of nodesById.values()) {
+    const list = instancesByProject.get(n.projectName) || []
+    const inst = matchLatestInstance(list, n.processId)
+    if (inst) {
+      n.instance = inst
+      // 仅 SUCCESS 进日级缓存(当天结束自动过期)
+      if (inst.state === 'SUCCESS') {
+        setCachedInstance(n.projectName, n.processId, inst, msUntilEndOfDay())
+      }
+    } else {
+      n.instance = null
     }
-  }
-  const task = (async () => {
-    // 当前工作流自身也标注指定日期区间内最近一次执行实例状态(前端当前节点需显示)
-    queue.push(async () => {
-      tree.instance = await fetchLatestInstance(tree.projectName, tree.processName, tree.processId, dates)
-      const node = findNode(tree.processId)
-      tree.crontab = node?.crontab || null
-    })
-    // 上游 + 下游都标注指定日期区间内实例状态(跨项目完整依赖链可观测)
-    await annotate(tree.upstream)
-    await annotate(tree.downstream)
-    runQueued()
-    // 等待队列中的实例查询全部完成(否则响应返回时 instance 还没填充)
-    while (queue.length || active > 0) {
-      await new Promise((r) => setTimeout(r, 100))
-    }
-  })()
-  try {
-    // 完整等待全部实例查询完成(单个请求已有 15s 超时兜底),
-    // 不用整体硬超时——否则部分下游节点标注未完成就被返回成 null("未执行")
-    await task
-  } catch {
-    /* 实例查询失败不影响树 */
+    // 补 crontab(每天执行时间)
+    const node = findNode(n.processId)
+    n.crontab = node?.crontab || null
   }
   return tree
+}
+
+/**
+ * 拉取某项目指定日期区间内全部实例(翻页合并,pageSize=500)。dates 为 null 时用当天 00:00→现在。
+ * 返回:实例数组(totalList 合并)。
+ * 加"项目级当天实例列表"短缓存(60s):同一棵树多个节点同项目只需拉一次;海豚偶发失败时回退缓存,
+ * 避免整批节点因单次请求失败被误判"未执行"。
+ */
+const projectInstanceCache = new Map() // `${project}|${dateKey}` → {instances, _ts}
+const PROJECT_INSTANCE_TTL = 60 * 1000
+async function loadProjectInstances(projectName, dates = null) {
+  const now = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  let start, end
+  if (dates && dates.start && dates.end) {
+    start = dates.start
+    end = dates.end
+  } else {
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    start = `${todayStart.getFullYear()}-${p(todayStart.getMonth() + 1)}-${p(todayStart.getDate())} 00:00:00`
+    end = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
+  }
+  const dayKey = start.slice(0, 10) // YYYY-MM-DD
+  const ck = `${projectName}|${dayKey}`
+
+  // 命中短缓存(60s 内):直接复用
+  const hit = projectInstanceCache.get(ck)
+  if (hit && Date.now() - hit._ts < PROJECT_INSTANCE_TTL) return hit.instances
+
+  try {
+    const out = []
+    const pageSize = 500
+    for (let pageNo = 1; pageNo <= 5; pageNo++) {
+      const d = await dsApi(`/projects/${encodeURIComponent(projectName)}/instance/list-paging`, {
+        pageNo,
+        pageSize,
+        startDate: start,
+        endDate: end
+      })
+      const list = d?.data?.totalList || []
+      const total = d?.data?.total || 0
+      out.push(...list)
+      if (out.length >= total || list.length < pageSize) break
+    }
+    projectInstanceCache.set(ck, { instances: out, _ts: Date.now() })
+    return out
+  } catch (e) {
+    // 拉取失败:回退短缓存(若有),否则返回空(不阻断树)
+    const fallback = projectInstanceCache.get(ck)
+    console.warn(`[ds-deps] loadProjectInstances 失败 ${projectName}: ${e.message}`)
+    return fallback ? fallback.instances : []
+  }
+}
+
+/** 在某项目实例列表里匹配指定 processDefinitionId 的最新(按 startTime)一条,转成 instance 结构;没匹配到返回 null */
+function matchLatestInstance(list, processId) {
+  const idStr = String(processId || '')
+  let best = null
+  let bestTime = ''
+  for (const i of list || []) {
+    const id = String(i.processDefinitionId || '')
+    const code = String(i.processDefinitionCode || '')
+    if (id !== idStr && code !== idStr) continue
+    const st = i.startTime || ''
+    if (!best || st > bestTime) {
+      best = i
+      bestTime = st
+    }
+  }
+  if (!best) return null
+  return {
+    instanceId: best.id,
+    name: best.name,
+    state: best.state,
+    startTime: best.startTime || null,
+    endTime: best.endTime || null,
+    duration: typeof best.duration === 'number' ? best.duration : null
+  }
 }
 
 /**
