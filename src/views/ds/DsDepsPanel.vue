@@ -7,20 +7,6 @@
         <span class="dp__proj" v-if="props.projectName">[{{ props.projectName }}]</span>
       </div>
       <div class="dp__meta">
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          range-separator="→"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD 00:00:00"
-          :shortcuts="dateShortcuts"
-          size="small"
-          class="dp__daterange"
-          :clearable="true"
-          :editable="false"
-          @change="onRangeChange"
-        />
         <el-button link type="primary" size="small" :loading="loading" @click="load">↻ 刷新</el-button>
       </div>
     </div>
@@ -127,18 +113,7 @@ const error = ref('')
 const checked = ref<Set<string>>(new Set())
 const currentKey = ref('')
 
-// ── 日期范围选择(查询实例状态的区间;null=默认近 90 天最近一次)──
-const dateRange = ref<[string, string] | null>(null)
-const dateShortcuts: { text: string; value: [string, string] }[] = [
-  { text: '当天', value: (() => { const d = new Date(); const p = (n: number) => String(n).padStart(2, '0'); const s = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} 00:00:00`; return [s, s.slice(0, 10) + ' 23:59:59'] })() },
-  { text: '近 7 天', value: (() => { const e = new Date(); const s = new Date(e.getTime() - 6 * 86400000); const p = (n: number) => String(n).padStart(2, '0'); return [`${s.getFullYear()}-${p(s.getMonth() + 1)}-${p(s.getDate())} 00:00:00`, `${e.getFullYear()}-${p(e.getMonth() + 1)}-${p(e.getDate())} 23:59:59`] })() },
-  { text: '近 30 天', value: (() => { const e = new Date(); const s = new Date(e.getTime() - 29 * 86400000); const p = (n: number) => String(n).padStart(2, '0'); return [`${s.getFullYear()}-${p(s.getMonth() + 1)}-${p(s.getDate())} 00:00:00`, `${e.getFullYear()}-${p(e.getMonth() + 1)}-${p(e.getDate())} 23:59:59`] })() }
-]
-/** 日期范围改变 → 重新加载(传 start/end 给后端) */
-function onRangeChange() {
-  load()
-}
-
+// 依赖状态查询固定在当天(00:00→现在);不做日期范围选择
 const g6El = ref<HTMLDivElement>()
 let graph: any | null = null
 let ro: ResizeObserver | null = null
@@ -529,7 +504,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    tree.value = await fetchWorkflowTree(props.processId, dateRange.value ? { start: dateRange.value[0], end: dateRange.value[1] } : undefined)
+    tree.value = await fetchWorkflowTree(props.processId)
     currentKey.value = String(props.processId)
     // 默认勾选:当前 + 所有下游(上游不重跑)
     const downs = collectDownstream(tree.value?.downstream)
@@ -653,6 +628,8 @@ watch(
 
 // 尺寸自适应
 onMounted(() => {
+  // 初进即有 processId(抽屉/右侧面板场景)时自动加载依赖 DAG,无需手动刷新
+  if (props.processId) load()
   if (g6El.value) {
     ro = new ResizeObserver(() => {
       if (g6El.value && graph) {
