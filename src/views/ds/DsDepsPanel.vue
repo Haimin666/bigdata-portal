@@ -201,8 +201,15 @@ function toDagData() {
   }
   const setState = (n: { processId: number; instance?: DepNode['instance'] }) => {
     const cur = nodes.get(String(n.processId))
-    if (cur) cur.state = n.instance?.state ?? null
-    if (n.instance) nodeRefMap.set(String(n.processId), n as DepNode)
+    if (!cur) return
+    const newSt = n.instance?.state ?? null
+    if (cur.state === null || newSt === 'SUCCESS') {
+      // 同 pid 多次出现时:优先保留有状态,SUCCESS 优于其他(避免被 null 覆盖导致"未执行"误判)
+      cur.state = newSt
+      if (n.instance) nodeRefMap.set(String(n.processId), n as DepNode)
+    } else if (!cur.state && n.instance) {
+      nodeRefMap.set(String(n.processId), n as DepNode)
+    }
   }
   const addEdge = (from: number, to: number) => edges.add(`${from}|${to}`)
 
