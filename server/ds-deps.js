@@ -703,7 +703,7 @@ export function dsDepsRouter() {
           const parsed = parseProcessDefinition(d.data)
           cache.nodes.set(String(pid), { ...node, ...parsed })
           persist()
-          return res.json({ code: 0, msg: '刷新成功' })
+          return res.json({ code: 0, data: { msg: '刷新成功' } })
         }
         return res.status(500).json({ code: 500, msg: '刷新失败' })
       } catch (e) {
@@ -712,10 +712,10 @@ export function dsDepsRouter() {
     }
     // 全量刷新(异步触发,立即返回;加锁防并发重复采集)
     if (collecting) {
-      return res.json({ code: 0, msg: '全量刷新进行中,请稍后' })
+      return res.json({ code: 0, data: { msg: '全量刷新进行中,请稍后' } })
     }
     collect().catch((e) => console.error('[ds-deps] 手动全量刷新失败:', e.message))
-    res.json({ code: 0, msg: '全量刷新已触发' })
+    res.json({ code: 0, data: { msg: '全量刷新已触发' } })
   })
 
   // 缓存状态(不暴露服务器绝对路径)

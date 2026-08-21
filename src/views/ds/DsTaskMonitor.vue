@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Refresh, View } from '@element-plus/icons-vue'
+import { Document, Refresh, View, Setting } from '@element-plus/icons-vue'
 import {
   listProjects,
   listProcessInstances,
@@ -18,8 +18,9 @@ import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
-import DsDepsDialog from './DsDepsDialog.vue'
-import { searchWorkflows, rerunInstances, rerunFromNode } from '@/api/dsDeps'
+import DsDepsPanel from './DsDepsPanel.vue'
+import { searchWorkflows, rerunInstances, rerunFromNode, refreshDeps, fetchDepsStatus } from '@/api/dsDeps'
+import { useAuthStore } from '@/store/auth'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -27,11 +28,16 @@ const YARN_APP_RE = /application_\d+_\d+/
 defineOptions({ name: 'DsTaskMonitor' })
 
 const router = useRouter()
+const auth = useAuthStore()
 
 const projects = ref<DsProject[]>([])
 const projectName = ref('')
 const loading = ref(false)
 const error = ref('')
+
+// 依赖缓存刷新
+const depsRefreshing = ref(false)
+const depsStatus = ref<{ updatedAt: string | null; count: number }>({ updatedAt: null, count: 0 })
 
 // 视图模式:process = 工作流实例(默认);task = 任务实例(填写了任务名搜索)
 const viewMode = ref<'process' | 'task'>('process')
@@ -45,7 +51,7 @@ const pageSize = ref(20)
 const stateType = ref('')
 const searchProcess = ref('')
 const searchTask = ref('')
-const rangeKey = ref('1d')
+const rangeKey = ref('today')
 
 // YARN RM 地址(从 /api/config 获取,用于 application id 跳转)
 const rmHost = ref('')
@@ -100,12 +106,16 @@ function isRunning(state: string): boolean {
   return stateOptions.some((o) => o.value === state && o.running) || ['DELAY_EXECUTION', 'SERIAL_WAIT'].includes(state)
 }
 
-/** 时间范围 → [startDate, endDate],海豚 API 格式 yyyy-MM-dd HH:mm:ss */
+/** 时间范围 → [startDate, endDate],海豚 API 格式 yyyy-MM-dd HH:mm:ss
+ *  today = 当天 00:00:00 → 现在(本地时区);其余 = 近 N 天 */
 function rangeDates(): { start?: string; end?: string } {
   const now = new Date()
-  const fmt = (d: Date) => {
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  const p = (n: number) => String(n).padStart(2, '0')
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  if (rangeKey.value === 'today') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    return { start: fmt(start), end: fmt(now) }
   }
   const hours: Record<string, number> = { '1d': 24, '3d': 24 * 3, '7d': 24 * 7 }
   const h = hours[rangeKey.value]
@@ -366,25 +376,32 @@ async function onExecute(inst: DsProcessInstance, executeType: string) {
   }
 }
 
-// ── 工作流依赖查看 / 级联重跑 ───────────────────────────────
-const depsDialogVisible = ref(false)
+// ── 工作流依赖查看 / 级联调起(右栏面板)──────────────────────
 const depsTarget = ref<{ processId: number; processName: string; projectName: string; instanceId?: number; instanceName?: string } | null>(null)
 
-/** 打开依赖弹窗(级联重跑/查看) */
-function openDeps(inst: DsProcessInstance) {
+/** 在右栏展示该实例的跨项目依赖树 */
+function showDeps(inst: DsProcessInstance) {
   if (!inst.processDefinitionId) {
     ElMessage.warning('该实例缺少工作流定义 ID,无法查看依赖')
     return
   }
   depsTarget.value = {
     processId: inst.processDefinitionId,
-    processName: inst.name,
+    processName: inst.processDefinition?.name || inst.name,
     projectName: instProject(inst),
     instanceId: inst.id,
     instanceName: inst.name
   }
-  depsDialogVisible.value = true
 }
+
+// ── 当日统计概览(基于当前加载实例)───────────────────────────
+const stats = computed(() => {
+  const list = viewMode.value === 'process' ? instances.value : tasks.value
+  const success = list.filter((i: any) => i.state === 'SUCCESS').length
+  const failure = list.filter((i: any) => i.state === 'FAILURE').length
+  const running = list.filter((i: any) => isRunning(i.state)).length
+  return { total: list.length, success, failure, running, other: list.length - success - failure - running }
+})
 
 /** 依赖树节点点击 → 跳到对应工作流实例(切项目+搜索工作流名) */
 function onDepsJump(node: { projectName: string; processName: string }) {
@@ -494,7 +511,57 @@ onMounted(async () => {
     error.value = e instanceof Error ? e.message : String(e)
     if (!projects.value.length) error.value += '(海豚 token 由网关 DS_TOKEN 配置注入,项目列表即该用户可见项目)'
   }
+  loadDepsStatus()
 })
+
+/** 加载依赖缓存状态 */
+async function loadDepsStatus() {
+  try {
+    const s = await fetchDepsStatus()
+    depsStatus.value = s
+  } catch {
+    // 静默
+  }
+}
+
+/** 全量刷新依赖缓存(二次确认,仅管理员) */
+async function onRefreshDeps() {
+  try {
+    await ElMessageBox.confirm(
+      `将全量扫描所有项目的工作流依赖并覆盖缓存(当前缓存 ${depsStatus.value.count || 0} 个工作流)。\n此操作耗时较长(视工作流数量),期间不影响现有依赖数据展示。确认执行?`,
+      '刷新依赖缓存',
+      { confirmButtonText: '确认刷新', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  depsRefreshing.value = true
+  try {
+    const res = await refreshDeps()
+    ElMessage.success(res?.msg || '刷新已触发,完成后自动生效')
+    // 轮询等待采集完成(最多等 5 分钟)
+    let waited = 0
+    const poll = async () => {
+      await new Promise((r) => setTimeout(r, 5000))
+      waited += 5
+      try {
+        const s = await fetchDepsStatus()
+        depsStatus.value = s
+        if (!s.collecting || waited >= 300) {
+          depsRefreshing.value = false
+          if (!s.collecting) ElMessage.success('依赖缓存刷新完成')
+          return
+        }
+      } catch { /* ignore */ }
+      if (waited < 300) poll()
+      else depsRefreshing.value = false
+    }
+    poll()
+  } catch (e) {
+    depsRefreshing.value = false
+    ElMessage.error(`刷新失败: ${e instanceof Error ? e.message : e}`)
+  }
+}
 </script>
 
 <template>
@@ -514,6 +581,7 @@ onMounted(async () => {
       <StateSelect v-model="stateType" :options="stateOptions" @change="onFilterChange" />
 
       <el-select v-model="rangeKey" class="range-select" @change="onFilterChange">
+        <el-option label="当天" value="today" />
         <el-option label="近 1 天" value="1d" />
         <el-option label="近 3 天" value="3d" />
         <el-option label="近 7 天" value="7d" />
@@ -538,10 +606,25 @@ onMounted(async () => {
       />
 
       <div class="toolbar-spacer" />
+      <el-tooltip v-if="auth.isAdmin" :content="depsStatus.updatedAt ? `缓存 ${depsStatus.count} 个工作流, 更新于 ${depsStatus.updatedAt}` : '暂无缓存数据'">
+        <el-button :icon="Setting" :loading="depsRefreshing" @click="onRefreshDeps">刷新依赖</el-button>
+      </el-tooltip>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       <el-button type="danger" plain :loading="loading" @click="rerunAllFailed">一键拉起失败</el-button>
     </div>
 
+    <!-- 当日统计概览 -->
+    <div class="stat-bar">
+      <div class="stat-item total"><span class="stat-num">{{ stats.total }}</span><span class="stat-lab">实例</span></div>
+      <div class="stat-item running"><span class="stat-num">{{ stats.running }}</span><span class="stat-lab">运行中</span></div>
+      <div class="stat-item success"><span class="stat-num">{{ stats.success }}</span><span class="stat-lab">成功</span></div>
+      <div class="stat-item failure"><span class="stat-num">{{ stats.failure }}</span><span class="stat-lab">失败</span></div>
+      <div class="stat-item other"><span class="stat-num">{{ stats.other }}</span><span class="stat-lab">其他</span></div>
+      <div class="stat-hint">当前为{{ rangeKey === 'today' ? '当天(00:00 → 现在)' : '所选范围' }}的实例统计,可点击「依赖」在右侧查看跨项目依赖树</div>
+    </div>
+
+    <div class="main-split">
+      <div class="left-pane">
     <el-result v-if="error && !loading" icon="error" title="加载失败" :sub-title="error">
       <template #extra>
         <el-button type="primary" @click="load">重试</el-button>
@@ -615,6 +698,11 @@ onMounted(async () => {
           </div>
         </template>
       </el-table-column>
+      <el-table-column label="项目" min-width="130" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span class="proj-name">{{ instProject(row) || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="工作流实例名称" min-width="280" show-overflow-tooltip sortable>
         <template #default="{ row }">
           <el-link
@@ -652,15 +740,14 @@ onMounted(async () => {
       </el-table-column>
       <el-table-column prop="executorName" label="执行人" width="100" sortable />
       <el-table-column prop="host" label="主机" min-width="130" show-overflow-tooltip sortable />
-      <el-table-column label="操作" width="260" fixed="right">
+      <el-table-column label="操作" width="190" fixed="right">
         <template #default="{ row }">
           <template v-if="isRunning(row.state)">
             <el-button link type="warning" size="small" @click="onExecute(row, 'PAUSE')">暂停</el-button>
             <el-button link type="danger" size="small" @click="onExecute(row, 'STOP')">停止</el-button>
           </template>
           <el-button v-else link type="primary" size="small" @click="onExecute(row, 'REPEAT_RUNNING')">重跑</el-button>
-          <el-button link type="success" size="small" @click="openDeps(row)">级联重跑</el-button>
-          <el-button link size="small" @click="openDeps(row)">依赖</el-button>
+          <el-button link type="success" size="small" @click="showDeps(row)">依赖 · 级联</el-button>
         </template>
       </el-table-column>
       <template #empty>
@@ -670,6 +757,11 @@ onMounted(async () => {
 
     <!-- 任务实例视图(填写了任务名搜索) -->
     <el-table v-else v-loading="loading" :data="tasks" border class="task-table">
+      <el-table-column label="项目" min-width="130" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span class="proj-name">{{ instProject(row) || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="任务名" min-width="260" show-overflow-tooltip sortable>
         <template #default="{ row }">
           <span class="task-name">{{ row.name }}</span>
@@ -726,18 +818,6 @@ onMounted(async () => {
       </template>
     </el-table>
 
-    <!-- 工作流依赖 / 级联重跑弹窗 -->
-    <DsDepsDialog
-      v-model="depsDialogVisible"
-      v-if="depsTarget"
-      :process-id="depsTarget.processId"
-      :process-name="depsTarget.processName"
-      :project-name="depsTarget.projectName"
-      :instance-id="depsTarget.instanceId"
-      :instance-name="depsTarget.instanceName"
-      @jump="onDepsJump"
-    />
-
     <div class="pagination-bar">
       <el-pagination
         v-model:current-page="pageNo"
@@ -749,6 +829,22 @@ onMounted(async () => {
         @size-change="onFilterChange"
       />
     </div>
+      </div><!-- /left-pane -->
+
+      <!-- 右栏:工作流跨项目依赖树 + 一键级联调起(选中实例后加载) -->
+      <div v-if="viewMode === 'process'" class="right-pane">
+        <DsDepsPanel
+          :process-id="depsTarget?.processId"
+          :process-name="depsTarget?.processName"
+          :project-name="depsTarget?.projectName"
+          :instance-id="depsTarget?.instanceId"
+          @jump="onDepsJump"
+        />
+      </div>
+      <div v-else class="right-pane right-pane--empty">
+        <el-empty description="任务视图无依赖树,请切换到工作流实例视图" />
+      </div>
+    </div><!-- /main-split -->
 
     <!-- 日志弹窗 -->
     <el-dialog v-model="logVisible" title="任务日志" width="70%" top="4vh">
@@ -864,6 +960,108 @@ onMounted(async () => {
   border: 1px solid $border;
   border-radius: 6px;
   padding: 8px 12px;
+}
+
+/* ── 当日统计概览条 ───────────────────────────── */
+.stat-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 72px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: $bg;
+}
+
+.stat-num {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stat-lab {
+  font-size: 11px;
+  color: $muted;
+  margin-top: 2px;
+}
+
+.stat-item.total .stat-num {
+  color: $text;
+}
+
+.stat-item.running .stat-num {
+  color: #3b82f6;
+}
+
+.stat-item.success .stat-num {
+  color: #67c23a;
+}
+
+.stat-item.failure .stat-num {
+  color: #f56c6c;
+}
+
+.stat-item.other .stat-num {
+  color: $muted;
+}
+
+.stat-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: $muted;
+  padding-right: 4px;
+}
+
+/* ── 左右分栏 ───────────────────────────────── */
+.main-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.left-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding-bottom: 2px;
+}
+
+.right-pane {
+  width: 46%;
+  min-width: 460px;
+  flex-shrink: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.right-pane--empty {
+  align-items: center;
+  justify-content: center;
+  width: 36%;
+  min-width: 320px;
+  color: $muted;
 }
 
 .log-box {
