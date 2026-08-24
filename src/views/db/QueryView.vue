@@ -1033,6 +1033,8 @@ watch(() => activePane.value, (pane) => {
 // 结果表格翻页(默认 15 条/页)
 const pageSize = ref(15)
 const pageCurrent = ref(1)
+// 切换每页条数时回到第 1 页,避免停留在越界页导致分页区异常
+watch(pageSize, () => { pageCurrent.value = 1 })
 const pagedRows = computed(() => {
   const r = currentResult.value
   if (!r) return []
@@ -1743,7 +1745,13 @@ async function stopQuery() {
 
 // ── 数据导出(CSV,含 BOM 防 Excel 乱码)──────────────────────
 function exportCsv(idx?: number) {
-  const r = idx != null ? results.value[idx] : results.value[0]
+  // 未指定 idx 时导出当前激活的结果 tab(activePane=0 时为日志,无数据可导)
+  let r: typeof currentResult.value & object | null
+  if (idx != null) {
+    r = results.value[idx] ?? null
+  } else {
+    r = currentResult.value
+  }
   if (!r || r.error || !r.columns.length) {
     ElMessage.warning('没有可导出的数据')
     return
@@ -1760,7 +1768,9 @@ function exportCsv(idx?: number) {
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  const suffix = results.value.length > 1 ? `_${(idx ?? 0) + 1}` : ''
+  // 导出序号:显式 idx 用 idx;隐式(下载当前)用 activePane 对应结果 tab 序号
+  const realIdx = idx != null ? idx : activePane.value > 0 ? activePane.value - 1 : 0
+  const suffix = results.value.length > 1 ? `_${realIdx + 1}` : ''
   a.download = `${db.value || 'query'}${suffix}_${Date.now()}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
@@ -1987,11 +1997,6 @@ async function copyAllTsv() {
           <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
           <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
           <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
-          <el-tooltip v-if="!r.error" content="导出 CSV" placement="top">
-            <span class="tab-export" @click.stop="exportCsv(idx)">
-              <el-icon><Download /></el-icon>
-            </span>
-          </el-tooltip>
           <el-tooltip content="关闭" placement="top">
             <span class="tab-close" @click.stop="closeResultTab(idx)">
               <el-icon><Close /></el-icon>
@@ -2100,7 +2105,7 @@ async function copyAllTsv() {
           </div>
           <!-- 翻页(紧贴数据集下方) -->
           <el-pagination
-            v-if="currentResult.rows.length > pageSize"
+            v-if="currentResult.rows.length > 15"
             v-model:current-page="pageCurrent"
             v-model:page-size="pageSize"
             class="result-pagination"
@@ -2140,6 +2145,9 @@ async function copyAllTsv() {
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
+              <el-tooltip v-if="currentResult && !currentResult.error && currentResult.columns.length" content="下载当前结果 (CSV)" placement="top">
+                <el-button size="small" text type="primary" @click="exportCsv()"><el-icon><Download /></el-icon>下载</el-button>
+              </el-tooltip>
             </span>
           </div>
             </div>
@@ -2666,18 +2674,6 @@ async function copyAllTsv() {
 
   &.err {
     color: #f56c6c;
-  }
-}
-
-.tab-export {
-  display: inline-flex;
-  align-items: center;
-  font-size: 12px;
-  color: $muted;
-  cursor: pointer;
-
-  &:hover {
-    color: $primary;
   }
 }
 
