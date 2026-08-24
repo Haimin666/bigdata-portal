@@ -2411,6 +2411,10 @@ async function copyAllTsv() {
   width: 96px;
 }
 
+.executor-select {
+  width: 120px;
+}
+
 .db-select {
   width: 200px;
 }

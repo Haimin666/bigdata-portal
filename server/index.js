@@ -1090,9 +1090,11 @@ if (config.dbProxyUrl) {
       }
       // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
       checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql)))
-      // 写权限密码验证已移除(由网关库权限矩阵管控):SQL 写语句/PySpark 直接执行,
-      // 数据源 readOnly 与 db-proxy 侧资源护栏兑底(写审计保留)。
-      const writeUnlocked = false
+      // 写操作(db-proxy 侧 writeUnlocked 语义):已通过权限矩阵即视为解锁 — 门户放行后
+      // 透传 writeUnlocked=true 并附加 X-Spark-Write 共享密钥,db-proxy 才放行写语句。
+      // 读查询保持 false,db-proxy 对所有写语句强制该标记,堵死直连伪造。
+      const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql))
+      const writeUnlocked = isWrite
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
       const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data: result })
@@ -1116,8 +1118,10 @@ if (config.dbProxyUrl) {
       if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
       // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
       checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body)))
-      // 写权限密码验证已移除(与 /api/spark/query 一致):库权限矩阵 + readOnly 兑底
-      const writeUnlocked = false
+      // 写操作透传 writeUnlocked=true(与 /api/spark/query 一致):权限矩阵放行即解锁,
+      // 附加 X-Spark-Write 头交由 db-proxy 物理校验;读查询保持 false。
+      const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body))
+      const writeUnlocked = isWrite
       const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
       const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
       res.json({ code: 0, data })

@@ -352,11 +352,15 @@ class SparkEngine:
         自动用新配置重建 session(冷启动 30~90s,设置后首次查询变慢但无副作用)。
         """
         n = int(n)
-        if n < 1:
-            raise ValueError("executorInstances 必须 >= 1")
+        if n < 0:
+            raise ValueError("executorInstances 必须 >= 0")
         with self._init_lock:
             prev = self.cfg.get("executorInstances")
-            self.cfg["executorInstances"] = n
+            if n == 0:
+                # 0=自适应(动态分配):移除固定数量配置,恢复 maxExecutors 动态伸缩
+                self.cfg.pop("executorInstances", None)
+            else:
+                self.cfg["executorInstances"] = n
             if self._spark is not None:
                 try:
                     self._spark.stop()
