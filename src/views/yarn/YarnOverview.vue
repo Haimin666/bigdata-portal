@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { ClusterMetrics, QueueResources } from '@/types/yarn'
 import { formatMem, progressColor } from '@/utils/format'
 
@@ -74,12 +74,22 @@ function queueConfigText(q: QueueResources): string {
 
 const hasData = computed(() => memTotal.value > 0 || props.queueTree.length > 0)
 
-// 队列树数据刷新时重建表格:刷新后回到默认收起(常闭)状态,不再保持上次展开
-const tableKey = ref(0)
+// 队列树刷新后保持用户上次手动展开的行:
+// 不再用 tableKey 重建表格(会丢展开态),数据更新时对已展开的 queueName 重新 toggleRowExpansion。
+const tableRef = ref()
+const expandedQueues = ref<Set<string>>(new Set())
+function onExpandChange(_row: QueueResources, expandedRows: QueueResources[]) {
+  const names = new Set(expandedRows.map((r) => r.queueName))
+  expandedQueues.value = names
+}
 watch(
   () => props.queueTree,
-  () => {
-    tableKey.value++
+  async () => {
+    await nextTick()
+    for (const name of expandedQueues.value) {
+      const row = props.queueTree.find((q) => q.queueName === name)
+      if (row) tableRef.value?.toggleRowExpansion(row, true)
+    }
   }
 )
 </script>
@@ -115,10 +125,11 @@ watch(
       <div class="panel-title">队列资源使用</div>
       <el-table
         v-if="queueTree.length"
-        :key="tableKey"
+        ref="tableRef"
         :data="queueTree"
         row-key="queueName"
         :tree-props="{ children: 'children' }"
+        @expand-change="onExpandChange"
       >
         <el-table-column prop="queueName" label="队列" min-width="170" />
         <el-table-column label="配置" width="110">

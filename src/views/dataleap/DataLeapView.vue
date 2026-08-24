@@ -632,7 +632,7 @@ async function loadIngestTables() {
   if (!ingestDb.value) return
   ingestLoading.value = true
   try {
-    ingestTables.value = await listTables(ingestDb.value)
+    ingestTables.value = (await listTables(ingestDb.value)) as string[]
   } catch (e) {
     ElMessage.error(`加载表失败:${e instanceof Error ? e.message : e}`)
   } finally {

@@ -1,4 +1,5 @@
-// bigdata-portal 独立网关:静态托管 + 同源代理(子应用) + 自动登录 + 配置下发
+// bigdata-portal 独立网关:静态托管 + 同源代理(子应用) + 配置下发
+// 注:多用户体系上线后已移除子应用共享账号自动登录(/api/login/* 与 accounts.* 配置)
 import { EventEmitter } from 'node:events'
 import express from 'express'
 import http from 'node:http'
@@ -53,7 +54,7 @@ const auth = setupAuth(app, config)
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
-  '/api/ds-deps', '/api/scripts', '/api/config', '/api/login', '/api/dataleap',
+  '/api/ds-deps', '/api/scripts', '/api/config', '/api/dataleap',
   '/api/assistant',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static'
@@ -228,108 +229,6 @@ if (config.assistantUrl) {
       }
     }
   }))
-}
-
-// 自动登录端点(凭证:请求体 > config.accounts 配置)
-// transport: 'json' 请求体 JSON | 'form' 请求体表单 | 'query' 凭证放 URL query
-// passwordEncode: 'base64' 密码先 base64 编码再发送(OMD)
-function createLoginEndpoint({
-  target,
-  loginPath,
-  accountKey,
-  envUserKey,
-  envPassKey,
-  userField = 'username',
-  passField = 'password',
-  transport = 'json',
-  passwordEncode
-}) {
-  return (req, res) => {
-    // 安全:用户名与密码必须成对提供(任一来自请求体则两者都必须来自请求体),
-    // 禁止用"请求体用户名 + 环境变量密码"的组合冒用账号。
-    const bodyUser = req.body?.user
-    const bodyPass = req.body?.password
-    if (!!bodyUser !== !!bodyPass) {
-      return res.status(400).json({ ok: false, msg: 'user and password must be provided together' })
-    }
-    const user = bodyUser || (accountKey ? config.accounts[accountKey]?.user : undefined) || process.env[envUserKey]
-    const rawPassword = bodyPass || (accountKey ? config.accounts[accountKey]?.pass : undefined) || process.env[envPassKey]
-    if (!user || !rawPassword) {
-      return res.status(400).json({ ok: false, msg: 'missing credentials' })
-    }
-    const password = passwordEncode === 'base64' ? Buffer.from(rawPassword, 'utf8').toString('base64') : rawPassword
-    let fullPath = target + loginPath
-    const headers = {}
-    let payload = ''
-    if (transport === 'query') {
-      const sep = fullPath.includes('?') ? '&' : '?'
-      fullPath += `${sep}${userField}=${encodeURIComponent(user)}&${passField}=${encodeURIComponent(password)}`
-      // Stingray 登录必须携带该 Content-Type,否则返回"处理失败"
-      headers['Content-Type'] = 'application/json;charset=UTF-8'
-      headers['Content-Length'] = 0
-    } else if (transport === 'form') {
-      payload = new URLSearchParams({ [userField]: user, [passField]: password }).toString()
-      headers['Content-Type'] = 'application/x-www-form-urlencoded'
-      headers['Content-Length'] = Buffer.byteLength(payload)
-    } else {
-      payload = JSON.stringify({ [userField]: user, [passField]: password })
-      headers['Content-Type'] = 'application/json;charset=UTF-8'
-      headers['Content-Length'] = Buffer.byteLength(payload)
-    }
-    const mod = target.startsWith('https://') ? https : http
-    const proxyReq = mod.request(
-      fullPath,
-      {
-        method: 'POST',
-        // 默认校验证书(防中间人截获子系统登录密码);内网自签名系统可配 loginTlsInsecure:true 关闭
-        rejectUnauthorized: !config.loginTlsInsecure,
-        headers
-      },
-      (resp) => {
-        const chunks = []
-        resp.on('data', (c) => chunks.push(c))
-        resp.on('end', () => {
-          const raw = Buffer.concat(chunks).toString('utf8')
-          const cookies = resp.headers['set-cookie'] || []
-          // 海豚登录 Set-Cookie 无 Path 属性,浏览器会按请求路径 /api/login/ 收窄生效范围,
-          // 导致 /dolphinscheduler/* 请求不带会话 cookie(401)。统一补 Path=/ 全路径生效。
-          const setCookies = () =>
-            res.setHeader(
-              'Set-Cookie',
-              cookies.map((c) => {
-                const rewritten = rewriteCookie(c)
-                return rewritten.includes('Path=') ? rewritten : `${rewritten}; Path=/`
-              })
-            )
-          // 成功判定:有 cookie 且 2xx,或 JSON 返回 ok/code 0
-          if (cookies.length && resp.statusCode < 400) {
-            setCookies()
-            return res.json({ ok: true })
-          }
-          try {
-            const data = JSON.parse(raw)
-            // 成功:result_code 00000 / code 0 / success / OMD 返回 accessToken
-            if (data.result_code === '00000' || data.code === 0 || data.success || data.accessToken) {
-              if (cookies.length) setCookies()
-              res.json({ ok: true })
-            } else {
-              res.json({ ok: false, msg: data.result_msg || data.msg || data.message || 'login failed' })
-            }
-          } catch {
-            res.json({ ok: false, msg: 'login response parse error' })
-          }
-        })
-      }
-    )
-    // 上游登录接口挂起兜底:15s 超时销毁,避免连接永久悬挂
-    proxyReq.setTimeout(15000, () => proxyReq.destroy(new Error('login upstream timeout')))
-    proxyReq.on('error', (e) => {
-      if (!res.headersSent) res.status(502).json({ ok: false, msg: String(e) })
-      else res.end()
-    })
-    proxyReq.write(payload)
-    proxyReq.end()
-  }
 }
 
 // ── YARN:动态代理(按 X-Resource-Manager 请求头) ───────────────
@@ -596,38 +495,6 @@ app.use(
     logLevel: 'warn'
   })
 )
-app.post(
-  '/api/login/ds',
-  createLoginEndpoint({
-    target: config.dsWebUrl,
-    // dsWebUrl 已含 /dolphinscheduler 前缀,此处只补 /login(createLoginEndpoint 拼接 target + loginPath)
-    loginPath: '/login',
-    // 海豚登录为表单格式:userName / userPassword
-    transport: 'form',
-    userField: 'userName',
-    passField: 'userPassword',
-    accountKey: 'dsWeb',
-    envUserKey: 'DSWEB_USER',
-    envPassKey: 'DSWEB_PASS'
-  })
-)
-
-// ── OMD 自动登录(跨源 iframe 当前不使用,保留供未来同源接入) ─────
-app.post(
-  '/api/login/omd',
-  createLoginEndpoint({
-    target: config.omdUrl,
-    // OpenMetadata 登录:POST /api/v1/users/login,body {email, password: base64(密码)}
-    loginPath: '/api/v1/users/login',
-    userField: 'email',
-    passField: 'password',
-    passwordEncode: 'base64',
-    accountKey: 'omd',
-    envUserKey: 'OMD_USER',
-    envPassKey: 'OMD_PASS'
-  })
-)
-
 // ── Stingray 子应用(HTML 重写 + 独立静态前缀) ──────────────────
 // SPA 入口:任意 /apps/stingray/* 都返回根 HTML,并重写 /static/ → /stingray-static/static/
 app.use('/apps/stingray', (req, res) => {
@@ -1456,21 +1323,6 @@ app.post('/api/dbquery/query', async (req, res) => {
     })
   }
 })
-
-app.post(
-  '/api/login/stingray',
-  createLoginEndpoint({
-    target: config.stingrayUrl,
-    loginPath: '/__/stingray/authc/login',
-    // Stingray 前端以 URL query 传凭证(axios params,body 为空)
-    transport: 'query',
-    userField: 'username',
-    passField: 'password',
-    accountKey: 'stingray',
-    envUserKey: 'STINGRAY_USER',
-    envPassKey: 'STINGRAY_PASS'
-  })
-)
 
 // ── 配置下发 ───────────────────────────────────────────────────
 app.get('/api/config', (req, res) =>

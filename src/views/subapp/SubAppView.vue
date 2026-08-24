@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { MenuItem } from '@/config/menu'
-import { loginToService } from '@/api/auth'
 
 // 海豚 3.x 实例详情 hash 路由:/projects/instance/list/:processInstanceId
 // (项目上下文在 DS 自身 vuex,hash 导航不重载页面可保留;若未选项目 DS 会引导到项目选择页)
@@ -33,35 +32,6 @@ const appUrl = computed(() => {
 })
 // 原生 iframe 直连(同源代理或跨源直连)
 const isNativeIframe = computed(() => props.menu.iframe ?? false)
-// 跨源 iframe(url 为绝对地址):会话在 iframe 自身域,无需门户自动登录
-const isCrossOriginIframe = computed(() => isNativeIframe.value && /^https?:\/\//.test(appUrl.value))
-
-// 进入子应用前的自动登录(仅声明了 login 的同源服务)
-const loginStatus = ref<'loading' | 'success' | 'error'>('loading')
-const loginError = ref('')
-
-async function ensureLogin() {
-  const service = props.menu.login
-  if (!service) {
-    loginStatus.value = 'success'
-    return
-  }
-  loginStatus.value = 'loading'
-  loginError.value = ''
-  try {
-    await loginToService(service)
-    loginStatus.value = 'success'
-  } catch (e) {
-    loginStatus.value = 'error'
-    loginError.value = e instanceof Error ? e.message : String(e)
-  }
-}
-
-onMounted(() => {
-  // 跨源 iframe 直接进入(用户在原系统登录),同源 iframe(代理路径)先自动登录
-  if (isCrossOriginIframe.value) loginStatus.value = 'success'
-  else ensureLogin()
-})
 
 // 顶栏刷新联动:仅激活的 tab 强制重建 iframe 重新加载
 const iframeKey = ref(0)
@@ -134,18 +104,7 @@ onUnmounted(() => clearInterval(dsNavTimer))
 
 <template>
   <div class="subapp-view">
-    <div v-if="loginStatus === 'loading'" class="subapp-status">
-      <el-skeleton :rows="9" animated />
-    </div>
-    <div v-else-if="loginStatus === 'error'" class="subapp-status">
-      <el-result icon="error" title="登录失败" :sub-title="loginError">
-        <template #extra>
-          <el-button type="primary" @click="ensureLogin">重试</el-button>
-        </template>
-      </el-result>
-    </div>
     <iframe
-      v-else
       ref="iframeRef"
       :key="iframeKey"
       :src="appUrl"

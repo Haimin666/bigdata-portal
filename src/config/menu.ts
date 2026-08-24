@@ -5,7 +5,7 @@ export interface MenuItem {
   icon: string
   kind: 'native' | 'subapp'
   url?: string
-  login?: 'ds' | 'omd' | 'stingray'
+  // 多用户体系上线后已移除子应用自动登录字段(原 login?: 'ds' | 'omd' | 'stingray')
   /** 原生 iframe 直连(同源代理或跨源直连) */
   iframe?: boolean
   /** 仅开发态展示的试验性功能(如 demo) */
@@ -57,9 +57,9 @@ export const menus: MenuItem[] = [
     icon: 'Search',
     kind: 'subapp',
     // 同源代理路径 + 原生 iframe:网关注入脚本修正 React basename 路由,
-    // 会话 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被 Chrome 阻止导致登录失败)
+    // 会话 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被 Chrome 阻止导致登录失败);
+    // 多用户体系上线后不再自动登录,由用户在页面内自行登录
     url: '/apps/stingray/login',
-    login: 'stingray',
     iframe: true
   },
   {
@@ -69,8 +69,8 @@ export const menus: MenuItem[] = [
     icon: 'Odometer',
     kind: 'subapp',
     url: '/apps/dsweb/ui/#/home',
-    login: 'ds',
-    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe
+    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe;
+    // 不再自动登录,由用户在页面内自行登录
     iframe: true
   },
   {

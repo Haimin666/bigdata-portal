@@ -121,8 +121,7 @@ QueryView.vue
 - 服务:`port`(默认 3000)、`enabledModules`(空=全量)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`
 - 数据:`dbProxyUrl`/`dbProxyToken`、`dbScriptsDir`、`dsDepsCacheFile`
-- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`loginTlsInsecure`(自动登录上游 TLS 证书校验,默认开启)、`trustProxy`(反代层数,直连部署保持 0)
-- 各子应用账号 `accounts.*`
+- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`trustProxy`(反代层数,直连部署保持 0);~~loginTlsInsecure/accounts.*~~ 已随子应用自动登录移除(2026-08,多用户体系)
 
 ## 7. 部署拓扑
 

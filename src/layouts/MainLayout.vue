@@ -14,12 +14,11 @@ const router = useRouter()
 const collapsed = ref(false)
 const fullscreen = ref(false)
 
-// ── 模块 Tab 常驻池(原生视图 + 子应用 iframe 统一管理)──────────
-// 原生视图:组件常驻 v-show 切换,状态保留;refreshKey 供刷新按钮重建。
-// 子应用:iframe 常驻,关闭 tab 才销毁。
+// ── 模块 Tab 常驻池(原生视图统一管理)──
+// 组件常驻 v-show 切换,状态保留;refreshKey 供刷新按钮重建。
 const tabs = ref<PortalTab[]>([])
 
-/** 打开模块 tab:已存在则仅激活,否则加入池(组件/iframe 首次创建) */
+/** 打开模块 tab:已存在则仅激活,否则加入池(组件首次创建) */
 function openTab(path: string) {
   const menu = menus.find((m) => m.path === path)
   if (!menu) return
@@ -28,7 +27,7 @@ function openTab(path: string) {
   }
 }
 
-/** 关闭 tab:销毁对应组件/iframe 释放内存;若关闭的是当前激活,激活相邻 tab(优先右侧) */
+/** 关闭 tab:销毁对应组件释放内存;若关闭的是当前激活,激活相邻 tab(优先右侧) */
 function closeTab(path: string) {
   const idx = tabs.value.findIndex((t) => t.path === path)
   if (idx === -1) return
@@ -58,16 +57,9 @@ function handleTabSwitch(path: string) {
 }
 
 function handleRefresh() {
-  const menu = menus.find((m) => m.path === route.path)
-  if (!menu) return
-  if (menu.kind === 'native') {
-    // 原生视图:重建当前 tab 组件(重新拉取数据)
-    const t = tabs.value.find((x) => x.path === route.path)
-    if (t) t.refreshKey++
-  } else {
-    // 子应用:广播刷新事件,由激活的 SubAppView 销毁重建 iframe
-    window.dispatchEvent(new Event('portal-refresh'))
-  }
+  // 重建当前 tab 组件(重新拉取数据)
+  const t = tabs.value.find((x) => x.path === route.path)
+  if (t) t.refreshKey++
 }
 
 async function toggleFullscreen() {
@@ -89,11 +81,13 @@ function onFullscreenChange() {
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
 onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
 
-// ── 顶部状态条时钟 ──
+// ── 顶部状态条时钟(浏览器本地时区)──
 const clockText = ref('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 function tickClock() {
-  clockText.value = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  clockText.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 onMounted(() => {
   tickClock()
@@ -102,6 +96,32 @@ onMounted(() => {
 onUnmounted(() => {
   if (clockTimer) clearInterval(clockTimer)
 })
+
+// ── 快捷键切换已打开的 tab(Ctrl/⌘+←/→ 或 Ctrl/⌘+Tab/Shift+Tab)──
+function switchTab(delta: number) {
+  if (tabs.value.length < 2) return
+  const idx = tabs.value.findIndex((t) => t.path === route.path)
+  if (idx === -1) return
+  const next = tabs.value[(idx + delta + tabs.value.length) % tabs.value.length]
+  openTab(next.path) // 已存在则仅激活
+  router.push(next.path)
+}
+function onKeydown(e: KeyboardEvent) {
+  const mod = e.ctrlKey || e.metaKey
+  if (!mod) return
+  if (e.key === 'ArrowRight') {
+    e.preventDefault()
+    switchTab(1)
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault()
+    switchTab(-1)
+  } else if (e.key === 'Tab') {
+    e.preventDefault()
+    switchTab(e.shiftKey ? -1 : 1)
+  }
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>

@@ -11,7 +11,7 @@
 
 - 主应用:Vue 3.5 / Vite 5 / TypeScript / vue-router 4 / Pinia / Element Plus
 - 子应用:原生 iframe 嵌入(第三方老系统零改造)
-- 网关:Node(Express),静态托管 + 反向代理 + 自动登录 + WebSocket 代理,单进程部署
+- 网关:Node(Express),静态托管 + 反向代理 + WebSocket 代理,单进程部署
 
 ## 功能模块
 
@@ -20,8 +20,8 @@
 | YARN 应用 | 原生视图 | 表格/卡片、筛选、自动刷新、kill |
 | HDFS | 原生视图 | WebHDFS 文件浏览器:面包屑导航、路径定位、翻页、大小/权限 |
 | 数据库查询 `/db-query` | 原生视图 | 多引擎/库选择 + CodeMirror SQL 画布 + 结果表格(排序/CSV 导出)+ **我的目录**(SQL 脚本存储)+ **表目录**(库→表→字段) |
-| 海豚调度 `/ds` | 同源 iframe | 网关代理 + 自动登录,免登录进入 |
-| 即时查询 `/query` | 同源 iframe | Stingray 代理 + 路由注入,自动登录,SQL 查询(WebSocket 结果推送) |
+| 海豚调度 `/ds` | 同源 iframe | 网关代理;多用户体系上线后不再自动登录,由用户在页面内登录 |
+| 即时查询 `/query` | 同源 iframe | Stingray 代理 + 路由注入,SQL 查询(WebSocket 结果推送);用户在页面内自行登录 |
 | 我的数据 `/omd` | 跨源 iframe | OpenMetadata 直连,域内登录 |
 | 实时开发 `/streamx` | 跨源 iframe | StreamX 直连,域内登录 |
 
@@ -38,7 +38,7 @@ Vite(3002,ws:true)→ Express 网关(3000)
   /hadoopapi → YARN RM          /webhdfs /static → HDFS
   /apps/dsweb /dolphinscheduler → 海豚
   /apps/stingray /stingray-static /__/stingray(含 WebSocket) → Stingray
-  /api/config → 配置下发        /api/login/* → 自动登录
+  /api/config → 配置下发(自动登录 /api/login/* 已随多用户体系移除)
 ```
 
 > 完整架构与模块文档见 [`docs/`](./docs/):`ARCHITECTURE.md`(总体架构)、`DEVELOPMENT.md`(文档驱动开发流程契约)、`modules/*.md`(各模块)。**开发前必须先读对应模块文档。**
@@ -95,19 +95,17 @@ scripts/npmctl.sh build     # 仅构建前端
 | `dbProxyToken` | — | db-proxy 鉴权 token(与客户机 `datasources.json` 的 `authToken` 一致) |
 | `livy` | `hadoop-task-1.bigdata.shiqiao.com:8998` | Livy(Spark SQL)地址,`{scheme, host, port}` |
 | `sparkWritePassword` | — | Spark SQL 写操作解锁密码;空则写语句一律禁止(只读) |
-| `loginTlsInsecure` | `false` | 自动登录上游 HTTPS 证书校验(OMD 等);默认开启校验,内网自签名系统可置 `true` |
 | `trustProxy` | `0` | 反代层数。**网关直连部署(无 nginx)保持 0**(登录/解锁限速按真实 IP);若前置 nginx 反代必须设 `1`,否则全公司共享反代 IP,限速会互相影响 |
-| `accounts.dsWeb/omd/stingray/streamx` | — | 各子系统自动登录凭证(`{user, pass}`) |
 
-凭证只放 `config.local.json`(gitignore),不入库;前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先。
+凭证只放 `config.local.json`(gitignore),不入库。
 改配置后需重启网关(dev 一键脚本里网关是独立进程,不会自动重启)。
 
 ## 子应用接入说明
 
-- **同源 iframe**(海豚、Stingray):经网关代理,会话 cookie 种在门户域,进入时自动登录(`/api/login/{ds|stingray}`)免登录;Stingray 经 HTML 注入修正 React 路由。
+- **同源 iframe**(海豚、Stingray):经网关代理,会话 cookie 种在门户域;Stingray 经 HTML 注入修正 React 路由。**不再自动登录**(原 `/api/login/*` 已移除),由每个用户在页面内用自己账号登录。
 - **跨源 iframe**(OMD、StreamX):目标系统无 `X-Frame-Options` 限制,直接嵌入,认证在各自域内完成(受同源策略限制,门户无法注入;密码自动填充建议用浏览器密码管理器)。
 - **Tab 常驻池**:所有模块(原生视图 YARN/HDFS/任务监控 + 子应用 iframe)访问后均常驻——切走仅隐藏不卸载,状态保留(筛选、翻页、HDFS 路径、子应用页面),回来可接着操作;顶部 Tab 条可切换/关闭,关闭即销毁组件/iframe 释放内存。
-- 配置在 `src/config/menu.ts`(`iframe: true` 原生 iframe,`login` 同源自动登录)。
+- 配置在 `src/config/menu.ts`(`iframe: true` 原生 iframe;原 `login` 字段已随自动登录移除)。
 
 ## Docker 部署
 
@@ -120,7 +118,6 @@ docker run -d -p 9910:9910 \
   -e DS_WEB_URL=http://<ds-host>/dolphinscheduler \
   -e OMD_URL=https://<omd-host> \
   -e STINGRAY_URL=http://<stingray-host> \
-  -e DSWEB_USER=<user> -e DSWEB_PASS=<pass> \
   bigdata-portal
 ```
 

@@ -2,16 +2,17 @@
 
 ## 1. 职责
 
-外部系统以 iframe 嵌入门户并 tab 化保留状态:海豚调度(DS)、StreamX、JupyterLab、OMD、Stingray 等;以及登录态透传(账号密码网关注入)。
+外部系统以 iframe 嵌入门户并 tab 化保留状态:海豚调度(DS)、StreamX、JupyterLab、OMD、Stingray 等。
+
+> **多用户体系上线后(2026-08)已移除共享账号自动登录**:原 `/api/login/*` 端点、`config.accounts.*`、前端 `loginToService()` 与菜单 `login` 字段全部删除;iframe 直接挂载,由每个用户用自己在子系统中的账号在页面内登录。门户不再持有/注入任何子系统凭证。
 
 ## 2. 涉及文件
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/layouts/components/SubAppView.vue` / `SubappTabs.vue` | iframe 池(v-show 保状态,关闭才销毁) |
+| 视图 | `src/views/subapp/SubAppView.vue` / `src/layouts/components/SubappTabs.vue` | iframe 池(v-show 保状态,关闭才销毁) |
 | 配置 | `src/config/menu.ts` | `kind: 'subapp'` 菜单项(url/iframe 配置)驱动路由与 iframe |
-| 网关 | `server/index.js` | 各子应用代理:DS Web、Jupyter、StreamX、OMD、Stingray、`/dolphinscheduler` |
-| 网关 | `server/config.js` | `accounts.*`(子应用账号密码,网关注入) |
+| 网关 | `server/index.js` | 各子应用代理:DS Web、Jupyter、StreamX、OMD、Stingray、`/dolphinscheduler`(纯代理,无登录注入) |
 
 ## 3. 子应用代理清单
 
@@ -19,9 +20,9 @@
 |---|---|---|
 | 海豚调度 | `/dolphinscheduler`、`/apps/dsweb` | HTML 绝对路径重写;配置 DS_TOKEN 时注入 token header(项目列表即 token 用户可见) |
 | JupyterLab | `/apps/jupyter` | **必须保留 base_url 前缀**(pathRewrite 加回 `/apps/jupyter/`);cookie 重写种在门户域;首次手动登录一次;jupyter 容器 host 网络监听宿主机 8888 |
-| StreamX | `/apps/streamx` | 账号密码网关注入登录 |
-| OMD | `/omd` | 账号密码注入 |
-| Stingray | `/stingray-static`、iframe | 账号密码注入 |
+| StreamX | `/apps/streamx` | 跨源直连(用户自行登录) |
+| OMD | `/omd` | 跨源直连(用户自行登录) |
+| Stingray | `/stingray-static`、iframe | 同源代理 + 路由注入(用户在页面内登录,cookie 种在门户域) |
 
 ## 4. 核心机制
 
@@ -38,4 +39,4 @@
 
 ## 6. 配置
 
-- `config.local.json`: `dsWebUrl`/`dsToken`、`streamxUrl`/`accounts.streamx`、`omdUrl`/`accounts.omd`、`stingrayUrl`/`accounts.stingray`、`jupyterUrl`(容器 host 地址)
+- `config.local.json`: `dsWebUrl`/`dsToken`、`streamxUrl`、`omdUrl`、`stingrayUrl`、`jupyterUrl`(容器 host 地址);~~accounts.*~~ 已随自动登录移除

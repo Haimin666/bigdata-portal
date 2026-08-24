@@ -88,25 +88,6 @@ export default {
   // Spark SQL 写操作解锁密码(类似 Jupyter 登录)。
   // 未配置(空)时写语句(INSERT/CREATE/DROP/ALTER/TRUNCATE 等)一律禁止,只允许只读查询。
   sparkWritePassword: pick(fileCfg.sparkWritePassword, 'SPARK_WRITE_PASSWORD', ''),
-  // 各子系统登录账号(JSON 的 accounts.* 优先,兼容旧环境变量 DSWEB_USER 等)
-  accounts: {
-    dsWeb: {
-      user: pick(fileCfg.accounts?.dsWeb?.user, 'DSWEB_USER', ''),
-      pass: pick(fileCfg.accounts?.dsWeb?.pass, 'DSWEB_PASS', '')
-    },
-    omd: {
-      user: pick(fileCfg.accounts?.omd?.user, 'OMD_USER', ''),
-      pass: pick(fileCfg.accounts?.omd?.pass, 'OMD_PASS', '')
-    },
-    stingray: {
-      user: pick(fileCfg.accounts?.stingray?.user, 'STINGRAY_USER', ''),
-      pass: pick(fileCfg.accounts?.stingray?.pass, 'STINGRAY_PASS', '')
-    },
-    streamx: {
-      user: pick(fileCfg.accounts?.streamx?.user, 'STREAMX_USER', ''),
-      pass: pick(fileCfg.accounts?.streamx?.pass, 'STREAMX_PASS', '')
-    }
-  },
   // 存储路径(默认项目内 data/,docker 挂载 ./data:/app/data 自动对齐)
   dbScriptsDir: pick(fileCfg.dbScriptsDir, 'DB_SCRIPTS_DIR', path.join(import.meta.dirname, '../data/scripts')),
   dsDepsCacheFile: pick(fileCfg.dsDepsCacheFile, 'DS_DEPS_CACHE_FILE', path.join(import.meta.dirname, '../data/ds-deps.json')),
@@ -119,8 +100,6 @@ export default {
   authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12),
   // 反代层数:0 = 不信任(本地直连);生产 nginx 反代时设 1,登录/解锁限速按真实客户端 IP 计
   trustProxy: pickInt(fileCfg.trustProxy, 'TRUST_PROXY', 0),
-  // 自动登录上游 HTTPS 证书校验:默认开启(安全);内网自签名证书系统可置 true 关闭
-  loginTlsInsecure: pickBool(fileCfg.loginTlsInsecure, 'LOGIN_TLS_INSECURE', false),
   // DataLeap 发布到 DS 的目标项目(固定一个测试项目,不污染原始项目)
   dataleapPublishProject: pick(fileCfg.dataleapPublishProject, 'DATALEAP_PUBLISH_PROJECT', 'whm-test')
 }

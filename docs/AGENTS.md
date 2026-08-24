@@ -8,7 +8,7 @@
 大数据统一门户:聚合 **YARN 监控**、**HDFS 文件浏览**(原生 Vue 视图)与 **海豚调度 / Stingray / OMD / StreamX**(iframe 嵌入)四个子系统。
 
 - 主应用:Vue 3 + Vite 5 + TypeScript + Element Plus + Pinia + vue-router
-- 网关:Node(Express),静态托管 + 反向代理 + 自动登录,单进程部署(端口 3000)
+- 网关:Node(Express),静态托管 + 反向代理,单进程部署(端口 3000);子应用自动登录已随多用户体系移除(2026-08)
 - 前端 dev:Vite,端口 3002,代理到网关
 
 ## 2. 架构
@@ -31,8 +31,7 @@ Vite(3002,ws:true 代理)→ Express 网关(3000)
        ├─ /apps/stingray   → Stingray HTML(重写 /static/ + 路由注入)
        ├─ /stingray-static → Stingray 静态资源
        ├─ /__/stingray     → Stingray API + WebSocket(查询日志实时推送)
-       ├─ /api/config      → 配置下发(RM/HDFS/DS/OMD/Stingray 地址)
-       ├─ /api/login/*     → 自动登录(海豚 form / Stingray query / OMD base64)
+       ├─ /api/config      → 配置下发(RM/HDFS/DS/OMD/Stingray 地址;原 /api/login/* 已移除)
        └─ 静态托管 dist/
 ```
 
@@ -53,7 +52,7 @@ bigdata-portal/
 │   │   ├── yarn/                # YARN 原生视图
 │   │   ├── hdfs/HdfsView.vue    # HDFS 文件浏览器(WebHDFS)
 │   │   └── subapp/              # Tab 常驻池相关(原生视图 + 子应用共用)
-│   │       ├── SubAppView.vue   # iframe 内容组件(自动登录 + 原生 iframe,常驻不卸载)
+│   │       ├── SubAppView.vue   # iframe 内容组件(原生 iframe 直挂,常驻不卸载;自动登录已移除)
 │   │       └── SubappTabs.vue   # 顶部 Tab 条(切换/关闭,关闭即销毁组件/iframe)
 │   ├── api/yarn.ts / hdfs.ts / auth.ts
 │   ├── store/yarn.ts
@@ -96,30 +95,30 @@ npm run dev:vite     # 前端
 | `dsWebUrl` | `http://olds.../dolphinscheduler` | 海豚 |
 | `omdUrl` | `https://omd.corp.shiqiao.com` | OMD |
 | `stingrayUrl` | `http://stingray.corp.shiqiao.com` | Stingray |
-| `accounts.dsWeb.user/pass` | — | 海豚自动登录凭证 |
+| `accounts.dsWeb.user/pass` | — | ~~海豚自动登录凭证~~ 已移除 |
 | `dsToken` | — | 海豚 API token:网关 `/dolphinscheduler` 代理自动注入 `token` header,项目列表即该 token 用户可见;任务监控/海豚 UI 免登录均依赖它 |
-| `accounts.stingray.user/pass` | — | Stingray 自动登录凭证(密码带点!) |
-| `OMD_USER/PASS` | — | OMD 凭证(base64 编码发送) |
+| `accounts.stingray.user/pass` | — | ~~Stingray 自动登录凭证~~ 已移除 |
+| `OMD_USER/PASS` | — | ~~OMD 凭证~~ 已移除 |
 
 **凭证规则**:
 - 敏感凭证只放 `server/config.local.json`,**禁止写死进代码/提交 git**(gitignore 已忽略)
-- 前端 localStorage(`dswebUser/dswebPass`、`stingrayUser/stingrayPass`)优先于网关配置兜底
+- 多用户体系上线后,门户不再持有任何子系统凭证;各用户在子系统页面内自行登录
 
 ## 6. 子应用接入方式
 
-`src/config/menu.ts` 的 MenuItem 字段:`kind`('native'|'subapp')、`url`、`iframe`(原生 iframe)、`login`(同源自动登录)、`icon`。
+`src/config/menu.ts` 的 MenuItem 字段:`kind`('native'|'subapp')、`url`、`iframe`(原生 iframe)、`icon`(原 `login` 字段已随自动登录移除)。
 
 | 菜单 | 方式 | url | 说明 |
 |---|---|---|---|
 | YARN | native | /yarn | 原生视图 |
 | HDFS | native | /hdfs | 自建 WebHDFS 文件浏览器 |
-| 海豚 ds | iframe 同源 | /apps/dsweb/ui/#/home | 网关代理,自动登录(form) |
-| Stingray query | iframe 同源 | /apps/stingray/login | 网关代理 + 路由注入 + ws,自动登录(query) |
+| 海豚 ds | iframe 同源 | /apps/dsweb/ui/#/home | 网关代理,用户在页面内登录 |
+| Stingray query | iframe 同源 | /apps/stingray/login | 网关代理 + 路由注入 + ws,用户在页面内登录 |
 | OMD | iframe 跨源 | https://omd.corp.shiqiao.com/ | 直接嵌入,用户域内登录 |
 | StreamX | iframe 跨源 | https://streamx.../#/login?... | 直接嵌入 |
 
-- **同源 iframe**:url 为代理路径(/apps/... 等),SubAppView 先自动登录(login 字段),iframe 同源读取门户域 cookie
-- **跨源 iframe**:url 为绝对 https 地址,SubAppView 跳过自动登录,用户在 iframe 内登录;跨源 iframe **无法被门户注入任何脚本**(同源策略)
+- **同源 iframe**:url 为代理路径(/apps/... 等),iframe 同源读取门户域 cookie;不再自动登录
+- **跨源 iframe**:url 为绝对 https 地址,用户在 iframe 内登录;跨源 iframe **无法被门户注入任何脚本**(同源策略)
 
 ## 7. 网关代理清单(server/index.js)
 
