@@ -102,6 +102,16 @@ export async function status() {
   return res.data
 }
 
+/** 前端设置 Spark executor 数量(方案A):0=动态分配;5/10/15/20=固定常驻,下次查询生效 */
+export async function setExecutors(executorInstances) {
+  const res = await proxy('/spark/config', {
+    method: 'POST',
+    body: JSON.stringify({ executorInstances }),
+    timeoutMs: 10000,
+  })
+  return res.data
+}
+
 /** Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条) */
 export async function stagesStatus() {
   const res = await proxy('/spark/stages', { timeoutMs: 10000 })

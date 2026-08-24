@@ -983,6 +983,31 @@ class SparkJobSubmitReq(BaseModel):
     timeoutMs: int = 600000  # 异步任务默认 10 分钟(大查询可传更久,不撞网关超时)
 
 
+class SparkConfigReq(BaseModel):
+    executorInstances: int = 0  # 0=动态分配(后端 maxExecutors);>0=固定常驻数量
+
+
+@app.post("/spark/config")
+def spark_config(
+    req: SparkConfigReq,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """前端设置 Spark executor 数量(方案A):存 cfg + 停会话,下次查询自动重建生效。"""
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    if req.executorInstances != 0 and req.executorInstances not in (5, 10, 15, 20):
+        raise HTTPException(status_code=400, detail="executorInstances 仅支持 0/5/10/15/20(0=动态分配)")
+    try:
+        SPARK_ENGINE.set_executors(req.executorInstances)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.info("spark config updated: executorInstances=%s", req.executorInstances)
+    return {"code": 0, "data": {"executorInstances": req.executorInstances}}
+
+
 @app.post("/spark/query")
 def spark_query(
     req: SparkQueryReq,

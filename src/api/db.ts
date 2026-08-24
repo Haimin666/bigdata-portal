@@ -634,6 +634,28 @@ export async function sparkStatus(): Promise<Record<string, unknown>> {
   return body.data as Record<string, unknown>
 }
 
+/** 前端设置 Spark executor 数量(0=动态分配;5/10/15/20=固定常驻,下次查询生效) */
+export async function setSparkExecutors(executorInstances: number): Promise<Record<string, unknown>> {
+  const res = await fetch('/api/spark/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ executorInstances }),
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<Record<string, unknown>>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as Record<string, unknown>
+}
+
 /** Spark 写操作解锁:密码换取 token(类似 Jupyter 登录) */
 export async function sparkAuth(password: string): Promise<{ token: string; expiresIn: number }> {
   const res = await fetch('/api/spark/auth', {

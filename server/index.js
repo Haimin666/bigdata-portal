@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import httpProxy from 'http-proxy'
 import config from './config.js'
-import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, stagesStatus as sparkStages, cancel as sparkCancel, submitJob as sparkSubmitJob, jobStatus as sparkJobStatus, cancelJob as sparkCancelJob } from './spark-gateway.js'
+import { query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus, stagesStatus as sparkStages, cancel as sparkCancel, submitJob as sparkSubmitJob, jobStatus as sparkJobStatus, cancelJob as sparkCancelJob, setExecutors as sparkSetExecutors } from './spark-gateway.js'
 import {
   query as flinkQuery, cancel as flinkCancel, status as flinkStatus,
   connectors as flinkConnectors, probeSchema as flinkProbeSchema, generateDdl as flinkGenerateDdl,
@@ -1172,6 +1172,21 @@ if (config.dbProxyUrl) {
     } catch (e) {
       console.error('[spark/status]', e instanceof Error ? e.message : e)
       res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
+    }
+  })
+
+  // 前端设置 Spark executor 数量(5/10/15/20 固定常驻;0=动态分配)
+  app.post('/api/spark/config', async (req, res) => {
+    try {
+      const n = Number(req.body?.executorInstances)
+      if (![0, 5, 10, 15, 20].includes(n)) {
+        return res.status(400).json({ code: 400, msg: 'executorInstances 仅支持 0/5/10/15/20' })
+      }
+      const data = await sparkSetExecutors(n)
+      res.json({ code: 0, data })
+    } catch (e) {
+      console.error('[spark/config]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: 'spark 配置更新失败' })
     }
   })
 

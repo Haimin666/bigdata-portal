@@ -315,8 +315,13 @@ class SparkEngine:
             conf.set("spark.executor.cores", int(c["executorCores"]))
         if c.get("driverCores"):
             conf.set("spark.driver.cores", int(c["driverCores"]))
-        # 动态资源
-        if c.get("maxExecutors"):
+        # 动态资源:配置了 executorInstances(固定数量)时关闭动态分配,常驻 N 个 executor;
+        # 否则保持 dynamicAllocation(后端默认)。
+        fixed = int(c.get("executorInstances") or 0)
+        if fixed > 0:
+            conf.set("spark.dynamicAllocation.enabled", "false")
+            conf.set("spark.executor.instances", str(fixed))
+        elif c.get("maxExecutors"):
             conf.set("spark.dynamicAllocation.enabled", "true")
             conf.set("spark.dynamicAllocation.minExecutors", str(c.get("minExecutors", 1)))
             conf.set("spark.dynamicAllocation.maxExecutors", str(c["maxExecutors"]))
@@ -340,6 +345,27 @@ class SparkEngine:
         return spark
 
     # ── 状态 ──────────────────────────────────────────────────
+    def set_executors(self, n: int) -> None:
+        """前端设置固定 executor 数量(方案A):更新 cfg 并停掉当前会话。
+
+        不立即重建:下一次查询(_ensure_initialized)检测到 context 已停止,
+        自动用新配置重建 session(冷启动 30~90s,设置后首次查询变慢但无副作用)。
+        """
+        n = int(n)
+        if n < 1:
+            raise ValueError("executorInstances 必须 >= 1")
+        with self._init_lock:
+            prev = self.cfg.get("executorInstances")
+            self.cfg["executorInstances"] = n
+            if self._spark is not None:
+                try:
+                    self._spark.stop()
+                except Exception:
+                    pass
+                self._spark = None
+                self._session_state = "disabled"
+            self._audit("set_executors: %s -> %s, session will rebuild on next query" % (prev, n))
+
     def status(self) -> Dict[str, Any]:
         st = {
             "enabled": self.enabled,
@@ -348,6 +374,7 @@ class SparkEngine:
                 "master": self.cfg.get("master", "yarn"),
                 "appName": self.cfg.get("appName", "db-proxy-spark"),
                 "queue": self.cfg.get("queue", "default"),
+                "executorInstances": int(self.cfg.get("executorInstances") or 0),
                 "allowWrite": bool(self.cfg.get("allowWrite", False)),
                 "defaultLimit": int(self.cfg.get("defaultLimit", 1000)),
                 "maxLimit": int(self.cfg.get("maxLimit", 10000)),

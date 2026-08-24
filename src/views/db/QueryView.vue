@@ -23,7 +23,7 @@ import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -37,6 +37,9 @@ defineOptions({ name: 'DbQueryView' })
 const datasources = ref<DbDataSource[]>([])
 const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
 const db = ref('')
+// Spark executor 数量设置(0=动态分配;5/10/15/20=固定常驻),仅 sparksql 引擎显示
+const sparkExecutors = ref(0)
+const sparkExecutorsLoading = ref(false)
 const loading = ref(false)
 const error = ref('')
 
@@ -824,15 +827,16 @@ const logEmptyHint = computed(() => {
 // 画布高度(可拖拽)
 const canvasHeight = ref(280)
 const MIN_H = 120
-const MAX_H = 560
 
 function onDragStart(e: MouseEvent) {
   const startY = e.clientY
   const startH = canvasHeight.value
+  // 画布最大高度:视口的 75%(结果区最低可缩至约 1/4),下限 480 避免小屏异常
+  const maxH = Math.max(480, Math.floor(window.innerHeight * 0.75))
   document.body.style.cursor = 'row-resize'
   document.body.style.userSelect = 'none'
   const onMove = (ev: MouseEvent) => {
-    canvasHeight.value = Math.min(MAX_H, Math.max(MIN_H, startH + ev.clientY - startY))
+    canvasHeight.value = Math.min(maxH, Math.max(MIN_H, startH + ev.clientY - startY))
   }
   const onUp = () => {
     document.body.style.cursor = ''
@@ -1804,6 +1808,13 @@ onMounted(async () => {
   } catch (e) {
     ElMessage.error(`加载数据源失败:${e instanceof Error ? e.message : e}`)
   }
+  // 读取 Spark 引擎当前 executor 配置回显(失败静默,不影响主流程)
+  try {
+    const st = (await sparkStatus()) as { config?: { executorInstances?: number } }
+    sparkExecutors.value = st.config?.executorInstances ?? 0
+  } catch {
+    /* 引擎未启用或不可达时忽略 */
+  }
 })
 
 watch(engine, async (val) => {
@@ -1817,6 +1828,22 @@ watch(engine, async (val) => {
     cm.refresh()
   }
 })
+
+/** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
+async function onSparkExecutorsChange(val: number) {
+  if (sparkExecutorsLoading.value) return
+  sparkExecutorsLoading.value = true
+  try {
+    await setSparkExecutors(val)
+    if (val === 0) ElMessage.info('已切换为动态分配;下次 sparksql 查询生效')
+    else ElMessage.info(`已设置固定 ${val} 个 executor;下次 sparksql 查询生效(需重建会话)`)
+  } catch (e) {
+    ElMessage.error(`设置失败:${e instanceof Error ? e.message : e}`)
+    sparkExecutors.value = 0 // 回退
+  } finally {
+    sparkExecutorsLoading.value = false
+  }
+}
 
 /** 单元格是否数值(右对齐) */
 function isNumeric(val: unknown): boolean {
@@ -1895,6 +1922,20 @@ async function copyAllTsv() {
         <el-option label="SparkSQL" value="sparksql" />
         <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
+      </el-select>
+      <el-select
+        v-if="engine === 'sparksql'"
+        v-model="sparkExecutors"
+        class="executor-select"
+        placeholder="Executor 数量"
+        :loading="sparkExecutorsLoading"
+        @change="onSparkExecutorsChange"
+      >
+        <el-option label="动态分配(自适应)" :value="0" />
+        <el-option label="5 个" :value="5" />
+        <el-option label="10 个" :value="10" />
+        <el-option label="15 个" :value="15" />
+        <el-option label="20 个" :value="20" />
       </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
