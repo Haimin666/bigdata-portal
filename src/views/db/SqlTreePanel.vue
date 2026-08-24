@@ -45,9 +45,24 @@ function filterNode(value: string, data: { name?: string }): boolean {
 watch(mySearch, (v) => myTreeRef.value?.filter(v))
 watch(catSearch, (v) => catTreeRef.value?.filter(v))
 
-// ── 我的目录 ─────────────────────────────────────────────────
+// ── 我的目录(双根:我的文件夹私有 + 共享文件夹公共)───────────────
+const SHARED_ROOT_ID = '__shared_root'
 const myTree = ref<ScriptNode[]>([])
 const myLoading = ref(false)
+
+/** 判断节点是否在共享文件夹内(含根);后端对非 admin 拒绝写操作 */
+function isShared(data: ScriptNode): boolean {
+  if (data.id === SHARED_ROOT_ID) return true
+  const sharedRoot = myTree.value.find((n) => n.id === SHARED_ROOT_ID)
+  if (!sharedRoot?.children) return false
+  const stack = [...sharedRoot.children]
+  while (stack.length) {
+    const n = stack.pop()!
+    if (n.id === data.id) return true
+    if (n.children) stack.push(...n.children)
+  }
+  return false
+}
 
 async function reloadMy() {
   myLoading.value = true
@@ -68,8 +83,12 @@ function onNodeClick(data: ScriptNode) {
   if (data.type === 'file') emit('open', data)
 }
 
-/** 新建(根级或目录内) */
+/** 新建(根级或目录内):共享文件夹为管理员维护,普通用户引导存到「我的文件夹」 */
 async function onCreate(parent: ScriptNode | null, kind: 'dir' | 'file') {
+  if (parent && isShared(parent)) {
+    ElMessage.warning('共享文件夹由管理员维护,请把脚本存到「我的文件夹」')
+    return
+  }
   const defaultName = kind === 'dir' ? '新建目录' : '新建脚本.sql'
   try {
     const { value } = await ElMessageBox.prompt('名称', kind === 'dir' ? '新建目录' : '新建 SQL 文件', {
@@ -323,9 +342,10 @@ const ctx = ref<{ show: boolean; x: number; y: number; node: ScriptNode | null }
 function openCtx(e: MouseEvent, node: ScriptNode) {
   e.preventDefault()
   e.stopPropagation()
-  // 超出视口右/下边缘时翻转
-  const menuW = 150
-  const menuH = node.type === 'dir' ? 150 : 80
+  // 共享节点:只读展示 + 可复制到我的文件夹;我的节点:完整菜单
+  const shared = isShared(node)
+  const menuW = 170
+  const menuH = node.type === 'dir' ? (shared ? 60 : 150) : shared ? 100 : 110
   const x = Math.min(e.clientX, window.innerWidth - menuW - 8)
   const y = Math.min(e.clientY, window.innerHeight - menuH - 8)
   ctx.value = { show: true, x, y, node }
@@ -353,10 +373,47 @@ function menuDelete() {
   if (node) void onDelete(node)
 }
 
-// ── 拖拽移动(仅允许拖入目录内)──────────────────────────────
+/** 把共享文件/目录复制到我的文件夹根(新建副本,不动原件;递归复制目录) */
+async function menuCopyToMy() {
+  const node = ctx.value.node
+  closeCtx()
+  if (!node) return
+  try {
+    const sharedRoot = myTree.value.find((n) => n.id === SHARED_ROOT_ID)
+    await copyIntoMy(sharedRoot, node, null)
+    ElMessage.success(`已复制「${node.name}」到我的文件夹`)
+    await reloadMy()
+  } catch (e) {
+    ElMessage.error(`复制失败:${e instanceof Error ? e.message : e}`)
+  }
+}
+
+/** 递归把 sharedNode(来自共享区)克隆进我的文件夹目标父目录 */
+async function copyIntoMy(
+  sharedRoot: ScriptNode | undefined,
+  srcNode: ScriptNode,
+  targetParentId: string | null
+) {
+  void sharedRoot
+  const clean = srcNode.type === 'file' && !srcNode.name.endsWith('.sql') ? `${srcNode.name}.sql` : srcNode.name
+  const created = await createScriptNode(targetParentId, clean, srcNode.type)
+  if (srcNode.type === 'file') {
+    // 复制内容:get 原文 → save 副本(动态引入避免顶层循环依赖)
+    const { getScriptContent, saveScriptContent } = await import('@/api/db')
+    const { content } = await getScriptContent(srcNode.id)
+    await saveScriptContent(created.id, content)
+  } else {
+    for (const child of srcNode.children || []) {
+      await copyIntoMy(sharedRoot, child, created.id)
+    }
+  }
+}
+
+// ── 拖拽移动(仅允许拖入可写目录;共享节点/内容不可拖)──────────
 function allowDrop(_draggingNode: unknown, dropNode: any, type: 'prev' | 'inner' | 'next'): boolean {
   if (type !== 'inner') return false
   const target = dropNode.data as ScriptNode
+  if (isShared(target)) return false // 共享文件夹禁止作为拖拽目标
   return target.type === 'dir'
 }
 
@@ -364,6 +421,10 @@ async function onNodeDrop(draggingNode: any, dropNode: any, type: 'prev' | 'inne
   if (type !== 'inner') return
   const node = draggingNode.data as ScriptNode
   const target = dropNode.data as ScriptNode
+  if (isShared(node)) {
+    ElMessage.warning('共享文件夹内容由管理员维护,不能移动')
+    return
+  }
   try {
     await moveScriptNode(node.id, target.id)
     await reloadMy()
@@ -539,7 +600,7 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <!-- 右键菜单(我的目录) -->
+  <!-- 右键菜单(我的目录):共享节点只读 → 仅「复制到我的文件夹」;我的节点完整菜单 -->
   <div
     v-if="ctx.show && ctx.node"
     class="ctx-menu"
@@ -547,13 +608,18 @@ onUnmounted(() => {
     @click.stop
     @contextmenu.prevent
   >
-    <template v-if="ctx.node.type === 'dir'">
-      <div class="ctx-item" @click="menuCreate('file')">新建 SQL 文件</div>
-      <div class="ctx-item" @click="menuCreate('dir')">新建目录</div>
-      <div class="ctx-divider" />
+    <template v-if="isShared(ctx.node)">
+      <div class="ctx-item" @click="menuCopyToMy">复制到我的文件夹</div>
     </template>
-    <div class="ctx-item" @click="menuRename">重命名</div>
-    <div class="ctx-item danger" @click="menuDelete">删除</div>
+    <template v-else>
+      <template v-if="ctx.node.type === 'dir'">
+        <div class="ctx-item" @click="menuCreate('file')">新建 SQL 文件</div>
+        <div class="ctx-item" @click="menuCreate('dir')">新建目录</div>
+        <div class="ctx-divider" />
+      </template>
+      <div class="ctx-item" @click="menuRename">重命名</div>
+      <div class="ctx-item danger" @click="menuDelete">删除</div>
+    </template>
   </div>
 </template>
 

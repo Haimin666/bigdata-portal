@@ -556,7 +556,7 @@ async function initEditor() {
         completeSingle: false,
         hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
       })
-    }, 300)
+    }, 150)
   })
   // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
   cm.setOption('extraKeys', {
@@ -934,8 +934,24 @@ function getSqlToRun(): string {
 // ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
 /** 注释/取消注释选中 SQL(每行前加 -- ) */
 function commentSelection(c: CodeMirror.Editor) {
-  const sel = c.getSelection()
-  c.replaceSelection(`-- ${sel}`, 'end')
+  // 行注释:选区覆盖的每一行行首加/去 "-- "(再按一次取消);无选区时仅当前行
+  const from = c.getCursor('from')
+  const to = c.getCursor('to')
+  // 选区末尾停在行首时不算该行(Shift+Down 常见情况)
+  const endLine = to.ch === 0 && to.line > from.line ? to.line - 1 : to.line
+  const lines = []
+  for (let l = from.line; l <= endLine; l++) lines.push(l)
+  const allCommented = lines.every((l) => /^\s*-- /.test(c.getLine(l)))
+  for (const l of lines) {
+    const text = c.getLine(l)
+    if (allCommented) {
+      c.replaceRange(text.replace(/^(\s*)-- /, '$1'), { line: l, ch: 0 }, { line: l, ch: text.length })
+    } else {
+      const indent = text.match(/^\s*/)![0]
+      c.replaceRange(`${indent}-- ${text.slice(indent.length)}`, { line: l, ch: 0 }, { line: l, ch: text.length })
+    }
+  }
+  c.setSelection({ line: from.line, ch: 0 }, { line: endLine, ch: c.getLine(endLine).length })
 }
 
 /** 结果表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
@@ -995,6 +1011,13 @@ function formatSql() {
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
+/** 一键插入日期变量(${T-N})到光标处 */
+function insertDateVar(cmd: string) {
+  if (!cm) return
+  cm.replaceSelection('${' + cmd + '}')
+  cm.focus()
+}
+
 /** 单元格待提交修改(row 为结果行在 r.rows 中的索引,由 indexOf(row) 得到) */
 interface PendingEdit {
   row: number
@@ -1323,7 +1346,7 @@ async function runExplain() {
     ElMessage.warning('EXPLAIN 仅支持 MySQL / Oracle')
     return
   }
-  const sql = getExplainSql()
+  const sql = expandSqlVars(getExplainSql())
   if (!sql) {
     ElMessage.warning('没有可分析的 SQL(请选中或输入语句)')
     return
@@ -1374,36 +1397,58 @@ async function ensureSchema(dbName: string): Promise<SchemaMeta | null> {
 /** 常用 SQL 关键字(补全候选) */
 const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE', 'SET', 'VALUES', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'BETWEEN', 'LIKE']
 
-/** 自定义 SQL 补全:表名 + 列名(含 tbl.col 点语法)+ 常用关键字 */
+/** 收集编辑器中已出现的标识符(文中词提示):去重、排除光标前正在输入的前缀本身 */
+function collectDocWords(cm: CodeMirror.Editor, prefix: string): string[] {
+  const words = new Set<string>()
+  const re = /[A-Za-z_][A-Za-z0-9_$]{2,}/g // 长度≥3 的标识符(过滤单双字母噪声)
+  for (let l = 0; l < cm.lineCount(); l++) {
+    const line = cm.getLine(l)
+    let mm: RegExpExecArray | null
+    re.lastIndex = 0
+    while ((mm = re.exec(line))) {
+      const w = mm[0]
+      if (w.toLowerCase() !== prefix.toLowerCase()) words.add(w)
+    }
+  }
+  return Array.from(words)
+}
+
+/** 自定义 SQL 补全实现:schema 表/列 + 关键字 + 编辑器文中词(如输入过 dwd_lion_cs,输 dwd 即提示);schema 未就绪时退化为关键字+文中词,不阻塞等待 */
 async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | null> {
-  const dbName = db.value
-  if (!dbName) return null
-  const meta = await ensureSchema(dbName)
-  if (!meta) return null
   const cur = cm.getCursor()
   const before = cm.getLine(cur.line).slice(0, cur.ch)
   // 光标前标识符:支持 `表名.列名`(点号前后各一段)
   const m = before.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)
-  if (!m) return null
+  // schema 未就绪时不再 return null:仍提供关键字/文中词提示
+  const meta = db.value ? await ensureSchema(db.value) : null
+  if (!m) {
+    if (!meta) return null
+    return { list: [], from: cur, to: cur }
+  }
   const full = m[1]
   const dotIdx = full.lastIndexOf('.')
   let list: string[] = []
   let fromCh: number
-  if (dotIdx >= 0) {
+  if (dotIdx >= 0 && meta) {
+    // 点语法列补全必须有 schema;无 schema 时退化为关键字/文中词
     const tbl = full.slice(0, dotIdx)
     const colPrefix = full.slice(dotIdx + 1).toLowerCase()
     const t = meta.tables.find((x) => x.name.toLowerCase() === tbl.toLowerCase())
-    if (!t) return null
-    list = t.columns.filter((c) => c.name.toLowerCase().startsWith(colPrefix)).map((c) => c.name)
-    fromCh = cur.ch - (full.length - dotIdx - 1)
+    if (t) {
+      list = t.columns.filter((c) => c.name.toLowerCase().startsWith(colPrefix)).map((c) => c.name)
+      fromCh = cur.ch - (full.length - dotIdx - 1)
+      if (!list.length) return null
+      return { list: Array.from(new Set(list)), from: { line: cur.line, ch: fromCh }, to: cur }
+    }
   } else {
     const prefix = full.toLowerCase()
-    list = meta.tables.map((t) => t.name).filter((n) => n.toLowerCase().startsWith(prefix))
     list.push(...SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(prefix)))
-    fromCh = cur.ch - full.length
   }
+  // 文中词提示(表名列名之外):当前画布出现过的标识符(输入过 dwd_lion_cs 后,输 dwd 即可提示);点语法时用列前缀过滤
+  const wordPrefix = (dotIdx >= 0 ? full.slice(dotIdx + 1) : full).toLowerCase()
+  list.push(...collectDocWords(cm, wordPrefix).filter((w) => w.toLowerCase().startsWith(wordPrefix)))
   if (!list.length) return null
-  return { list: Array.from(new Set(list)), from: { line: cur.line, ch: fromCh }, to: cur }
+  return { list: Array.from(new Set(list)), from: { line: cur.line, ch: cur.ch - wordPrefix.length }, to: cur }
 }
 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
@@ -1567,6 +1612,18 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   }
 }
 
+// ── $ 传参:${T-1} 等日期变量,执行/EXPLAIN 前替换为 yyyy-MM-dd ────
+/** 画布 SQL 变量替换:支持 ${T}(今天)、${T-1}(昨天)、${T-N}(N 天前)→ yyyy-MM-dd(本地时区)
+ *  写在字符串字面量里也能替换(按原文扫描);未匹配的 ${...} 保持原样报错由引擎处理 */
+function expandSqlVars(sql: string): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return sql.replace(/\$\{T(?:([+-])(\d+))?\}/g, (_all, sign: string | undefined, num: string | undefined) => {
+    const d = new Date()
+    if (sign && num) d.setDate(d.getDate() + (sign === '-' ? -1 : 1) * Number(num))
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  })
+}
+
 /** 拆 SQL 段并过滤空段/纯注释段 */
 function getSegments(text: string): string[] {
   return splitSqlSegments(text)
@@ -1647,7 +1704,7 @@ async function runQuery() {
     ElMessage.warning('请先选择数据库')
     return
   }
-  const target = getSqlToRun().trim()
+  const target = expandSqlVars(getSqlToRun().trim())
   if (!target) {
     ElMessage.warning('请输入 SQL')
     return
@@ -2012,6 +2069,18 @@ async function copyAllTsv() {
       <span>· Tab 缩进</span>
       <span>· Ctrl/Cmd + Space 补全</span>
       <span>· 拖拽分割条调整画布高度</span>
+      <!-- $ 传参:一键插入日期变量,执行时替换为 yyyy-MM-dd -->
+      <el-dropdown trigger="click" @command="insertDateVar">
+        <el-button size="small" text type="primary" class="datevar-btn">${T-1} 传参 ▾</el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="T">{{ '${T} → 今天' }}</el-dropdown-item>
+            <el-dropdown-item command="T-1">{{ '${T-1} → 昨天(常用)' }}</el-dropdown-item>
+            <el-dropdown-item command="T-7">{{ '${T-7} → 7 天前' }}</el-dropdown-item>
+            <el-dropdown-item command="T-30">{{ '${T-30} → 30 天前' }}</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <!-- 错误提示 -->
@@ -2267,7 +2336,7 @@ async function copyAllTsv() {
   gap: 6px;
   height: 100%;
   box-sizing: border-box;
-  overflow: auto;
+  overflow: hidden; /* 整体不滚:画布/结果区各自内滚 */
 }
 
 /* 左目录面板 + 右查询区 */
@@ -2497,7 +2566,7 @@ async function copyAllTsv() {
     background: rgba(97, 175, 239, 0.08);
   }
 
-  :deep(.cm-matchingbracket) {
+  :deep(.CodeMirror-matchingbracket) {
     font-weight: 700;
     background: rgba(229, 192, 123, 0.2);
     border-radius: 2px;
@@ -2558,8 +2627,11 @@ async function copyAllTsv() {
     :deep(.cm-operator) {
       color: #56b6c2;
     }
-    :deep(.cm-matchingbracket) {
-      color: #e5c07b;
+    :deep(.CodeMirror-matchingbracket) {
+      color: #e5c07b !important;
+      background: rgba(229, 192, 123, 0.25);
+      border-bottom: 2px solid #e5c07b;
+      font-weight: 700;
     }
   }
 
@@ -2608,22 +2680,58 @@ async function copyAllTsv() {
     :deep(.cm-operator) {
       color: #0b4f8a;
     }
-    :deep(.cm-matchingbracket) {
-      color: #c2185b;
+    :deep(.CodeMirror-matchingbracket) {
+      color: #c2185b !important;
+      background: rgba(194, 24, 91, 0.12);
+      border-bottom: 2px solid #c2185b;
+      font-weight: 700;
     }
   }
 }
 
 /* 自动补全提示框:跟随主题配色(CodeMirror-hints 是 body 级,用全局选择器) */
 :global(.CodeMirror-hints) {
-  border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  border: 1px solid rgba(125, 139, 169, 0.25);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
   font-size: 13px;
+  padding: 4px;
+  max-height: 320px;
+  z-index: 3000; /* 盖过 el-dialog/el-popper 默认层级,画布在抽屉/弹窗里也能浮出 */
 }
 
 :global(.CodeMirror-hint) {
-  padding: 4px 10px;
+  padding: 4px 12px;
+  border-radius: 5px;
+  margin: 1px 2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #cdd6f4;
+  transition: background 0.05s;
+}
+
+/* 选中项:主题色高亮条 */
+:global(.CodeMirror-hint-active),
+:global(li.CodeMirror-hint-active) {
+  background: rgba(86, 156, 214, 0.28) !important;
+  color: #fff !important;
+  border-radius: 5px;
+}
+
+/* 浅色主题下的提示框配色(html.dark 切换,与画布双主题一致) */
+:global(html:not(.dark) .CodeMirror-hints) {
+  background: #fff;
+  color: #24292f;
+}
+:global(html:not(.dark) .CodeMirror-hint) {
+  color: #24292f;
+}
+:global(html:not(.dark) li.CodeMirror-hint-active) {
+  background: #e8f0fe !important;
+  color: #1a73e8 !important;
+}
+:global(html.dark .CodeMirror-hints) {
+  background: #252b3b;
+  color: #cdd6f4;
 }
 
 /* 拖拽分割条 */
@@ -2655,9 +2763,17 @@ async function copyAllTsv() {
 .sql-hint {
   font-size: 12px;
   color: $muted;
-  flex-shrink: 0;
   display: flex;
-  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+
+  .datevar-btn {
+    margin-left: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  flex-shrink: 0;
 }
 
 .err-alert {
@@ -2670,9 +2786,9 @@ async function copyAllTsv() {
   flex-direction: column;
   gap: 8px;
   flex: 1;
-  min-height: 200px;
-  flex-shrink: 0;
+  min-height: 0; /* 允许收缩,空态/日志/表格都在此高度内滚动 */
   min-width: 0;
+  overflow: hidden;
 }
 
 .result-tabs {
