@@ -176,8 +176,12 @@ LIMIT_RE = re.compile(
     r"\b(?:LIMIT\s+(\d+)\s*(?:,\s*(\d+))?|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
     re.IGNORECASE,
 )
-# LIMIT 负值/带符号(如 LIMIT -1)无法安全兜底,直接拒绝(避免生成语法错误 SQL)
-INVALID_LIMIT_RE = re.compile(r"\bLIMIT\s*[+-]\s*\d+", re.IGNORECASE)
+# LIMIT 负值/带符号(如 LIMIT -1、LIMIT 5, -1、FETCH FIRST -5、ROWNUM <= -1)无法安全
+# 兜底,直接拒绝(避免生成语法错误 SQL 或绕过行数护栏)
+INVALID_LIMIT_RE = re.compile(
+    r"\b(?:LIMIT\s*[+-]\s*\d+|LIMIT\s+\d+\s*,\s*[+-]\s*\d+|FETCH\s+FIRST\s*[+-]\s*\d+|ROWNUM\s*<=?\s*[+-]\s*\d+)",
+    re.IGNORECASE,
+)
 
 app = FastAPI(title="db-proxy", version="2.1.0")
 
@@ -1761,9 +1765,11 @@ def scripts_get(
 
 
 # ── 表目录(库→表→字段,只读元数据)────────────────────────────
-def _meta_guard() -> Generator[None, None, None]:
-    """元数据接口资源护栏(fastapi dependency):并发信号量 + QPS 限速,
-    防批量拉表/explain 并发连接把目标库打挂(与 /query、/jobs 同一套护栏)。"""
+def _meta_guard(x_db_token: Optional[str] = Header(default=None)) -> Generator[None, None, None]:
+    """元数据接口资源护栏(fastapi dependency):**先鉴权再计并发** —— 依赖先于路由函数体
+    执行,若未鉴权先占信号量,未认证请求可耗尽共享并发/QPS 窗口反向打挂已认证用户;
+    鉴权通过后复用并发信号量 + QPS 限速(与 /query、/jobs 同一套护栏)。"""
+    require_auth(x_db_token)
     if not _query_semaphore.acquire(blocking=False):
         raise HTTPException(status_code=429, detail=f"too many concurrent requests (max={MAX_CONCURRENT})")
     try:

@@ -404,10 +404,14 @@ async function onOpenTable(payload: { db: string; table: string }) {
   }
   const src = datasources.value.find((d) => d.name === payload.db)
   const isOracle = src?.type === 'oracle'
+  const targetEngine = isOracle ? 'oracle' : 'mysql'
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL 用 LIMIT;标识符按方言加引号)
-  // suppressEngineDbSync:抑制 watch(engine) 把 db 覆盖回该引擎第一个源(防预览跑错库)
-  suppressEngineDbSync = true
-  engine.value = isOracle ? 'oracle' : 'mysql'
+  // 仅引擎值变化时置抑制位:watch(engine) 触发后会把 db 覆盖回该引擎第一个源,
+  // 需抑制以免预览跑错库;引擎不变则 watch 不触发,也不残留标志(防后续手动切引擎失灵)
+  if (engine.value !== targetEngine) {
+    suppressEngineDbSync = true
+    engine.value = targetEngine
+  }
   db.value = payload.db
   const ident = isOracle ? `"${payload.table}"` : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`

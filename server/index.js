@@ -591,6 +591,9 @@ const TABLE_BOUNDARY_RE = /^(?:\s|,)*\b(?:where|group\s+by|order\s+by|having|lim
 const TABLE_NON_TABLE_RE = /^(?:select|where|set|values|left|right|inner|outer|full|cross|on|and|or|as|limit|group|order|having|dual)$/i
 function extractTables(sql) {
   let s = String(sql || '').replace(/\/\*[\s\S]*?\*\//g, '')
+  // 先折叠反引号/双引号双段名(`db`.`tbl` / "db"."tbl")为 db.tbl,取末段为表名;
+  // 必须在字符串剥离之前,否则 "d"."t" 的引号段会被当字符串剥掉
+  s = s.replace(/`([^`]+)`\.`([^`]+)`/g, '$1.$2').replace(/"([^"]+)"\."([^"]+)"/g, '$1.$2')
   // 剥离字符串字面量,防 SELECT 'INSERT INTO fake' 之类关键字误报
   s = s.replace(/'(?:[^'\\]|\\.|'')*'/g, "''").replace(/"(?:[^"\\]|\\.|"")*"/g, '""')
   const tables = new Set()
