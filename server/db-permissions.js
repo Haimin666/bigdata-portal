@@ -138,7 +138,7 @@ export function checkDbAccess(req, dbName, opts = {}) {
   if (!rule) return // 无规则 → 放行
   const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
   const matched = engineRules.find(
-    (r) => r && String(r.db) === dbName && (!engine || r.engine === '*' || r.engine === engine)
+    (r) => r && (r.db === '*' || String(r.db) === dbName) && (!engine || r.engine === '*' || r.engine === engine)
   )
   if (!matched) deny(`数据库 '${dbName}' 未授权给用户 '${username}'`)
   if (write && matched.write !== true) deny(`数据库 '${dbName}' 未授予写权限`)

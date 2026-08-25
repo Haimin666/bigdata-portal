@@ -18,13 +18,14 @@
 
 `server/data/db-permissions.json`（不存在时视为无规则，**不拦截**）：```json
 {
-  "version": 1,
-  "userRules": [ { "user": "alice", "dbs": ["accounting", "credzy"] } ],
-  "roleRules": [ { "role": "dev", "dbs": ["*"] } ]
+  "version": 2,
+  "userRules": [ { "user": "alice", "engineRules": [ { "engine": "*", "db": "*", "tables": null, "read": true, "write": false } ], "spark": { "read": true, "write": true }, "flink": { "enabled": true } } ],
+  "roleRules": [ { "role": "dev", "engineRules": [ { "engine": "mysql", "db": "accounting", "tables": null, "read": true, "write": true } ] } ]
 }
 ```
 
-- `dbs: ["*"]` 表示不限制（该用户/角色对全部库放行）。
+- **v2 规则形状**:`{user|role, engineRules[], spark?, flink?}`;`engineRules` 每条 `{engine: 'mysql'|'oracle'|'*', db, tables: string[]|null, read, write}`。
+- **`db: "*"` = 所有库**(2026-08):执行校验(`checkDbAccess`)与 ACL 库下拉过滤(`allowedDbsFor`)均识别通配;旧 `dbs:["*"]`/`dbs:[...]`(v1)加载时自动迁移为 v2(全部引擎读写 + spark/flink 全开)。
 - 匹配规则：**先查 userRules（精确用户名）**，命中即用；未命中再用 roleRules（该用户的角色）。**匹配规则后**，若请求的 db 不在其 dbs → 403 `database 'xxx' not allowed for user 'yyy'`。
 - 未配置任何规则 / 用户与角色均无规则 → 放行（兼容现状，回退全局 allowedDbs 由 db-proxy 兜底）。
 - **规则文件损坏（JSON 解析失败）→ fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。
@@ -46,7 +47,7 @@ spark/flink 引擎查询不在本矩阵范围（引擎侧库概念不同）。
 ## 管理 API（admin only）
 
 - `GET /api/db-perms` → `{ code: 0, data: { userRules, roleRules } }`
-- `PUT /api/db-perms` body `{ userRules, roleRules }` → 全量覆盖保存（原子写：`.tmp` + `renameSync`，文件 `0600`；每条规则校验 `{user|role: 非空字符串, dbs: 字符串数组}`，非法 400）
+- `PUT /api/db-perms` body `{ userRules, roleRules }` → 全量覆盖保存（原子写：`.tmp` + `renameSync`，文件 `0600`；每条规则校验 `{user|role: 非空字符串}` + `dbs`(v1,字符串数组) 或 `engineRules`(v2,数组且每条 db 非空) 之一，非法 400。2026-08 修复:v2 规则曾被 v1 校验误拒导致保存失败）
 
 ## 前端
 

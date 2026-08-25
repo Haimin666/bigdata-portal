@@ -95,9 +95,12 @@ function removeEngRule(i: number) {
   form.engineRules.splice(i, 1)
 }
 
-/** 选中库后按需加载表列表(admin 编辑时可见全部表) */
+/** 选中库后按需加载表列表(admin 编辑时可见全部表);「所有库」无表级概念 */
 async function loadTablesFor(row: EngRuleRow) {
-  if (!row.db) return
+  if (!row.db || row.db === '*') {
+    row.tableOptions = []
+    return
+  }
   row.tableLoading = true
   try {
     row.tableOptions = (await listTables(row.db)).map((t) => (typeof t === 'string' ? t : t.name))
@@ -166,6 +169,7 @@ function save() {
             placeholder="数据库"
             @change="loadTablesFor(er)"
           >
+            <el-option label="所有库" value="*" />
             <el-option v-for="d in dbOptions" :key="d" :label="d" :value="d" />
           </el-select>
           <el-select
@@ -177,7 +181,7 @@ function save() {
             :loading="er.tableLoading"
             style="width: 230px"
             placeholder="表(留空=全部)"
-            :disabled="!er.db"
+            :disabled="!er.db || er.db === '*'"
           >
             <el-option v-for="t in er.tableOptions" :key="t" :label="t" :value="t" />
           </el-select>
@@ -185,7 +189,7 @@ function save() {
           <el-checkbox v-model="er.write" class="rw-cb">写</el-checkbox>
           <el-button size="small" text type="danger" :icon="Delete" :disabled="form.engineRules.length <= 1" @click="removeEngRule(i)" />
         </div>
-        <div class="rule-tip">表留空 = 该库全部表;勾选「写」允许 INSERT/UPDATE/DELETE/DDL。</div>
+        <div class="rule-tip">表留空 = 该库全部表;选「所有库」= 不限库(含后续新增库);勾「写」允许 INSERT/UPDATE/DELETE/DDL。</div>
       </div>
 
       <!-- Spark 权限 -->

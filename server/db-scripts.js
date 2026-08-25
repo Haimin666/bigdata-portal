@@ -5,7 +5,7 @@
 // 用户隔离(2026-08):目录树按用户名分桶存储,tree.json 结构
 //   { "users": { "<username>": { "my": [...] }, "__shared__": { "my": [...] } } }
 // - 每个用户看到两个固定根:「我的文件夹」(私有桶,仅本人可见可写)
-//   和「共享文件夹」(公共桶 __shared__,所有人可见,可读/复制;增删改仅 admin)。
+//   和「共享文件夹」(公共桶 __shared__,所有人可读可写,全员协作)。
 // - 兼容旧数据:首次加载时把旧版顶层 { my: [...] } 迁移进共享桶。
 import { Router } from 'express'
 import fs from 'node:fs'
@@ -54,12 +54,11 @@ function saveTree(tree) {
  * 解析当前请求可见的树视图。
  * 返回 { ownerKey, nodes, canWriteShared }:nodes 固定为双根——
  * 「我的文件夹」(用户自己桶)+「共享文件夹」(__shared__ 公共桶);
- * 共享桶所有人可读,canWriteShared=true(admin)才可增删改。
+ * 共享桶所有人可读可写(2026-08 起:共享内容全员协作,不再限 admin)。
  */
 function resolveView(req) {
   const user = req.user || {}
   const username = String(user.username || 'anonymous')
-  const isAdmin = user.role === 'admin'
   const tree = loadRawTree()
 
   if (!tree.users[username]) tree.users[username] = { my: [] }
@@ -71,11 +70,11 @@ function resolveView(req) {
       id: SHARED_ROOT_ID,
       name: '共享文件夹',
       type: 'dir',
-      readonly: !isAdmin, // 非 admin 只读(打开/复制可以,增删改被后端拒绝)
+      readonly: false, // 全员可编辑
       children: tree.users[SHARED_KEY].my
     }
   ]
-  return { tree, ownerKey: username, nodes, canWriteShared: isAdmin }
+  return { tree, ownerKey: username, nodes, canWriteShared: true }
 }
 
 /**

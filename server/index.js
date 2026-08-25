@@ -661,11 +661,18 @@ app.put('/api/db-perms', auth.requireAdmin, express.json(), (req, res) => {
   if (!Array.isArray(userRules) || !Array.isArray(roleRules)) {
     return res.status(400).json({ code: 400, msg: 'userRules 与 roleRules 必须为数组' })
   }
+  // 兼容两代规则:v1 {user|role, dbs: string[]};v2 {user|role, engineRules[], spark?, flink?}
+  const validEngRule = (e) =>
+    !!e && typeof e === 'object' && typeof e.db === 'string' && e.db.length > 0 &&
+    typeof e.engine === 'string' && (e.tables == null || Array.isArray(e.tables))
   const validRule = (r, key) =>
-    !!r && typeof r[key] === 'string' && r[key].length > 0 && Array.isArray(r.dbs) &&
-    r.dbs.every((d) => typeof d === 'string')
+    !!r && typeof r[key] === 'string' && r[key].length > 0 &&
+    (Array.isArray(r.dbs) ? r.dbs.every((d) => typeof d === 'string') : true) &&
+    (r.engineRules != null
+      ? Array.isArray(r.engineRules) && r.engineRules.every(validEngRule)
+      : true)
   if (!userRules.every((r) => validRule(r, 'user')) || !roleRules.every((r) => validRule(r, 'role'))) {
-    return res.status(400).json({ code: 400, msg: '每条规则须为 {user|role: 非空字符串, dbs: 字符串数组}' })
+    return res.status(400).json({ code: 400, msg: '每条规则须为 {user|role: 非空字符串, dbs/engineRules: 合法数组}' })
   }
   try {
     savePerms({ userRules, roleRules })

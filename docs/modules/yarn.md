@@ -31,6 +31,7 @@ YarnView → store.fetchApps(GET /api/yarn/apps, 带 X-Resource-Manager)
 - **iframe 同构代理**:`/yarniframe/*` → RM 原样转发,页面内绝对根路径链接重写为 `/yarniframe/xxx`,子页面与静态资源可跟随;资源管理器/追踪UI 共用 `UrlFrameDialog`
 - **状态色**:运行中蓝 `#3b82f6`、成功绿、失败红(StatusBadge 通用)
 - **应用 ID 点击复制**:表格/卡片共用 `AppInfoLine`,ID 列悬停下划线 + `copy` 光标,点击复制到剪贴板(带成功提示)。复制走 src/utils/clipboard.ts 的 copyText(优先 navigator.clipboard,非安全上下文 HTTP 下自动降级 execCommand)
+- **展开行状态跨刷新保持**(2026-08):轮询/刷新整体替换行对象,el-table 按对象身份记忆的展开态会全部塌缩;`AppsTable` 改为按 `appId` 记录展开集合(`expandedIds`),数据更新后 `nextTick` 对仍在本页的行强制恢复展开(与队列树 expandedQueues 同思路)
 - 终止应用是真实操作,前端有确认;开发验证用假 appId
 
 ## 5. 历史演进(重要)

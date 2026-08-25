@@ -25,7 +25,7 @@ const emit = defineEmits<{
   (e: 'open', node: ScriptNode): void
   (e: 'insert', text: string): void
   (e: 'openTable', payload: { db: string; table: string }): void
-  (e: 'runSql', sql: string): void
+  (e: 'runSql', sql: string, result?: HistResult): void
 }>()
 
 const activeTab = ref<'my' | 'catalog' | 'history'>('my')
@@ -50,7 +50,7 @@ const SHARED_ROOT_ID = '__shared_root'
 const myTree = ref<ScriptNode[]>([])
 const myLoading = ref(false)
 
-/** 判断节点是否在共享文件夹内(含根);后端对非 admin 拒绝写操作 */
+/** 判断节点是否在共享文件夹内(含根);共享内容全员可编辑,仅用于「复制到我的文件夹」入口 */
 function isShared(data: ScriptNode): boolean {
   if (data.id === SHARED_ROOT_ID) return true
   const sharedRoot = myTree.value.find((n) => n.id === SHARED_ROOT_ID)
@@ -83,12 +83,8 @@ function onNodeClick(data: ScriptNode) {
   if (data.type === 'file') emit('open', data)
 }
 
-/** 新建(根级或目录内):共享文件夹为管理员维护,普通用户引导存到「我的文件夹」 */
+/** 新建(根级或目录内;共享文件夹全员可写) */
 async function onCreate(parent: ScriptNode | null, kind: 'dir' | 'file') {
-  if (parent && isShared(parent)) {
-    ElMessage.warning('共享文件夹由管理员维护,请把脚本存到「我的文件夹」')
-    return
-  }
   const defaultName = kind === 'dir' ? '新建目录' : '新建脚本.sql'
   try {
     const { value } = await ElMessageBox.prompt('名称', kind === 'dir' ? '新建目录' : '新建 SQL 文件', {
@@ -237,6 +233,14 @@ const HISTORY_MAX = 50
 interface HistItem {
   ts: number
   sql: string
+  /** 查询结果快照(执行成功时由 QueryView 写入,截断到前 100 行) */
+  result?: HistResult
+}
+
+/** 结果快照形状(与 QueryView 写入端一致) */
+interface HistResult {
+  columns: string[]
+  rows: Record<string, unknown>[]
 }
 
 const historyList = ref<HistItem[]>([])
@@ -283,9 +287,9 @@ function formatTime(ts: number): string {
   return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
-/** 点击历史/收藏条目:回填编辑器(历史是缓存,不自动执行;用户按 Cmd+Enter 自行运行) */
+/** 点击历史/收藏条目:回填编辑器(不自动执行);有缓存结果则一并交给父组件直接展示 */
 function onRunItem(item: HistItem) {
-  emit('runSql', item.sql)
+  emit('runSql', item.sql, item.result)
 }
 
 /** 收藏:从历史移除该条,写入收藏(去重、新在前、上限 50) */
@@ -342,10 +346,9 @@ const ctx = ref<{ show: boolean; x: number; y: number; node: ScriptNode | null }
 function openCtx(e: MouseEvent, node: ScriptNode) {
   e.preventDefault()
   e.stopPropagation()
-  // 共享节点:只读展示 + 可复制到我的文件夹;我的节点:完整菜单
-  const shared = isShared(node)
+  // 全部节点同一套完整菜单;共享节点额外提供「复制到我的文件夹」
   const menuW = 170
-  const menuH = node.type === 'dir' ? (shared ? 60 : 150) : shared ? 100 : 110
+  const menuH = node.type === 'dir' ? (isShared(node) ? 190 : 150) : isShared(node) ? 140 : 110
   const x = Math.min(e.clientX, window.innerWidth - menuW - 8)
   const y = Math.min(e.clientY, window.innerHeight - menuH - 8)
   ctx.value = { show: true, x, y, node }
@@ -409,11 +412,10 @@ async function copyIntoMy(
   }
 }
 
-// ── 拖拽移动(仅允许拖入可写目录;共享节点/内容不可拖)──────────
+// ── 拖拽移动(共享文件夹全员可写,允许拖入/拖出)──────────
 function allowDrop(_draggingNode: unknown, dropNode: any, type: 'prev' | 'inner' | 'next'): boolean {
   if (type !== 'inner') return false
   const target = dropNode.data as ScriptNode
-  if (isShared(target)) return false // 共享文件夹禁止作为拖拽目标
   return target.type === 'dir'
 }
 
@@ -421,10 +423,6 @@ async function onNodeDrop(draggingNode: any, dropNode: any, type: 'prev' | 'inne
   if (type !== 'inner') return
   const node = draggingNode.data as ScriptNode
   const target = dropNode.data as ScriptNode
-  if (isShared(node)) {
-    ElMessage.warning('共享文件夹内容由管理员维护,不能移动')
-    return
-  }
   try {
     await moveScriptNode(node.id, target.id)
     await reloadMy()
@@ -577,7 +575,10 @@ onUnmounted(() => {
             <div class="hist-group-title">收藏</div>
             <div v-for="it in favList" :key="`fav:${it.ts}:${it.sql}`" class="hist-item" @click="onRunItem(it)">
               <span class="hist-sql" :title="it.sql">{{ it.sql }}</span>
-              <span class="hist-time">{{ formatTime(it.ts) }}</span>
+              <span class="hist-time">
+                <span v-if="it.result" class="hist-cached" title="已缓存查询结果,点击直接查看">结果</span>
+                {{ formatTime(it.ts) }}
+              </span>
               <span class="hist-ops">
                 <el-icon class="starred" title="取消收藏" @click.stop="removeFav(it)"><StarFilled /></el-icon>
               </span>
@@ -587,7 +588,10 @@ onUnmounted(() => {
             <div class="hist-group-title">最近</div>
             <div v-for="it in historyList" :key="`hist:${it.ts}:${it.sql}`" class="hist-item" @click="onRunItem(it)">
               <span class="hist-sql" :title="it.sql">{{ it.sql }}</span>
-              <span class="hist-time">{{ formatTime(it.ts) }}</span>
+              <span class="hist-time">
+                <span v-if="it.result" class="hist-cached" title="已缓存查询结果,点击直接查看">结果</span>
+                {{ formatTime(it.ts) }}
+              </span>
               <span class="hist-ops">
                 <el-icon title="收藏" @click.stop="toggleFav(it)"><Star /></el-icon>
                 <el-icon class="danger" title="删除" @click.stop="removeHistory(it)"><Delete /></el-icon>
@@ -600,7 +604,7 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <!-- 右键菜单(我的目录):共享节点只读 → 仅「复制到我的文件夹」;我的节点完整菜单 -->
+  <!-- 右键菜单(我的目录):完整菜单全员可用;共享节点额外有「复制到我的文件夹」 -->
   <div
     v-if="ctx.show && ctx.node"
     class="ctx-menu"
@@ -608,17 +612,16 @@ onUnmounted(() => {
     @click.stop
     @contextmenu.prevent
   >
-    <template v-if="isShared(ctx.node)">
-      <div class="ctx-item" @click="menuCopyToMy">复制到我的文件夹</div>
+    <template v-if="ctx.node.type === 'dir'">
+      <div class="ctx-item" @click="menuCreate('file')">新建 SQL 文件</div>
+      <div class="ctx-item" @click="menuCreate('dir')">新建目录</div>
+      <div class="ctx-divider" />
     </template>
-    <template v-else>
-      <template v-if="ctx.node.type === 'dir'">
-        <div class="ctx-item" @click="menuCreate('file')">新建 SQL 文件</div>
-        <div class="ctx-item" @click="menuCreate('dir')">新建目录</div>
-        <div class="ctx-divider" />
-      </template>
-      <div class="ctx-item" @click="menuRename">重命名</div>
-      <div class="ctx-item danger" @click="menuDelete">删除</div>
+    <div class="ctx-item" @click="menuRename">重命名</div>
+    <div class="ctx-item danger" @click="menuDelete">删除</div>
+    <template v-if="isShared(ctx.node)">
+      <div class="ctx-divider" />
+      <div class="ctx-item" @click="menuCopyToMy">复制到我的文件夹</div>
     </template>
   </div>
 </template>
@@ -742,6 +745,15 @@ onUnmounted(() => {
     flex-shrink: 0;
     font-size: 12px;
     color: $muted;
+  }
+
+  .hist-cached {
+    font-size: 11px;
+    padding: 0 4px;
+    margin-right: 3px;
+    border-radius: 3px;
+    color: var(--el-color-primary);
+    background: var(--el-color-primary-light-9, rgba(64, 158, 255, 0.12));
   }
 
   .hist-ops {

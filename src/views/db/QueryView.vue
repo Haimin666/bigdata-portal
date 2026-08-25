@@ -336,14 +336,30 @@ function onInsert(text: string) {
   c.focus()
 }
 
-/** 历史/收藏条目点击(SqlTreePanel runSql 事件):历史是缓存,只回填编辑器,不自动执行 */
-function onRunHistorySql(sql: string) {
+/** 历史/收藏条目点击(SqlTreePanel runSql 事件):历史是缓存,只回填编辑器不自动执行;
+ *  有结果快照时直接开一个「缓存」结果 tab 免重查展示 */
+function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record<string, unknown>[] }) {
   const c = cm
   if (!c) return
   const s = String(sql || '')
   if (!s.trim()) return
   c.setValue(s)
   c.focus()
+  if (result && Array.isArray(result.columns) && Array.isArray(result.rows)) {
+    results.value.push({
+      sql: s,
+      columns: [...result.columns],
+      rows: result.rows,
+      costMs: 0,
+      truncated: false,
+      running: false,
+      cached: true
+    } as QueryResultItem)
+    if (results.value.length > MAX_RESULTS) {
+      results.value.splice(0, results.value.length - MAX_RESULTS)
+    }
+    activePane.value = results.value.length // 切到刚推入的结果面板(pane 0 是日志)
+  }
 }
 
 /** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
@@ -1031,6 +1047,7 @@ interface QueryResultItem {
   error?: string
   jobId?: string
   mode?: string
+  cached?: boolean // 来自查询历史的结果快照(未重新执行)
   // ── 行内编辑(仅表预览结果)────────────────────────
   editable?: boolean // 是否允许单元格双击编辑
   db?: string // 目标库(onOpenTable 设置)
@@ -1577,8 +1594,8 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await execDb(sql)
     if (seq !== runSeq) return // 旧批次已失效,丢弃结果
-    // 执行成功 → 写入历史(任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 50)
-    pushHistory(sql)
+    // 执行成功 → 写入历史(含结果快照,前 100 行;任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 20)
+    pushHistory(sql, r)
     // 追加模式下 item 是新 push 的结果对象,直接用最新结果覆盖它(不保留旧 editable 元数据;
     // 表预览的可编辑标记由 onOpenTable 在执行成功后对最新结果设置)
     const idx = results.value.indexOf(item)
@@ -1678,12 +1695,19 @@ let runSeq = 0
 const HISTORY_KEY = 'db-query-history'
 const HISTORY_MAX = 20
 
-/** 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 20 循环缓存(超出删最旧)、仅 trim 非空且 ≤2000 */
-function pushHistory(sql: string) {
+/** 历史附带的结果快照:截断到前 100 行,序列化超 200KB 不缓存(防 localStorage 撑爆) */
+const HIST_RESULT_ROWS = 100
+const HIST_RESULT_MAX_BYTES = 200_000
+
+/**
+ * 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 20 循环缓存、仅 trim 非空且 ≤2000;
+ * 附带结果快照(仅查询类结果,空 rows 不缓存)。
+ */
+function pushHistory(sql: string, result?: { columns?: string[]; rows?: Record<string, unknown>[] }) {
   const s = String(sql ?? '').trim()
   if (!s || s.length > 2000) return
   try {
-    let list: Array<{ ts: number; sql: string }> = []
+    let list: Array<{ ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } }> = []
     try {
       const raw = localStorage.getItem(HISTORY_KEY)
       if (raw) {
@@ -1694,11 +1718,23 @@ function pushHistory(sql: string) {
       /* 历史数据损坏则忽略,重新开始 */
     }
     list = list.filter((h) => h.sql !== s)
-    list.unshift({ ts: Date.now(), sql: s })
+    const entry: { ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } } = {
+      ts: Date.now(),
+      sql: s
+    }
+    if (result && Array.isArray(result.columns) && result.columns.length && Array.isArray(result.rows) && result.rows.length) {
+      try {
+        const snapshot = { columns: [...result.columns], rows: result.rows.slice(0, HIST_RESULT_ROWS) }
+        if (JSON.stringify(snapshot).length <= HIST_RESULT_MAX_BYTES) entry.result = snapshot
+      } catch {
+        /* 快照序列化失败(循环引用等)不影响历史本身 */
+      }
+    }
+    list.unshift(entry)
     if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX)
     localStorage.setItem(HISTORY_KEY, JSON.stringify(list))
   } catch {
-    /* localStorage 不可用(Safari 隐私模式等)时静默忽略 */
+    /* localStorage 不可用(Safari 隐私模式等)或配额已满时静默忽略 */
   }
 }
 
@@ -2138,6 +2174,7 @@ async function copyAllTsv() {
           <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
           <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
           <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
+          <span v-if="r.cached" class="tab-cached-tag" title="来自查询历史的缓存结果">缓存</span>
           <el-tooltip content="关闭" placement="top">
             <span class="tab-close" @click.stop="closeResultTab(idx)">
               <el-icon><Close /></el-icon>
@@ -2888,6 +2925,16 @@ async function copyAllTsv() {
   &.err {
     color: #f56c6c;
   }
+}
+
+/* 结果 tab「缓存」标记(来自查询历史快照) */
+.tab-cached-tag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9, rgba(64, 158, 255, 0.12));
 }
 
 /* 结果 tab 关闭按钮(与导出同款,略小) */

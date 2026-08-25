@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
@@ -54,6 +54,22 @@ const paged = computed(() =>
 
 const tableRef = ref()
 
+// ── 展开状态跨刷新保持:轮询/刷新会整体替换行对象,el-table 按对象身份记忆展开态
+// 会全部塌缩;改为按 appId 记录,数据更新后对仍在本页的行强制恢复展开 ──
+const expandedIds = ref<Set<string>>(new Set())
+
+function onExpandChange(_row: YarnApp, expandedRows: YarnApp[]) {
+  expandedIds.value = new Set(expandedRows.map((r) => r.id))
+}
+
+watch(paged, async () => {
+  if (!expandedIds.value.size) return
+  await nextTick()
+  for (const row of paged.value) {
+    if (expandedIds.value.has(row.id)) tableRef.value?.toggleRowExpansion(row, true)
+  }
+})
+
 function onSortChange({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) {
   if (!order) {
     sortBy.value = null
@@ -105,6 +121,7 @@ function openResource(row: { id: string; name?: string }): void {
       class="apps-table-el"
       @sort-change="onSortChange"
       @row-click="onRowClick"
+      @expand-change="onExpandChange"
     >
       <el-table-column type="expand">
         <template #default="{ row }">
