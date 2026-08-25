@@ -18,7 +18,7 @@ import {
   prejobSubmit, prejobJobs, prejobStatus, prejobLogs, prejobCancel, prejobConfig
 } from './flink-gateway.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { loadPerms, savePerms, checkDbAccess, checkSparkAccess, checkFlinkAccess } from './db-permissions.js'
+import { loadPerms, savePerms, checkDbAccess, checkSparkAccess, checkFlinkAccess, allowedDbsFor } from './db-permissions.js'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
 // (本网关共 7 个代理实例),Node 24 默认 maxListeners=10 会触发 MaxListenersExceededWarning,这里放宽。

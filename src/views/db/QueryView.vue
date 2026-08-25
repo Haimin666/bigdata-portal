@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/store/auth'
 import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
 import 'codemirror/lib/codemirror.css'
@@ -1691,9 +1692,10 @@ function getSegments(text: string): string[] {
 let batchCancelled = false
 let runSeq = 0
 
-/** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用) */
-const HISTORY_KEY = 'db-query-history'
+/** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用);key 按用户名隔离(与 SqlTreePanel 读取端一致) */
 const HISTORY_MAX = 20
+const authStore = useAuthStore()
+const histKey = () => `db-query-history:${authStore.username || 'default'}`
 
 /** 历史附带的结果快照:截断到前 100 行,序列化超 200KB 不缓存(防 localStorage 撑爆) */
 const HIST_RESULT_ROWS = 100
@@ -1709,7 +1711,7 @@ function pushHistory(sql: string, result?: { columns?: string[]; rows?: Record<s
   try {
     let list: Array<{ ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } }> = []
     try {
-      const raw = localStorage.getItem(HISTORY_KEY)
+      const raw = localStorage.getItem(histKey())
       if (raw) {
         const parsed = JSON.parse(raw)
         if (Array.isArray(parsed)) list = parsed.filter((h) => h && typeof h.sql === 'string' && typeof h.ts === 'number')
@@ -1732,7 +1734,7 @@ function pushHistory(sql: string, result?: { columns?: string[]; rows?: Record<s
     }
     list.unshift(entry)
     if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX)
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(list))
+    localStorage.setItem(histKey(), JSON.stringify(list))
   } catch {
     /* localStorage 不可用(Safari 隐私模式等)或配额已满时静默忽略 */
   }

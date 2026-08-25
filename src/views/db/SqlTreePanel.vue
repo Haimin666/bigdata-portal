@@ -17,6 +17,7 @@ import {
   type TableFieldDetail
 } from '@/api/db'
 import { copyText } from '@/utils/clipboard'
+import { useAuthStore } from '@/store/auth'
 
 defineOptions({ name: 'SqlTreePanel' })
 
@@ -226,8 +227,10 @@ async function onCopyDDL(data: CatNode) {
 }
 
 // ── 历史与收藏(localStorage 持久化,history 由父组件 QueryView 写入)──────
-const HISTORY_KEY = 'db-query-history'
-const FAV_KEY = 'db-query-favorites'
+// key 按用户名隔离:同一浏览器多账号互不可见(认证关闭时落到 default)
+const authStore = useAuthStore()
+const histKey = () => `db-query-history:${authStore.username || 'default'}`
+const favKey = () => `db-query-favorites:${authStore.username || 'default'}`
 const HISTORY_MAX = 50
 
 interface HistItem {
@@ -272,8 +275,8 @@ function writeStore(key: string, list: HistItem[]) {
 
 /** 读取历史 + 收藏(挂载与激活历史 tab 时各刷新一次) */
 function loadHistory() {
-  historyList.value = readStore(HISTORY_KEY)
-  favList.value = readStore(FAV_KEY)
+  historyList.value = readStore(histKey())
+  favList.value = readStore(favKey())
 }
 
 /** 时间格式:今天 HH:mm,跨天 MM-DD HH:mm */
@@ -297,22 +300,22 @@ function toggleFav(item: HistItem) {
   const sql = String(item.sql || '').trim()
   if (!sql) return
   historyList.value = historyList.value.filter((h) => h !== item)
-  writeStore(HISTORY_KEY, historyList.value)
+  writeStore(histKey(), historyList.value)
   favList.value = [{ ...item, sql }, ...favList.value.filter((f) => f.sql !== sql)].slice(0, HISTORY_MAX)
-  writeStore(FAV_KEY, favList.value)
+  writeStore(favKey(), favList.value)
   ElMessage.success('已收藏')
 }
 
 /** 取消收藏:从收藏列表移除 */
 function removeFav(item: HistItem) {
   favList.value = favList.value.filter((f) => f !== item)
-  writeStore(FAV_KEY, favList.value)
+  writeStore(favKey(), favList.value)
 }
 
 /** 删除单条历史 */
 function removeHistory(item: HistItem) {
   historyList.value = historyList.value.filter((h) => h !== item)
-  writeStore(HISTORY_KEY, historyList.value)
+  writeStore(histKey(), historyList.value)
 }
 
 /** 清空全部历史(确认后) */
@@ -324,7 +327,7 @@ async function clearHistory() {
     return // 取消/关闭
   }
   historyList.value = []
-  writeStore(HISTORY_KEY, historyList.value)
+  writeStore(histKey(), historyList.value)
   ElMessage.success('历史已清空')
 }
 
