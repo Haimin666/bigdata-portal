@@ -1365,8 +1365,7 @@ async function runExplain() {
     ElMessage.warning('没有可分析的 SQL(请选中或输入语句)')
     return
   }
-  const varVals = collectRunVars()
-  if (varVals === null) return
+  const varVals = collectRunVars(rawExplain)
   const sql = expandSqlVars(rawExplain, varVals)
   showExplain.value = true
   explainLoading.value = true
@@ -1655,20 +1654,21 @@ function syncRunVarBar() {
   runVarNames.value = names
 }
 
-/** 执行前收集参数值:有未填写的变量则提示并中止(返回 null) */
-function collectRunVars(): Map<string, string> | null {
+/**
+ * 执行前收集参数值:只看本次要执行的 SQL 段里出现的变量(画布其他段的变量不拦截);
+ * 已填值的替换,未填值的保持 ${var} 原样交由引擎报错感知 —— 不因缺参阻断执行。
+ */
+function collectRunVars(rawSql: string): Map<string, string> {
   const values = new Map<string, string>()
-  const missing: string[] = []
-  for (const n of runVarNames.value) {
+  VAR_RE.lastIndex = 0
+  const names = new Set<string>()
+  let m: RegExpExecArray | null
+  while ((m = VAR_RE.exec(rawSql))) names.add(m[1])
+  for (const n of names) {
     const v = (runVarValues[n] ?? '').trim()
-    if (v) {
-      values.set(n, v)
-      varMemory.set(n, v)
-    } else missing.push(n)
-  }
-  if (missing.length) {
-    ElMessage.warning(`请先在参数行填写变量:${missing.map((n) => '${' + n + '}').join('、')}`)
-    return null
+    if (!v) continue // 未填:原样传给引擎
+    values.set(n, v)
+    varMemory.set(n, v)
   }
   return values
 }
@@ -1783,9 +1783,8 @@ async function runQuery() {
     ElMessage.warning('请输入 SQL')
     return
   }
-  // 自定义 ${var} 参数:从画布下方参数行读取;有未填项则提示中止
-  const varVals = collectRunVars()
-  if (varVals === null) return
+  // 自定义 ${var} 参数:只替换本次执行段内已填值的变量;未填的原样传给引擎
+  const varVals = collectRunVars(rawSql)
   const target = expandSqlVars(rawSql, varVals)
   // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
   if (engine.value === 'pyspark') {
