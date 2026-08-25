@@ -140,12 +140,28 @@ interface EditorTab {
   id: string
   file: ScriptNode | null // 绑定的文件;null = 未命名查询
   name: string
-  content: string // 内容快照(切换 tab 时写回/读取)
+  content: string // 内容快照(自动保存/草稿用;编辑实时内容在 doc 里)
   dirty: boolean
+  doc: CodeMirror.Doc // 每文件独立文档:独立撤销历史(Cmd+Z 不串文件)+ 光标位置
 }
 let tabSeq = 0
 function newTab(name: string, content: string, id?: string): EditorTab {
-  return { id: id || `tab-${++tabSeq}`, file: null, name, content, dirty: false }
+  return {
+    id: id || `tab-${++tabSeq}`,
+    file: null,
+    name,
+    content,
+    dirty: false,
+    doc: CodeMirror.Doc(content, 'text/x-sql')
+  }
+}
+
+/** 把 tab 的文档挂到编辑器(已挂则同步快照兜底);替代旧 setValue 整体替换方案 */
+function showTabInEditor(t: EditorTab) {
+  if (!cm) return
+  if (!t.doc) t.doc = CodeMirror.Doc(t.content, 'text/x-sql') // 兼容旧路径
+  if (cm.getDoc() !== t.doc) cm.swapDoc(t.doc)
+  syncRunVarBar() // swapDoc 不触发 change 事件,参数行需按新文档内容重建
 }
 
 // ── 临时 query 草稿(未命名 tab 也自动保存到 localStorage)──────
@@ -209,7 +225,9 @@ function scheduleAutoSave(tab: EditorTab) {
 }
 async function autoSaveTab(tab: EditorTab) {
   if (!tabs.value.includes(tab)) return // tab 已关闭
-  tab.content = cm?.getValue() ?? tab.content
+  // 仅当该 tab 仍是活跃 tab 时才读编辑器实时内容;否则用切换时已写回的快照。
+  // 否则迟到的防抖定时器会把别的 tab 内容存进本 tab,覆盖磁盘上的原文件!
+  if (activeTab.value === tab) tab.content = cm?.getValue() ?? tab.content
   if (tab.file) {
     try {
       await saveScriptContent(tab.file.id, tab.content)
@@ -234,14 +252,16 @@ function flushActiveContent() {
   if (t) t.content = cm?.getValue() ?? ''
 }
 
-/** 切换 tab:写回当前内容 → 加载目标内容 */
+/** 切换 tab:写回当前内容 → 挂载目标文档(独立撤销历史) */
 function switchTab(id: string) {
   if (id === activeTabId.value) return
+  const prev = activeTab.value
   flushActiveContent()
+  if (prev?.dirty) void autoSaveTab(prev) // 切走即保存,防编辑丢失/迟到定时器串内容
   activeTabId.value = id
   const next = tabs.value.find((t) => t.id === id)
   if (next) {
-    cm?.setValue(next.content)
+    showTabInEditor(next)
     if (next.file?.name.toLowerCase().endsWith('.py')) engine.value = 'pyspark'
   }
   cm?.focus()
@@ -267,11 +287,11 @@ async function closeTab(id: string) {
       const nt = newTab('未命名查询', '')
       tabs.value.push(nt)
       activeTabId.value = nt.id
-      cm?.setValue('')
+      showTabInEditor(nt)
     } else {
       const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
       activeTabId.value = next.id
-      cm?.setValue(next.content)
+      showTabInEditor(next)
     }
   }
   cm?.focus()
@@ -287,7 +307,7 @@ function newQuery() {
   const nt = newTab('未命名查询', '')
   tabs.value.push(nt)
   activeTabId.value = nt.id
-  cm?.setValue('')
+  showTabInEditor(nt)
   cm?.focus()
 }
 
@@ -313,10 +333,17 @@ async function onOpenFile(node: ScriptNode) {
   try {
     const { content } = await getScriptContent(node.id)
     flushActiveContent()
-    const tab: EditorTab = { id: `file-${node.id}`, file: node, name: node.name, content, dirty: false }
+    const tab: EditorTab = {
+      id: `file-${node.id}`,
+      file: node,
+      name: node.name,
+      content,
+      dirty: false,
+      doc: CodeMirror.Doc(content || '', 'text/x-sql')
+    }
     tabs.value.push(tab)
     activeTabId.value = tab.id
-    cm?.setValue(content || '')
+    showTabInEditor(tab)
     // .py 文件自动切到 PySpark 引擎(python 编辑器)
     if (node.name.toLowerCase().endsWith('.py')) {
       engine.value = 'pyspark'
@@ -382,9 +409,17 @@ async function onOpenTable(payload: { db: string; table: string }) {
   if (existing) {
     switchTab(existing.id)
   } else {
-    const tab: EditorTab = { id: tabId, file: null, name: `${payload.db}.${payload.table}`, content: sql, dirty: false }
+    const tab: EditorTab = {
+      id: tabId,
+      file: null,
+      name: `${payload.db}.${payload.table}`,
+      content: sql,
+      dirty: false,
+      doc: CodeMirror.Doc(sql, 'text/x-sql')
+    }
     tabs.value.push(tab)
     activeTabId.value = tab.id
+    showTabInEditor(tab)
   }
   cm?.setValue(sql)
   await runQuery()
@@ -522,8 +557,9 @@ function adjustFont(delta: number) {
 
 async function initEditor() {
   if (!cmRef.value || cm) return
+  const initial = activeTab.value
   cm = CodeMirror(cmRef.value, {
-    value: activeTab.value?.content ?? DEFAULT_SQL,
+    value: initial?.doc ?? initial?.content ?? DEFAULT_SQL,
     mode: 'text/x-sql',
     lineNumbers: true,
     indentWithTabs: false,
