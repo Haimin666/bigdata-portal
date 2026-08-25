@@ -92,6 +92,7 @@ export class UserStore {
     if (!password || String(password).length < 6) throw new Error('密码至少 6 位')
     if (this.findByUsername(name)) throw new Error(`用户已存在:${name}`)
     if (!this._data.roles[role]) throw new Error(`未知角色:${role}`)
+    if (!['active', 'disabled'].includes(status)) throw new Error(`非法状态:${status}`)
     const now = new Date().toISOString()
     const user = {
       username: name,

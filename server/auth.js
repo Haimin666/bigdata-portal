@@ -59,10 +59,39 @@ export function setupAuth(app, config) {
     }
   }
 
+  /** 吊销某用户的全部存量会话(改密码/停用/删除后调用,防旧 token 继续可用) */
+  function revokeUserSessions(username) {
+    let n = 0
+    for (const [k, s] of Object.entries(sessions)) {
+      if (s.username === username) {
+        delete sessions[k]
+        n++
+      }
+    }
+    if (n > 0) saveSessions()
+    return n
+  }
+
   const COOKIE = 'portal_session'
 
-  // 登录限速表(ip -> {count, resetAt})
+  // 登录限速表:双层失败计数桶,仅统计失败尝试,成功不清零(自然过期,无法被重置)
+  // - key `u|<ip>|<username>`:同 IP 对同一用户名 60s 内最多 10 次失败(防定点爆破)
+  // - key `i|<ip>`:同 IP 全部用户名合计 60s 内最多 30 次失败(防单 IP 撞库扫用户名)
+  // 注:成功不再重置计数 —— 否则持有效账号的攻击者可穿插成功登录无限重置限速桶
   const loginAttempts = new Map()
+  const LIMIT_U = { max: 10, windowMs: 60_000 }
+  const LIMIT_IP = { max: 30, windowMs: 60_000 }
+
+  function hitLimit(key, limit) {
+    const now = Date.now()
+    const rec = loginAttempts.get(key)
+    if (!rec || rec.resetAt < now) {
+      loginAttempts.set(key, { count: 1, resetAt: now + limit.windowMs })
+      return false
+    }
+    rec.count += 1
+    return rec.count > limit.max
+  }
 
   // ── 守卫 ─────────────────────────────────────────────
   function currentUser(req) {
@@ -143,19 +172,16 @@ export function setupAuth(app, config) {
 
   app.post('/api/auth/login', (req, res) => {
     if (!enabled) return res.status(403).json({ code: 403, msg: '认证未启用' })
-    // 简单 IP 限速:同 IP 60s 最多 10 次失败(仅失败计数,成功即重置),防暴力破解
-    const ip = req.ip || req.socket?.remoteAddress || 'unknown'
-    const now = Date.now()
-    const rec = loginAttempts.get(ip)
-    if (!rec || rec.resetAt < now) {
-      loginAttempts.set(ip, { count: 1, resetAt: now + 60_000 })
-    } else {
-      rec.count += 1
-      if (rec.count > 10) {
-        return res.status(429).json({ code: 429, msg: '尝试过于频繁,请 60 秒后再试' })
-      }
-    }
     const { username, password } = req.body || {}
+    const uname = String(username || '').trim().toLowerCase()
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+    // 双层限速(仅失败计数):同 IP 同用户名 ≤10 次/60s,同 IP 合计 ≤30 次/60s
+    if (
+      hitLimit(`u|${ip}|${uname}`, LIMIT_U) ||
+      hitLimit(`i|${ip}`, LIMIT_IP)
+    ) {
+      return res.status(429).json({ code: 429, msg: '尝试过于频繁,请 60 秒后再试' })
+    }
     const user = users.findByUsername(String(username || '').trim())
     if (!user || !UserStore.verifyPassword(String(password || ''), user.hash)) {
       return res.status(401).json({ code: 401, msg: '用户名或密码错误' })
@@ -163,7 +189,6 @@ export function setupAuth(app, config) {
     if (user.status !== 'active') {
       return res.status(403).json({ code: 403, msg: '账号已停用,请联系管理员' })
     }
-    loginAttempts.delete(ip) // 登录成功重置限速
     users.touchLogin(user.username)
     const token = issueSession(user.username)
     setSessionCookie(res, token)
@@ -231,6 +256,9 @@ export function setupAuth(app, config) {
     }
     try {
       const user = users.update(target, { role, status, modules, password })
+      // 凭据/状态变化即吊销存量会话:改密后旧 token 立即失效(含被改密的当前管理员自身,
+      // 需重新登录 —— 安全优先);仅改角色/模块不用吊销(currentUser 每请求重查 users.json)
+      if (password || status !== undefined) revokeUserSessions(target)
       res.json({ code: 0, data: user })
     } catch (e) {
       res.status(400).json({ code: 400, msg: e.message })
@@ -244,6 +272,7 @@ export function setupAuth(app, config) {
     }
     try {
       users.remove(target)
+      revokeUserSessions(target) // 清掉被删用户的存量会话,防日后重建同名账号后旧 token 复活
       res.json({ code: 0, data: { deleted: target } })
     } catch (e) {
       res.status(400).json({ code: 400, msg: e.message })
@@ -272,6 +301,7 @@ export function setupAuth(app, config) {
     users,
     requireAuth,
     requireAdmin,
-    currentUser
+    currentUser,
+    revokeUserSessions
   }
 }

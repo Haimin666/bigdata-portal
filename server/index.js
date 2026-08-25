@@ -86,7 +86,7 @@ const EXEC_GATES = [
   { re: /^\/api\/db\/(schema|explain)(\/|$)/, module: 'dbQuery' }, // 元数据补全/执行计划(只读,仍需模块与角色门禁)
   { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
   { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
-  { re: /^\/api\/assistant\/projects/, module: 'assistant', onlyWrite: true }, // 项目/文件/目录/上传/会话绑定(POST/PUT/PATCH/DELETE;GET 只读放行)
+  { re: /^\/api\/assistant\/projects/, module: 'devAssistant', onlyWrite: true }, // 项目/文件/目录/上传/会话绑定(POST/PUT/PATCH/DELETE;GET 只读放行);module 必须与菜单 name 一致(menu.ts: devAssistant)
   { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
 ]
 app.use((req, res, next) => {

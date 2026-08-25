@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import MainLayout from '@/layouts/MainLayout.vue'
 import LoginView from '@/views/LoginView.vue'
+import DeniedView from '@/views/DeniedView.vue'
 import { menus } from '@/config/menu'
 import { useAuthStore } from '@/store/auth'
 
@@ -22,6 +23,12 @@ const router = createRouter({
       name: 'login',
       component: LoginView,
       meta: { public: true }
+    },
+    {
+      // 无权限兜底页:白名单内无任何 native 页的用户落地于此(不拉任何数据)
+      path: '/denied',
+      name: 'denied',
+      component: DeniedView
     },
     {
       path: '/',
@@ -86,21 +93,29 @@ router.beforeEach(async (to) => {
   if (!auth.loggedIn) {
     return to.path === '/login' ? true : '/login'
   }
-  /** 用户可访问的第一个 native 菜单页(登录落地/模块回退目标;无匹配回默认首页,后端 EXEC_GATES 门禁兜底) */
+  /** 用户可访问的第一个 native 菜单页(登录落地/模块回退目标;无命中返回 '' 由守卫跳 /denied) */
   const firstAllowedPath = (): string => {
     const mods = auth.modules
     if (!Array.isArray(mods) || mods.length === 0) return '/yarn'
     const hit = menus.find((m) => m.kind === 'native' && mods.includes(m.name))
-    return hit ? hit.path : '/yarn'
+    return hit ? hit.path : ''
   }
-  if (to.path === '/login') return firstAllowedPath()
+  if (to.path === '/login') {
+    // 白名单内无任何 native 页 → 不再放行 /yarn(防 subapp-only 用户越权),落 /denied 提示页
+    return firstAllowedPath() || '/denied'
+  }
   if (to.meta.adminOnly && !auth.isAdmin) return '/'
-  // 模块白名单:菜单 name 不在用户可访问模块内 → 跳用户首个可访问页(避免回 '/' 造成无限重定向)
+  // 模块白名单:菜单 name 不在用户可访问模块内 → 跳首个可访问页;无 native 可访问 → /denied
   // admin 的 modules 为 null(全部),跳过校验
   const mods = auth.modules
   const name = String(to.name || '')
   if (mods && Array.isArray(mods) && mods.length > 0 && name && !mods.includes(name)) {
     const fallback = firstAllowedPath()
+    if (!fallback) {
+      // 允许 subapp-only 用户直达其被授权的子应用页,其余一律拒绝页
+      if (menus.some((m) => m.path === to.path && m.kind === 'subapp' && mods.includes(m.name))) return true
+      return to.path === '/denied' ? true : '/denied'
+    }
     if (to.path === fallback) return true // 兜底目标放行,避免循环
     return fallback
   }
