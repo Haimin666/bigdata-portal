@@ -1346,11 +1346,14 @@ async function runExplain() {
     ElMessage.warning('EXPLAIN 仅支持 MySQL / Oracle')
     return
   }
-  const sql = expandSqlVars(getExplainSql())
-  if (!sql) {
+  const rawExplain = getExplainSql()
+  if (!rawExplain.trim()) {
     ElMessage.warning('没有可分析的 SQL(请选中或输入语句)')
     return
   }
+  const varVals = await resolveRunVars(rawExplain)
+  if (varVals === null) return
+  const sql = expandSqlVars(rawExplain, varVals ?? undefined)
   showExplain.value = true
   explainLoading.value = true
   explainError.value = ''
@@ -1612,16 +1615,64 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   }
 }
 
-// ── $ 传参:${T-1} 等日期变量,执行/EXPLAIN 前替换为 yyyy-MM-dd ────
-/** 画布 SQL 变量替换:支持 ${T}(今天)、${T-1}(昨天)、${T-N}(N 天前)→ yyyy-MM-dd(本地时区)
- *  写在字符串字面量里也能替换(按原文扫描);未匹配的 ${...} 保持原样报错由引擎处理 */
-function expandSqlVars(sql: string): string {
+// ── $ 传参:${T-N} 日期变量自动替换;自定义 ${var} 执行前弹窗填值 ─────
+const VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_-]*)\}/g // 自定义变量名:字母/下划线开头
+
+/** 上次自定义变量取值(会话内记忆,下次执行同变量免重复输) */
+const varMemory = new Map<string, string>()
+
+/** 提取 SQL 中的自定义变量(去重,排除内置日期变量 T 系列) */
+function extractCustomVars(sql: string): string[] {
+  const names = new Set<string>()
+  let m: RegExpExecArray | null
+  VAR_RE.lastIndex = 0
+  while ((m = VAR_RE.exec(sql))) {
+    if (!/^T(-?\d+)?$/.test(m[1])) names.add(m[1]) // ${T}/${T-1} 走日期替换,不弹窗
+  }
+  return Array.from(names)
+}
+
+/** 弹窗收集自定义变量的值(预填上次值);取消返回 null */
+async function promptForVars(names: string[]): Promise<Map<string, string> | null> {
+  const values = new Map<string, string>()
+  for (const name of names) {
+    try {
+      const { value } = await ElMessageBox.prompt(
+        `变量 ${name} 的值`,
+        'SQL 参数',
+        { inputValue: varMemory.get(name) || '', inputValidator: (v) => (v !== null && v.trim() !== '' ? true : '值不能为空'), confirmButtonText: '确定', cancelButtonText: '取消' }
+      )
+      values.set(name, (value || '').trim())
+      varMemory.set(name, (value || '').trim())
+    } catch {
+      return null // 用户取消 → 中止本次执行
+    }
+  }
+  return values
+}
+
+/** 画布 SQL 变量替换:
+ *  - 内置日期:${T}(今天)、${T-1}(昨天)、${T-N}(${T+N})→ yyyy-MM-dd(本地时区)
+ *  - 自定义:${dt} 等 → 用 values 传入的值(执行前已弹窗收集) */
+function expandSqlVars(sql: string, values?: Map<string, string>): string {
   const pad = (n: number) => String(n).padStart(2, '0')
-  return sql.replace(/\$\{T(?:([+-])(\d+))?\}/g, (_all, sign: string | undefined, num: string | undefined) => {
-    const d = new Date()
-    if (sign && num) d.setDate(d.getDate() + (sign === '-' ? -1 : 1) * Number(num))
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return sql.replace(/\$\{([^}]+)\}/g, (all, rawName: string) => {
+    const name = rawName.trim()
+    if (/^T(?:[+-]\d+)?$/.test(name)) {
+      const dm = name.match(/^T([+-])(\d+)$/)
+      const d = new Date()
+      if (dm) d.setDate(d.getDate() + (dm[1] === '-' ? -1 : 1) * Number(dm[2]))
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    }
+    return values?.get(name) ?? all // 无值保持原样(引擎报错可感知)
   })
+}
+
+/** 收集本次执行的变量值:有自定义变量才弹窗;取消返回 null(中止执行) */
+async function resolveRunVars(rawSql: string): Promise<Map<string, string> | null | undefined> {
+  const names = extractCustomVars(rawSql)
+  if (!names.length) return undefined
+  return await promptForVars(names)
 }
 
 /** 拆 SQL 段并过滤空段/纯注释段 */
@@ -1704,11 +1755,15 @@ async function runQuery() {
     ElMessage.warning('请先选择数据库')
     return
   }
-  const target = expandSqlVars(getSqlToRun().trim())
-  if (!target) {
+  const rawSql = getSqlToRun().trim()
+  if (!rawSql) {
     ElMessage.warning('请输入 SQL')
     return
   }
+  // 自定义 ${var} 参数:执行前弹窗填值;取消则中止
+  const varVals = await resolveRunVars(rawSql)
+  if (varVals === null) return
+  const target = expandSqlVars(rawSql, varVals ?? undefined)
   // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
   if (engine.value === 'pyspark') {
     loading.value = true
