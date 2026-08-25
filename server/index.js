@@ -675,7 +675,7 @@ app.put('/api/db-perms', auth.requireAdmin, express.json(), (req, res) => {
     return res.status(400).json({ code: 400, msg: '每条规则须为 {user|role: 非空字符串, dbs/engineRules: 合法数组}' })
   }
   try {
-    savePerms({ userRules, roleRules })
+    savePerms({ userRules, roleRules, defaultDeny: req.body?.defaultDeny === true })
     res.json({ code: 0, msg: '已保存' })
   } catch (e) {
     console.error('[db-perms] 保存失败', e instanceof Error ? e.message : e)

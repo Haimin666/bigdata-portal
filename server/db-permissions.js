@@ -38,7 +38,7 @@ function migrateV1(r) {
   }
 }
 
-/** 读取规则文件;不存在返回空规则(无规则→放行),损坏时 console.warn 并返回
+/** 读取规则文件;不存在返回空规则(无规则→按 defaultDeny 决定放行/拒绝),损坏时 console.warn 并返回
  *  {userRules:[], roleRules:[], broken:true}(有规则文件但损坏 = fail-closed,
  *  非 admin 一律拒绝,避免矩阵静默失效)。 */
 export function loadPerms() {
@@ -46,13 +46,13 @@ export function loadPerms() {
   try {
     raw = fs.readFileSync(PERMS_FILE, 'utf-8')
   } catch {
-    return { userRules: [], roleRules: [] }
+    return { userRules: [], roleRules: [], defaultDeny: false }
   }
   try {
     const data = JSON.parse(raw) || {}
     const userRules = (Array.isArray(data.userRules) ? data.userRules : []).map((r) => (isV1Rule(r) ? migrateV1(r) : r))
     const roleRules = (Array.isArray(data.roleRules) ? data.roleRules : []).map((r) => (isV1Rule(r) ? migrateV1(r) : r))
-    return { userRules, roleRules }
+    return { userRules, roleRules, defaultDeny: data.defaultDeny === true }
   } catch (e) {
     console.warn(`[db-permissions] 规则文件损坏,按 fail-closed 处理: ${e instanceof Error ? e.message : e}`)
     return { userRules: [], roleRules: [], broken: true }
@@ -61,9 +61,10 @@ export function loadPerms() {
 
 /** 全量覆盖保存(原子写:.tmp + renameSync,照 dataleap.js 模板),返回保存后的规则对象。 */
 export function savePerms(rules) {
-  const { userRules, roleRules } = rules || {}
+  const { userRules, roleRules, defaultDeny } = rules || {}
   const data = {
     version: 2,
+    defaultDeny: defaultDeny === true,
     userRules: Array.isArray(userRules) ? userRules : [],
     roleRules: Array.isArray(roleRules) ? roleRules : []
   }
@@ -93,12 +94,12 @@ export function ruleForUser(perms, username, roles) {
 }
 
 /**
- * 返回用户可访问库列表(v2 engineRules 的 db 并集;无规则返回 null = 不限制)。
- * 用于 /api/db/acl 过滤数据源下拉。旧 v1 数据经 loadPerms 迁移后同样生效。
+ * 返回用户可访问库列表(v2 engineRules 的 db 并集;无规则:defaultDeny → [](全拒),
+ * 否则 null = 不限制)。用于 /api/db/acl 过滤数据源下拉。旧 v1 数据经 loadPerms 迁移后同样生效。
  */
 export function allowedDbsFor(perms, username, roles) {
   const rule = ruleForUser(perms, username, roles)
-  if (!rule) return null
+  if (!rule) return perms.defaultDeny ? [] : null
   const dbs = new Set()
   for (const er of rule.engineRules || []) {
     if (er && typeof er.db === 'string' && er.db) dbs.add(er.db)
@@ -123,7 +124,8 @@ function checkBroken(perms) {
  * MySQL/Oracle 引擎访问校验:
  *  - 命中规则 → 按 engine+db 匹配 engineRules:读需 read=true,写需 write=true,
  *    tables 非空时请求引用的表必须 ⊆ 允许表;
- *  - 无规则 → 放行(db-proxy 全局白名单兜底);admin 一律放行。
+ *  - 无规则 → defaultDeny 开启时拒绝(未授权),否则放行(db-proxy 全局白名单兜底);
+ *  - admin 一律放行。
  */
 export function checkDbAccess(req, dbName, opts = {}) {
   const { engine = '', write = false, tables = null } = opts
@@ -135,7 +137,10 @@ export function checkDbAccess(req, dbName, opts = {}) {
   const username = user.username ?? user.user ?? user.name ?? ''
   const roles = Array.isArray(user.roles) ? user.roles : user.role ? [user.role] : []
   const rule = ruleForUser(perms, username, roles)
-  if (!rule) return // 无规则 → 放行
+  if (!rule) {
+    if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
+    return
+  }
   const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
   const matched = engineRules.find(
     (r) => r && (r.db === '*' || String(r.db) === dbName) && (!engine || r.engine === '*' || r.engine === engine)
@@ -150,7 +155,7 @@ export function checkDbAccess(req, dbName, opts = {}) {
   }
 }
 
-/** Spark 访问校验:规则命中时需 spark.{read|write};admin/无规则放行 */
+/** Spark 访问校验:规则命中时需 spark.{read|write};admin 放行;无规则按 defaultDeny 决定 */
 export function checkSparkAccess(req, write = false) {
   if (isAdmin(req)) return
   const perms = loadPerms()
@@ -159,14 +164,17 @@ export function checkSparkAccess(req, write = false) {
   const username = user.username ?? user.user ?? user.name ?? ''
   const roles = Array.isArray(user.roles) ? user.roles : user.role ? [user.role] : []
   const rule = ruleForUser(perms, username, roles)
-  if (!rule) return
+  if (!rule) {
+    if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
+    return
+  }
   const sp = rule.spark
   if (!sp || typeof sp !== 'object') deny('未授权使用 Spark')
   if (write && sp.write !== true) deny('Spark 未授予写权限')
   if (!write && sp.read !== true) deny('Spark 未授予读权限')
 }
 
-/** Flink 使用校验:规则命中时需 flink.enabled === true;admin/无规则放行 */
+/** Flink 使用校验:规则命中时需 flink.enabled === true;admin 放行;无规则按 defaultDeny 决定 */
 export function checkFlinkAccess(req) {
   if (isAdmin(req)) return
   const perms = loadPerms()
@@ -175,6 +183,9 @@ export function checkFlinkAccess(req) {
   const username = user.username ?? user.user ?? user.name ?? ''
   const roles = Array.isArray(user.roles) ? user.roles : user.role ? [user.role] : []
   const rule = ruleForUser(perms, username, roles)
-  if (!rule) return
+  if (!rule) {
+    if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
+    return
+  }
   if (!rule.flink || rule.flink.enabled !== true) deny('未授权使用 Flink')
 }

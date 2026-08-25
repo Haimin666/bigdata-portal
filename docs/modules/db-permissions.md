@@ -26,8 +26,9 @@
 
 - **v2 规则形状**:`{user|role, engineRules[], spark?, flink?}`;`engineRules` 每条 `{engine: 'mysql'|'oracle'|'*', db, tables: string[]|null, read, write}`。
 - **`db: "*"` = 所有库**(2026-08):执行校验(`checkDbAccess`)与 ACL 库下拉过滤(`allowedDbsFor`)均识别通配;旧 `dbs:["*"]`/`dbs:[...]`(v1)加载时自动迁移为 v2(全部引擎读写 + spark/flink 全开)。
-- 匹配规则：**先查 userRules（精确用户名）**，命中即用；未命中再用 roleRules（该用户的角色）。**匹配规则后**，若请求的 db 不在其 dbs → 403 `database 'xxx' not allowed for user 'yyy'`。
-- 未配置任何规则 / 用户与角色均无规则 → 放行（兼容现状，回退全局 allowedDbs 由 db-proxy 兜底）。
+- 匹配规则：**先查 userRules（精确用户名），命中即用（覆盖角色规则，不再回退）**；未命中再用 roleRules（该用户的角色）。**匹配规则后**，若请求的 db 不在其 dbs/engineRules → 403。
+- **defaultDeny 开关**（2026-08）：规则文件 `"defaultDeny": true` 时，**未配置任何规则的用户/角色一律拒绝**（DB/Spark/Flink 403、ACL 下拉为空）；false/缺省则无规则放行（仅受全局白名单兜底）。管理页头部可切换（开启有确认弹窗）。
+- 未配置任何规则 / 用户与角色均无规则 → 按 defaultDeny 决定放行或拒绝；admin 一律放行。
 - **规则文件损坏（JSON 解析失败）→ fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。
 - **admin 角色一律放行**（管理特权，规则只约束 dev/viewer）。
 
@@ -51,12 +52,12 @@ spark/flink 引擎查询不在本矩阵范围（引擎侧库概念不同）。
 
 ## 前端
 
-- `src/api/db.ts`：`getDbPerms()` / `saveDbPerms(rules)`
-- `src/views/admin/DbPermView.vue`（路由 `/db-perms`，`meta.adminOnly`，对标 `UserManageView.vue`）：
+- `src/api/db.ts`：`getDbPerms()` / `saveDbPerms(rules)`（含 `defaultDeny`）
+- `src/views/admin/DbPermView.vue`（内嵌「用户管理」页「数据权限」tab，对标 `UserManageView.vue`）：
   - 两个 tab：用户规则 / 角色规则
-  - 规则列表：主体（用户/角色名）+ 库列表（tag 展示）+ 编辑/删除
-  - 新增/编辑：主体输入（用户名可从 `/api/users` 选择，角色下拉 dev/viewer）+ 库多选（选项来自 `/api/db/dbs` 数据源目录）+ 「全部库」开关（写入 `*`）
-  - 顶部说明：未配置规则的用户按 db-proxy 全局白名单放行；admin 不受限
+  - **角色规则表预设角色全量展示**（2026-08）：未配置的角色也列出（带「未配置」标记），点编辑即创建；已配置但不在预设中的自定义角色追加在后
+  - 规则编辑：`DbRuleEditor`（引擎/库/表/读写 + Spark + Flink；库支持「所有库」`*`）
+  - 头部「默认拒绝」开关（defaultDeny，开启需确认）；顶部说明匹配顺序与当前模式
 
 ## 文档与代码冲突
 

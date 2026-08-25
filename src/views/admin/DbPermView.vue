@@ -16,6 +16,8 @@ const roleRules = ref<DbRoleRule[]>([])
 const users = ref<string[]>([])
 const roleOptions = ref<{ key: string; title: string }[]>([])
 const dbOptions = ref<string[]>([])
+/** 默认拒绝:开启后未配置规则的用户/角色无法访问数据库模块(admin 不受限) */
+const defaultDeny = ref(false)
 
 const loading = ref(false)
 const saving = ref(false)
@@ -32,6 +34,7 @@ async function load() {
     ])
     userRules.value = perms.userRules
     roleRules.value = perms.roleRules
+    defaultDeny.value = perms.defaultDeny === true
     dbOptions.value = sources.map((s) => s.name).filter(Boolean)
     await loadUsersAndRoles()
   } catch (e) {
@@ -112,7 +115,7 @@ function onSaveRule(subject: string, rule: DbRuleV2) {
 async function persist() {
   saving.value = true
   try {
-    await saveDbPerms({ userRules: [...userRules.value], roleRules: [...roleRules.value] })
+    await saveDbPerms({ userRules: [...userRules.value], roleRules: [...roleRules.value], defaultDeny: defaultDeny.value })
     ElMessage.success('已保存')
   } catch (e) {
     ElMessage.error(`保存失败:${e instanceof Error ? e.message : e}`)
@@ -120,6 +123,40 @@ async function persist() {
     saving.value = false
   }
 }
+
+/** 切换默认拒绝开关(即时保存;开启前确认,避免把所有未配规则的人锁在门外) */
+async function onToggleDefaultDeny(v: boolean | string | number) {
+  const on = v === true
+  if (on) {
+    try {
+      await ElMessageBox.confirm(
+        '开启后,所有未配置规则的用户/角色将无法访问数据库模块(admin 不受限)。确定开启?',
+        '默认拒绝',
+        { type: 'warning' }
+      )
+    } catch {
+      defaultDeny.value = false
+      return
+    }
+  }
+  defaultDeny.value = on
+  await persist()
+}
+
+/**
+ * 角色规则表行:预设角色全量展示(未配置的也可直接编辑),
+ * 已配置但不在预设里的自定义角色追加在后。
+ */
+const roleRows = computed(() => {
+  const rows = roleOptions.value.map((o) => {
+    const rule = roleRules.value.find((r) => r.role === o.key)
+    return { ...(rule || { role: o.key }), _configured: !!rule, _title: o.title }
+  })
+  for (const r of roleRules.value) {
+    if (!roleOptions.value.some((o) => o.key === r.role)) rows.push({ ...r, _configured: true, _title: r.role })
+  }
+  return rows
+})
 
 /** 引擎规则摘要(展示用) */
 function engDesc(rule: DbUserRule | DbRoleRule): string {
@@ -172,6 +209,12 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
   <div class="db-perm">
     <div class="head">
       <span class="title">数据权限矩阵</span>
+      <el-tooltip content="开启后,未配置任何规则的用户/角色将被拒绝访问数据库模块(admin 不受限);关闭则未配置者放行(仅受 db-proxy 全局白名单兜底)" placement="bottom">
+        <span class="deny-switch">
+          默认拒绝
+          <el-switch :model-value="defaultDeny" size="small" @change="onToggleDefaultDeny" />
+        </span>
+      </el-tooltip>
       <el-button type="primary" size="small" :icon="Plus" @click="openCreate(activeTab)">
         新增{{ activeTab === 'user' ? '用户' : '角色' }}规则
       </el-button>
@@ -179,7 +222,7 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
     </div>
 
     <el-alert type="info" :closable="false" show-icon class="hint">
-      未配置规则的用户/角色按 db-proxy 全局白名单放行;admin 不受限。规则仅约束 dev/viewer 等非管理员。
+      匹配顺序:用户规则优先 —— 命中用户规则的用户不再回退到其角色规则;未命中再用角色规则。admin 不受限。{{ defaultDeny ? '当前为默认拒绝模式:未配置规则的用户/角色一律禁止。' : '当前未配置规则的用户/角色一律放行(建议把预设角色全部配置后开启「默认拒绝」)。' }}
     </el-alert>
     <el-alert v-if="loadFailed" type="error" :closable="false" show-icon class="hint">
       权限规则加载失败,请确认网关服务可用后重试。
@@ -214,10 +257,15 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
         </el-table>
       </el-tab-pane>
 
-      <!-- 角色规则 -->
+      <!-- 角色规则(预设角色全量展示:未配置的也可直接编辑;已配置的自定义角色追加在后) -->
       <el-tab-pane label="角色规则" name="role">
-        <el-table v-loading="loading" :data="roleRules" size="small" border empty-text="暂无角色规则,点击「新增角色规则」配置">
-          <el-table-column prop="role" label="角色名" min-width="140" />
+        <el-table v-loading="loading" :data="roleRows" size="small" border empty-text="暂无预设角色">
+          <el-table-column label="角色名" min-width="160">
+            <template #default="{ row }">
+              <span>{{ row._title }}({{ row.role }})</span>
+              <el-tag v-if="!row._configured" size="small" type="info" class="unconfigured-tag">未配置</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="引擎规则" min-width="280">
             <template #default="{ row }">
               <span class="rule-summary" :title="engDesc(row)">{{ engDesc(row) }}</span>
@@ -236,7 +284,7 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
           <el-table-column label="操作" width="200" align="center">
             <template #default="{ row }">
               <el-button size="small" text type="primary" :icon="EditPen" @click="openEdit('role', row)">编辑</el-button>
-              <el-button size="small" text type="danger" :icon="Delete" @click="removeRule('role', row)">删除</el-button>
+              <el-button v-if="row._configured" size="small" text type="danger" :icon="Delete" @click="removeRule('role', row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -272,6 +320,17 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
   font-size: 16px;
   font-weight: 600;
   margin-right: auto;
+}
+.deny-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  margin-right: 10px;
+  white-space: nowrap;
+}
+.unconfigured-tag {
+  margin-left: 6px;
 }
 .hint {
   margin-bottom: 12px;

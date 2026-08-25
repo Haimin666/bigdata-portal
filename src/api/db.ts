@@ -872,6 +872,8 @@ export interface DbRoleRule {
 export interface DbPerms {
   userRules: DbUserRule[]
   roleRules: DbRoleRule[]
+  /** 默认拒绝:开启后未配置规则的用户/角色无法访问数据库模块(admin 不受限) */
+  defaultDeny?: boolean
 }
 
 /** /api/db-perms 专用请求(独立于本文件 /api/db 前缀的 request;非 2xx 或业务 code 非 0 抛错) */
@@ -897,15 +899,16 @@ export async function getDbPerms(): Promise<DbPerms> {
   const data = await permsRequest<Partial<DbPerms>>('')
   return {
     userRules: Array.isArray(data.userRules) ? data.userRules : [],
-    roleRules: Array.isArray(data.roleRules) ? data.roleRules : []
+    roleRules: Array.isArray(data.roleRules) ? data.roleRules : [],
+    defaultDeny: data.defaultDeny === true
   }
 }
 
-/** 全量覆盖保存数据权限矩阵规则(PUT /api/db-perms,body { userRules, roleRules }) */
+/** 全量覆盖保存数据权限矩阵规则(PUT /api/db-perms,body { userRules, roleRules, defaultDeny }) */
 export async function saveDbPerms(rules: DbPerms): Promise<unknown> {
   return permsRequest<unknown>('', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userRules: rules.userRules, roleRules: rules.roleRules })
+    body: JSON.stringify({ userRules: rules.userRules, roleRules: rules.roleRules, defaultDeny: rules.defaultDeny === true })
   })
 }
