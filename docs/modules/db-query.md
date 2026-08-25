@@ -13,7 +13,10 @@
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
-| 网关 | `server/index.js` | `/api/db*` 透传(黑名单拦 `/jobs` **全部子路径**,异步任务提交/状态/取消均由专用路由统一鉴权)、`/api/dbquery/query` 与 `/api/db/jobs`、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway)、`/api/scripts` |
+| 网关 | `server/routes/db.js`(2026-08 拆解后;原 `server/index.js`) | `/api/db*` 透传(黑名单拦 `/jobs` **全部子路径**,异步任务提交/状态/取消均由专用路由统一鉴权)、`/api/dbquery/query` 与 `/api/db/jobs`、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway);`server/index.js` 仅保留挂载与门禁 |
+
+> 拆解行为注记:`extractTables` 对 `` `db`.`tbl` `` 反引号双段名现只返回末段表名
+> (`tbl`,拆解前会把 `db`、`tbl` 都当表名);表级白名单校验因此更精确,无放宽。
 | 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发,**元数据接口同样挂载**);`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN)、写审计(audit/audit-db.log)** |
 | 服务 | `services/db-proxy/spark_engine.py` | 常驻 SparkSession 执行 |
 | 服务 | `services/db-proxy/flink_engine.py` / `flink_prejob.py` / `flink_connectors.py` | Flink 三通道 |

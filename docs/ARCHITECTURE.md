@@ -60,7 +60,7 @@ src/
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Express 入口:静态托管、auth 挂载、各模块路由挂载、SPA fallback、listen(不含业务路由) |
+| `index.js` | Express 入口(已落地):静态托管、json 策略、auth 挂载、PROTECTED_PREFIXES 门禁、EXEC_GATES 角色门禁、config 下发、assistant 项目路由与 8787 代理、模块路由挂载、SPA fallback、listen + WS 接线(约 240 行,不含业务路由) |
 | `util.js` | 网关公共工具:`escapeRegExp`、cookie/location 重写等(proxy/db 路由共用) |
 | `routes/proxy.js` | 代理体系:iframeProxy 工厂、子应用代理(/apps/*、/dolphinscheduler 等)、/hadoopapi、/yarniframe、动态 /api/iframe-proxy、WS upgrade 鉴权 |
 | `routes/db.js` | 数据库查询域全部路由:/api/db*、/api/dbquery/query、/api/db-perms、/api/spark/*、/api/flink/* + 写操作防线(isSparkWriteSql/X-Spark-Token)+ EXEC_GATES |
@@ -74,6 +74,8 @@ src/
 | `spark-gateway.js` | Spark db-proxy 客户端(供 routes/db.js 调用):query/jobs/logs/status/stages/cancel |
 | `flink-gateway.js` | Flink db-proxy 客户端(供 routes/db.js 调用):交互+async+prejob |
 
+> **已落地(2026-08)**:`index.js` 已拆解为 `routes/db.js`(db 全部路由+写防线)、
+> `routes/proxy.js`(代理体系+WS 鉴权)、`util.js`(公共纯函数);入口只做装配。
 > **模块归属与文件白名单**见 `docs/DEVELOPMENT.md` §3.1;新增 API 一律落在
 > `server/routes/<module>.js`,由 platform 在 `index.js` 单行挂载,不得再往 `index.js` 堆业务路由。
 
