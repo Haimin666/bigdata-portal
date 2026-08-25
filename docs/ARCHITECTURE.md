@@ -37,9 +37,9 @@ src/
 │       ├── SideBar.vue     # 菜单(enabledModules 白名单 + 角色过滤)
 │       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁)
 │       └── SubAppView.vue  # 子应用 iframe 池
-├── views/              # 业务视图(见模块文档)
+├── views/              # 业务视图(见模块文档);大视图拆子组件,如 src/views/db/components/
 ├── store/              # Pinia:auth.ts(会话/角色)、yarn.ts(应用列表/RM 选择)
-├── api/                # 后端封装:auth/db/ds/dsDeps/hdfs/yarn
+├── api/                # 后端封装:auth/db/(按域拆 query/jobs/schema/spark/flink)/ds/dsDeps/hdfs/yarn/dataleap/assistant
 ├── utils/theme.ts      # 深浅主题 + 管理端主题覆盖注入
 ├── styles/             # variables.scss(双主题 CSS 变量)/ index.scss(全局)
 ├── components/         # 通用:DialogMaxBtn/StateSelect/StatusBadge/UrlFrameDialog
@@ -60,14 +60,22 @@ src/
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Express 入口:静态托管、API 路由、代理体系、写操作防线、SPA fallback |
+| `index.js` | Express 入口:静态托管、auth 挂载、各模块路由挂载、SPA fallback、listen(不含业务路由) |
+| `util.js` | 网关公共工具:`escapeRegExp`、cookie/location 重写等(proxy/db 路由共用) |
+| `routes/proxy.js` | 代理体系:iframeProxy 工厂、子应用代理(/apps/*、/dolphinscheduler 等)、/hadoopapi、/yarniframe、动态 /api/iframe-proxy、WS upgrade 鉴权 |
+| `routes/db.js` | 数据库查询域全部路由:/api/db*、/api/dbquery/query、/api/db-perms、/api/spark/*、/api/flink/* + 写操作防线(isSparkWriteSql/X-Spark-Token)+ EXEC_GATES |
 | `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
 | `users.js` | 用户存储:`data/users.json`(scrypt 加盐)、角色(admin/dev/viewer)、CRUD |
 | `config.js` | 配置统一来源:`server/config.local.json`(gitignore),缺省回退环境变量/默认 |
 | `ds-deps.js` | 海豚调度依赖:项目/工作流/实例列表、依赖树缓存(`data/ds-deps.json`) |
 | `db-scripts.js` | 本地 SQL 脚本存储(`data/scripts`) |
-| `spark-gateway.js` | Spark 网关:`/api/spark/*` → db-proxy,注入 X-DB-Token |
-| `flink-gateway.js` | Flink 网关:`/api/flink/*` → db-proxy(交互 + prejob) |
+| `dataleap.js` | DataLeap 实验模块 Router + cron 调度器(见 modules/dataleap.md) |
+| `assistant-projects.js` | 开发助手项目文件管理路由 |
+| `spark-gateway.js` | Spark db-proxy 客户端(供 routes/db.js 调用):query/jobs/logs/status/stages/cancel |
+| `flink-gateway.js` | Flink db-proxy 客户端(供 routes/db.js 调用):交互+async+prejob |
+
+> **模块归属与文件白名单**见 `docs/DEVELOPMENT.md` §3.1;新增 API 一律落在
+> `server/routes/<module>.js`,由 platform 在 `index.js` 单行挂载,不得再往 `index.js` 堆业务路由。
 
 ### 3.2 代理体系
 

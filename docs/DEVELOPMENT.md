@@ -32,8 +32,37 @@ docs/
     ├── ds-task.md       # 任务监控(海豚实例/依赖/级联重跑/追踪)
     ├── hdfs.md          # HDFS 磁盘监控
     ├── admin-auth.md    # 认证/用户管理/主题设置
-    └── subapps.md       # 子应用 iframe(DS/StreamX/Jupyter/OMD/Stingray)
+    ├── subapps.md       # 子应用 iframe(DS/StreamX/Jupyter/OMD/Stingray)
+    ├── dataleap.md      # DataLeap 元数据/血缘实验
+    └── spark-flink.md   # Spark/Flink 网关与写操作防线
 ```
+
+### 3.1 模块归属表(并行开发边界契约)
+
+> 每个模块由专人负责,**只能修改本模块白名单内的文件**;跨模块需求找对应负责人或走平台行登记。
+> "负责人"列由项目负责人填写后生效。
+
+| 模块(菜单 name) | 前端独占 | 后端独占 | 模块文档 | 负责人 |
+|---|---|---|---|---|
+| platform(平台层) | `src/main.ts`、`src/App.vue`、`src/router/index.ts`、`src/config/menu.ts`、`src/layouts/`、`src/components/`、`src/utils/theme.ts`、`src/styles/`、`src/types/` | `server/index.js`、`server/config.js`、`server/util.js`、`server/routes/proxy.js` | `ARCHITECTURE.md` | _(填)_ |
+| yarn | `src/views/yarn/`、`src/api/yarn.ts`、`src/store/yarn.ts` | —(RM 页面代理归 platform) | `modules/yarn.md` | _(填)_ |
+| db-query(dbQuery) | `src/views/db/`、`src/api/db/` | `server/routes/db.js`、`server/db-scripts.js`、`server/db-permissions.js`、`server/spark-gateway.js`、`server/flink-gateway.js` | `modules/db-query.md`、`modules/spark-flink.md` | _(填)_ |
+| ds-task(dsTask) | `src/views/ds/`、`src/api/ds.ts`、`src/api/dsDeps.ts` | `server/ds-deps.js` | `modules/ds-task.md` | _(填)_ |
+| hdfs | `src/views/hdfs/`、`src/api/hdfs.ts` | — | `modules/hdfs.md` | _(填)_ |
+| admin-auth(userManage) | `src/views/admin/`、`src/views/LoginView.vue`、`src/views/DeniedView.vue`、`src/store/auth.ts` | `server/auth.js`、`server/users.js` | `modules/admin-auth.md` | _(填)_ |
+| subapps(stingray/ds/streamx/jupyter/omd) | `src/views/subapp/` | —(iframe 代理归 platform) | `modules/subapps.md` | _(填)_ |
+| assistant(devAssistant) | `src/views/assistant/`、`src/api/assistant.ts` | `server/assistant-projects.js` | _(待补)_ | _(填)_ |
+| dataleap | `src/views/dataleap/`、`src/api/dataleap.ts` | `server/dataleap.js` | `modules/dataleap.md` | _(填)_ |
+
+### 3.2 文件白名单规则
+
+1. **独占文件**自由提交,commit message 必须带模块名(`feat(yarn): ...` / `fix(db): ...`)
+2. **共享文件**(上表 platform 行 + `package.json` + `docs/DEVELOPMENT.md`)变更纪律:
+   - 动手前在群内声明改动意图与预计影响面;先 `git pull --rebase` 再改,缩短占用窗口
+   - 改 `server/index.js` 仅限"挂载/卸载自己的路由"这类单行级变更;逻辑一律写进自己的模块文件
+   - 改 `src/router/index.ts` / `src/config/menu.ts` 仅限注册自己的视图/菜单项
+3. **新增 API** 一律落在 `server/routes/<module>.js`(Express Router),由 platform 在 `index.js` 挂载;不得再往 `index.js` 堆业务路由
+4. **冲突处理**:同文件冲突时,以模块边界为准协商 rebase,禁止互相覆盖对方逻辑
 
 ## 4. 子代理开发操作模板
 
