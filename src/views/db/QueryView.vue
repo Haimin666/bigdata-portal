@@ -124,6 +124,11 @@ async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<
       currentSparkJobId.value = ''
       throw new Error(j.error || '任务执行失败')
     }
+    if (j.state === 'cancelled') {
+      // 后端/他人/网关已取消:清 jobId 退出,避免空转轮询到 2 小时上限
+      currentSparkJobId.value = ''
+      throw new Error('已取消')
+    }
     await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
   }
   try {
@@ -400,6 +405,8 @@ async function onOpenTable(payload: { db: string; table: string }) {
   const src = datasources.value.find((d) => d.name === payload.db)
   const isOracle = src?.type === 'oracle'
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL 用 LIMIT;标识符按方言加引号)
+  // suppressEngineDbSync:抑制 watch(engine) 把 db 覆盖回该引擎第一个源(防预览跑错库)
+  suppressEngineDbSync = true
   engine.value = isOracle ? 'oracle' : 'mysql'
   db.value = payload.db
   const ident = isOracle ? `"${payload.table}"` : `\`${payload.table}\``
@@ -408,6 +415,12 @@ async function onOpenTable(payload: { db: string; table: string }) {
   const existing = tabs.value.find((t) => t.id === tabId)
   flushActiveContent()
   if (existing) {
+    // 该 tab 已打开:若用户改过预览 SQL(未保存),重新生成预览会覆盖修改 → 只聚焦不覆盖
+    if (existing.dirty) {
+      ElMessage.warning('该 tab 已有未保存修改,预览未重新生成(避免覆盖编辑)')
+      switchTab(existing.id)
+      return
+    }
     switchTab(existing.id)
   } else {
     const tab: EditorTab = {
@@ -1220,11 +1233,13 @@ function parseCellValue(oldVal: unknown, raw: string): unknown {
   return raw
 }
 
-/** SQL 字面量:数字/布尔/null 原样,字符串/日期用单引号并转义 '' */
-function sqlLiteral(v: unknown): string {
+/** SQL 字面量:数字/布尔/null 原样,字符串/日期用单引号并转义 ''。
+ *  isOracle=true 时不再双写反斜杠:Oracle 无此转义语义,双写 \ 会改变存储值。 */
+function sqlLiteral(v: unknown, isOracle = false): string {
   if (v == null) return 'NULL'
   if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-  // MySQL/Doris 字符串字面量中反斜杠是转义符:先转义 \ 再转义 ' (Oracle 无反斜杠语义,双写无害)
+  if (isOracle) return `'${String(v).replace(/'/g, "''")}'`
+  // MySQL/Doris 字符串字面量中反斜杠是转义符:先转义 \ 再转义 '
   return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
@@ -1252,13 +1267,20 @@ function buildUpdateSql(r: QueryResultItem): string[] {
     const sets = edits.map((p) => {
       // 列名可能大小写与 rows 键不一致(如 Oracle),按大小写不敏感定位实际键
       const key = findRowKey(row, p.col)
-      return `${q(key)} = ${sqlLiteral(p.newVal)}`
+      return `${q(key)} = ${sqlLiteral(p.newVal, isOracle)}`
     }).join(', ')
-    // 主键 WHERE:取该行主键列当前行内值(主键列禁止编辑故不受修改影响)
-    const wheres = r.pkCols.map((pk) => {
+    // 主键 WHERE:取该行主键列当前行内值(主键列禁止编辑故不受修改影响);
+    // 主键值为空(NULL)的行无法定位(WHERE pk IS NULL 风险高),跳过整行
+    const wheres: string[] = []
+    for (const pk of r.pkCols) {
       const key = findRowKey(row, pk)
-      return `${q(key)} = ${sqlLiteral(row[key])}`
-    }).filter(Boolean)
+      const v = row[key]
+      if (v == null) {
+        wheres.length = 0 // 标记跳过:整行不生成 UPDATE
+        break
+      }
+      wheres.push(`${q(key)} = ${sqlLiteral(v, isOracle)}`)
+    }
     if (!wheres.length) continue
     stmts.push(`UPDATE ${tbl} SET ${sets} WHERE ${wheres.join(' AND ')}`)
   }
@@ -1616,6 +1638,15 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   }
 }
 
+/** 旧批次在途结果失效(用户停止/新批启动使 seq 变化)时,把仍挂在结果列表中的
+ *  对象落定为「已停止」:防旧结果 tab 永久 running。新批次对象不受影响(不同引用)。 */
+function finalizeStaleItem(item: QueryResultItem, msg: string) {
+  const idx = results.value.indexOf(item)
+  if (idx >= 0 && results.value[idx]?.running) {
+    results.value[idx] = { ...results.value[idx], running: false, error: msg }
+  }
+}
+
 /** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
 async function execOne(sql: string, item: QueryResultItem, seq: number): Promise<void> {
   const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
@@ -1630,7 +1661,11 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
     if (isFlink) r = await execFlink(sql)
     else if (isSpark) r = await execSpark(sql, kind)
     else r = await execDb(sql)
-    if (seq !== runSeq) return // 旧批次已失效,丢弃结果
+    if (seq !== runSeq) {
+      // 旧批次已失效(用户停止/新执行):落定为「已停止」而非永久 running,防旧结果 tab 卡死
+      finalizeStaleItem(item, '已停止')
+      return
+    }
     // 执行成功 → 写入历史(含结果快照,前 100 行;任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 20)
     pushHistory(sql, r)
     // 追加模式下 item 是新 push 的结果对象,直接用最新结果覆盖它(不保留旧 editable 元数据;
@@ -1639,7 +1674,10 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
     if (idx < 0) return // 已被裁剪(结果超上限删旧),丢弃
     results.value[idx] = { sql, ...r, running: false }
   } catch (e) {
-    if (seq !== runSeq) return
+    if (seq !== runSeq) {
+      finalizeStaleItem(item, '已停止')
+      return
+    }
     const idx = results.value.indexOf(item)
     if (idx < 0) return
     results.value[idx] = {
@@ -1858,8 +1896,9 @@ async function runQuery() {
     }
     return
   }
-  // 目标内容按分号拆段:选中多段/一段都逐条执行
-  const segs = getSegments(target)
+  // 先按分号拆段、再逐段替换 ${var} 变量:防止变量值内含分号(如用户输入 "a;b")
+  // 在替换后被拆成新执行段(注入面);pyspark/flinksql stream 整段分支不受影响
+  const segs = getSegments(rawSql).map((s) => expandSqlVars(s, varVals))
   if (!segs.length) {
     ElMessage.warning('没有可执行的 SQL')
     return
@@ -1988,11 +2027,18 @@ onMounted(async () => {
   }
 })
 
+/** onOpenTable 双击预览时置位:抑制 watch(engine) 自动回切 db(预览显式指定了目标库),
+ *  一次性消费,后续手动切引擎仍恢复原行为 */
+let suppressEngineDbSync = false
+
 watch(engine, async (val) => {
   // 写权限密码验证已移除,切换引擎不再要求解锁
   if (!val) return
-  const first = filteredDbs.value.find((d) => d.type === val)
-  db.value = first?.name || ''
+  if (!suppressEngineDbSync) {
+    const first = filteredDbs.value.find((d) => d.type === val)
+    db.value = first?.name || ''
+  }
+  suppressEngineDbSync = false
   if (cm) {
     // python 编辑器切换为 python 模式,其余为 SQL 模式
     cm.setOption('mode', val === 'pyspark' ? 'text/x-python' : 'text/x-sql')

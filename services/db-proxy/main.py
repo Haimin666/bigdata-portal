@@ -36,9 +36,9 @@ import secrets
 import collections
 import datetime
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -170,11 +170,14 @@ BACKTICK_TABLE_RE = re.compile(
     r"(?:`([^`]+)`\s*\.\s*([A-Za-z0-9_$]+)|([A-Za-z0-9_$]+)\s*\.\s*(`[^`]+`))",
     re.IGNORECASE,
 )
-# 行数上限检测(MySQL/Oracle 通用):LIMIT n 或 FETCH FIRST n ROWS
+# 行数上限检测(MySQL/Oracle 通用,匹配前先剥离字符串/注释防误判):
+#   LIMIT n / LIMIT offset, count / FETCH FIRST n ROWS / ROWNUM <= n
 LIMIT_RE = re.compile(
-    r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
+    r"\b(?:LIMIT\s+(\d+)\s*(?:,\s*(\d+))?|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
     re.IGNORECASE,
 )
+# LIMIT 负值/带符号(如 LIMIT -1)无法安全兜底,直接拒绝(避免生成语法错误 SQL)
+INVALID_LIMIT_RE = re.compile(r"\bLIMIT\s*[+-]\s*\d+", re.IGNORECASE)
 
 app = FastAPI(title="db-proxy", version="2.1.0")
 
@@ -442,10 +445,15 @@ def check_tables_allowed(sql: str) -> None:
 
 
 def enforce_limit(sql: str) -> int:
-    """提取行数上限:MySQL LIMIT / Oracle FETCH FIRST / Oracle ROWNUM(11g)。"""
-    m = LIMIT_RE.search(sql)
+    """提取行数上限:MySQL LIMIT(含 offset,count)/ Oracle FETCH FIRST / ROWNUM。
+    在剥离字符串/注释后的文本上匹配,防字面量误判;LIMIT 负数直接拒绝。"""
+    clean = _strip_sql_literals(sql)
+    if INVALID_LIMIT_RE.search(clean):
+        raise HTTPException(status_code=400, detail="LIMIT 不接受负数或带符号数值,请使用正整数")
+    m = LIMIT_RE.search(clean)
     if m:
-        limit = int(next(g for g in (m.group(1), m.group(2), m.group(3)) if g is not None))
+        # LIMIT offset,count → 取 count(行数);其他形态取首个数字
+        limit = int(m.group(2) or m.group(1) or m.group(3) or m.group(4))
         if limit > MAX_LIMIT:
             raise HTTPException(
                 status_code=400, detail=f"row limit exceeds MAX_LIMIT({MAX_LIMIT})"
@@ -468,10 +476,22 @@ def append_row_limit(sql: str, limit: int, row_limit: str) -> str:
 
 
 # ── 数据访问 ──────────────────────────────────────────────────
+def _safe_scalar(v: Any) -> Any:
+    """结果单元规范化:bytes/bytearray(MySQL BLOB、Oracle RAW)按 UTF-8 可读解码,
+    避免 FastAPI jsonable_encoder strict 解码导致整条查询 500(与 spark_engine 一致)。"""
+    if isinstance(v, (bytes, bytearray)):
+        raw = bytes(v)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="replace")
+    return v
+
+
 def _rows_to_dicts(rows: List[Any], description: List[Any]) -> List[Dict[str, Any]]:
     """统一行格式:list[dict],key 为列名。"""
     cols = [d[0].lower() for d in description] if description else []
-    return [{cols[i]: r[i] for i in range(len(cols))} for r in rows]
+    return [{cols[i]: _safe_scalar(r[i]) for i in range(len(cols))} for r in rows]
 
 
 class DbError(Exception):
@@ -579,7 +599,7 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
     if is_select:
         # 查询类:追加行数限制并取结果集
         row_mode = ds.effective_row_limit(conn)
-        if not LIMIT_RE.search(clean_sql):
+        if not LIMIT_RE.search(_strip_sql_literals(clean_sql)):
             clean_sql = append_row_limit(clean_sql, limit, row_mode)
         cur = conn.cursor()
         cur.execute(clean_sql)
@@ -587,6 +607,8 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
             rows = cur.fetchall()  # DictCursor → list[dict]
             truncated = len(rows) > limit
             rows = rows[:limit]
+            # BLOB/二进制列规范化,防 jsonable_encoder strict 解码 500
+            rows = [{k: _safe_scalar(v) for k, v in row.items()} for row in rows]
             columns = list(rows[0].keys()) if rows else []
         else:
             fetched = cur.fetchmany(limit + 1)
@@ -616,6 +638,25 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
     }
 
 
+def _start_oracle_watchdog(conn: Any, q_timeout: Optional[int], timed_out: threading.Event) -> Optional[threading.Thread]:
+    """Oracle 查询超时看门狗:python-oracledb 无语句级超时,超时后强制 close 连接
+    中断底层执行(thin 模式 close 断开 socket,执行线程随即抛错;与异步取消同源)。
+    非 Oracle 或无超时返回 None;正常路径由调用方在 finally 中 timed_out.set() 停表,
+    避免正常关闭被误判为超时。"""
+    if q_timeout and q_timeout > 0:
+        def _kill() -> None:
+            if not timed_out.wait(q_timeout):
+                timed_out.set()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        t = threading.Thread(target=_kill, daemon=True, name="oracle-timeout")
+        t.start()
+        return t
+    return None
+
+
 def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync") -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
@@ -624,6 +665,8 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
     ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(
         sql, db, timeout_ms, source=source
     )
+    timed_out = threading.Event()
+    watchdog = None
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -633,6 +676,8 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
         if not is_select:
             _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
         raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}")
+    if ds.type == "oracle":
+        watchdog = _start_oracle_watchdog(conn, q_timeout, timed_out)
     try:
         result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
         if not is_select:
@@ -642,11 +687,20 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
             _write_audit(db, ds.type, clean_sql, affected, result["costMs"], source)
         return result
     except Exception as e:
+        # Oracle 看门狗超时触发(连接被强关)→ 归类为查询超时而非执行失败
+        if timed_out.is_set():
+            if not is_select:
+                _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
+            raise DbError(
+                ds.type, "TimeoutError", None,
+                f"query timed out after {q_timeout}s (oracle connection closed by watchdog)",
+            )
         if not is_select:
             _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
         de = _extract_sql_error(e, ds.type)
         raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}")
     finally:
+        timed_out.set()  # 先停看门狗再关连接,防正常关闭被误判为超时
         try:
             conn.close()
         except Exception:
@@ -695,8 +749,9 @@ class DbJobManager:
             raise HTTPException(
                 status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
             )
-        _check_qps()
         try:
+            # _check_qps 必须在 try 内:限速 429 时也要释放信号量,防槽位永久泄漏
+            _check_qps()
             with self._lock:
                 self._seq += 1
                 job_id = "dbj_%d_%04d" % (int(time.time()), self._seq)
@@ -732,16 +787,22 @@ class DbJobManager:
         conn = None
         clean_sql = ""
         is_select = False
+        timed_out = threading.Event()
         start = time.time()
         try:
             # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
             ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"], source="async")
             conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
             j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
+            watchdog = None
+            if ds.type == "oracle":
+                # Oracle 无语句级超时:看门狗超时后强关连接,中断底层查询
+                watchdog = _start_oracle_watchdog(conn, q_timeout, timed_out)
             try:
                 result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
             finally:
                 j["conn"] = None
+                timed_out.set()  # 先停看门狗再关连接,防正常关闭被误判为超时
                 try:
                     conn.close()
                 except Exception:
@@ -755,7 +816,11 @@ class DbJobManager:
             j["result"] = result
             j["state"] = "done"
         except Exception as e:
-            if j.get("cancel_requested") or (conn is not None and str(e).find("closed") >= 0):
+            if timed_out.is_set():
+                # 看门狗触发:超时失败(与"用户主动取消"区分)
+                j["error"] = f"query timed out after {q_timeout}s (oracle connection closed by watchdog)"
+                j["state"] = "failed"
+            elif j.get("cancel_requested") or (conn is not None and str(e).find("closed") >= 0):
                 # 取消导致连接关闭抛异常 → 视为用户主动停止
                 j["state"] = "cancelled"
             else:
@@ -901,7 +966,15 @@ def db_job_submit(
     require_auth(x_db_token)
     if not req.sql or not req.sql.strip():
         raise HTTPException(status_code=400, detail="sql is required")
+    # 与同步 /query 一致的长度护栏;timeoutMs 设上限,防绕过同步路径的保护
+    if len(req.sql) > MAX_SQL_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
+        )
     timeout_ms = req.timeoutMs or 3600000
+    if timeout_ms > 4 * 3600000 or timeout_ms < 1000:
+        raise HTTPException(status_code=400, detail="timeoutMs must be in [1000, 14400000]")
     job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms)
     log.info("db job submitted: %s db=%s", job_id, req.db)
     return {"code": 0, "data": {"jobId": job_id}}
@@ -1688,12 +1761,29 @@ def scripts_get(
 
 
 # ── 表目录(库→表→字段,只读元数据)────────────────────────────
+def _meta_guard() -> Generator[None, None, None]:
+    """元数据接口资源护栏(fastapi dependency):并发信号量 + QPS 限速,
+    防批量拉表/explain 并发连接把目标库打挂(与 /query、/jobs 同一套护栏)。"""
+    if not _query_semaphore.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail=f"too many concurrent requests (max={MAX_CONCURRENT})")
+    try:
+        _check_qps()
+    except Exception:
+        _query_semaphore.release()
+        raise
+    try:
+        yield
+    finally:
+        _query_semaphore.release()
+
+
 @app.get("/tables")
 def tables(
     db: str,
     detail: int = 0,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
+    _g: None = Depends(_meta_guard),
 ) -> Dict[str, Any]:
     """表列表。detail=1 时返回 [{name, comment}](含表注释),否则保持 string[] 兼容旧调用。"""
     require_auth(x_db_token)
@@ -1740,6 +1830,7 @@ def fields(
     detail: int = 0,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
+    _g: None = Depends(_meta_guard),
 ) -> Dict[str, Any]:
     """字段列表。detail=1 时返回完整元数据 [{name,type,comment,nullable,key}],
     否则保持 [{name,type}] 兼容旧调用。
@@ -1820,6 +1911,7 @@ def ddl(
     table: str,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
+    _g: None = Depends(_meta_guard),
 ) -> Dict[str, Any]:
     """生成建表 DDL:MySQL SHOW CREATE TABLE / Oracle DBMS_METADATA.GET_DDL。
     需数据源账号具备读取 DDL 的权限(SHOW VIEW / EXECUTE_CATALOG_ROLE),失败返回友好错误。"""
@@ -1872,6 +1964,7 @@ def schema(
     db: str,
     timeoutMs: int = 30000,
     x_db_token: Optional[str] = Header(default=None),
+    _g: None = Depends(_meta_guard),
 ) -> Dict[str, Any]:
     """一次性返回该数据源全部表+字段的扁平元数据(供前端 SQL 编辑器补全)。
 
@@ -2151,7 +2244,7 @@ class ExplainReq(BaseModel):
 
 @app.post("/explain")
 def explain(
-    req: ExplainReq, x_db_token: Optional[str] = Header(default=None)
+    req: ExplainReq, x_db_token: Optional[str] = Header(default=None), _g: None = Depends(_meta_guard)
 ) -> Dict[str, Any]:
     """执行计划可视化(只读,写语句 400)。
 

@@ -582,16 +582,37 @@ function dbEngine(dbName) {
   return typeof t === 'string' ? t.toLowerCase() : ''
 }
 
-/** 简易 SQL 表名提取(表级权限校验用;去掉库前缀与引号,过滤非表关键字) */
+/** 简易 SQL 表名提取(表级权限校验用;去掉库前缀与引号,过滤非表关键字)。
+ *  支持逗号交叉连接(FROM t1, t2)、STRAIGHT_JOIN 等无词边界变体,子查询括号内的
+ *  逗号不误提取;纯数字 token(如 LIMIT 10, 20)与边界关键字(LIMIT/SET/WHERE 等)不提取。 */
+const TABLE_KW_RE = /\b(?:from|join|straight_join|update|into|table)\s+([`"']?)([A-Za-z0-9_$#.\-]+)\1/gi
+// 关键字匹配后的逗号延续段需停下的边界(防止把 SELECT 列表 / LIMIT 数字吞成表名)
+const TABLE_BOUNDARY_RE = /^(?:\s|,)*\b(?:where|group\s+by|order\s+by|having|limit|union|on|and|or|left|right|inner|outer|full|cross|join|straight_join|set|values|returning)\b/i
+const TABLE_NON_TABLE_RE = /^(?:select|where|set|values|left|right|inner|outer|full|cross|on|and|or|as|limit|group|order|having|dual)$/i
 function extractTables(sql) {
-  const s = String(sql || '').replace(/\/\*[\s\S]*?\*\//g, '')
+  let s = String(sql || '').replace(/\/\*[\s\S]*?\*\//g, '')
+  // 剥离字符串字面量,防 SELECT 'INSERT INTO fake' 之类关键字误报
+  s = s.replace(/'(?:[^'\\]|\\.|'')*'/g, "''").replace(/"(?:[^"\\]|\\.|"")*"/g, '""')
   const tables = new Set()
-  const re = /\b(?:from|join|update|into|table)\s+([`"']?)([A-Za-z0-9_$#.\-]+)\1/gi
-  let m
-  while ((m = re.exec(s))) {
-    let t = String(m[2]).replace(/[`"']/g, '')
+  const add = (raw) => {
+    let t = String(raw || '').replace(/[`"']/g, '')
     if (t.includes('.')) t = t.split('.').pop()
-    if (t && !/^(select|where|set|values|left|right|inner|outer|full|cross|on|and|or|as|limit|group|order|having|dual)$/i.test(t)) tables.add(t)
+    // 纯数字(LIMIT 10,20)不入表集;关键字过滤
+    if (t && /[A-Za-z_$#]/.test(t) && !TABLE_NON_TABLE_RE.test(t)) tables.add(t)
+  }
+  let m
+  while ((m = TABLE_KW_RE.exec(s))) {
+    add(m[2])
+    // 逗号延续:FROM t1, t2, t3 逐段提取;遇到边界关键字/非标识符(如 FROM ( 子查询)即停
+    let i = TABLE_KW_RE.lastIndex
+    while (i < s.length) {
+      const rest = s.slice(i)
+      if (TABLE_BOUNDARY_RE.test(rest)) break
+      const cm = /^[\s,]*([`"']?)([A-Za-z0-9_$#.\-]+)\1/.exec(rest)
+      if (!cm) break
+      add(cm[2])
+      i += cm[0].length
+    }
   }
   return [...tables]
 }
@@ -731,6 +752,99 @@ app.post('/api/db/jobs', express.json(), async (req, res) => {
   }
 })
 
+// ── 异步任务状态查询/取消:透传黑名单已拦全部 /jobs/* 子路径,此处专用路由统一校验 ──
+// 状态查询同样按 job 归属库做数据权限矩阵校验:防止泄露他人 job 的 SQL 全文/结果,
+// 取消同理防越权停止他人的长查询(EXEC_GATES 已对 POST cancel 做模块/角色门禁)。
+async function fetchDbProxyJob(jobId) {
+  const r = await fetch(config.dbProxyUrl + '/jobs/' + encodeURIComponent(jobId), {
+    headers: { 'X-DB-Token': config.dbProxyToken || '' },
+    signal: AbortSignal.timeout(8000)
+  })
+  return r
+}
+function dbJobIdErr(jobId) {
+  return !/^dbj_\d+_\d+$/.test(String(jobId || ''))
+}
+app.get('/api/db/jobs/:jobId', async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  if (dbJobIdErr(req.params.jobId)) {
+    return res.status(400).json({ code: 400, msg: '非法 jobId' })
+  }
+  try {
+    const r = await fetchDbProxyJob(req.params.jobId)
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) {
+      const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      err.status = r.status
+      throw err
+    }
+    // 库访问权校验:job 归属库不在该用户授权内则拒绝(防 SQL 全文/结果泄露)
+    const data = body.data || {}
+    if (data.db) {
+      try {
+        checkDbAccess(req, String(data.db))
+      } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
+        throw e
+      }
+    }
+    res.json(body)
+  } catch (e) {
+    console.error('[db/jobs/:jobId]', e instanceof Error ? e.message : e)
+    const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+  }
+})
+
+app.post('/api/db/jobs/:jobId/cancel', async (req, res) => {
+  if (!config.dbProxyUrl) {
+    return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+  }
+  if (dbJobIdErr(req.params.jobId)) {
+    return res.status(400).json({ code: 400, msg: '非法 jobId' })
+  }
+  try {
+    const r = await fetchDbProxyJob(req.params.jobId)
+    const body = await r.json().catch(() => ({}))
+    if (!r.ok) {
+      const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      err.status = r.status
+      throw err
+    }
+    const data = body.data || {}
+    if (data.db) {
+      try {
+        checkDbAccess(req, String(data.db))
+      } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
+        throw e
+      }
+    }
+    const rc = await fetch(config.dbProxyUrl + '/jobs/' + encodeURIComponent(req.params.jobId) + '/cancel', {
+      method: 'POST',
+      headers: { 'X-DB-Token': config.dbProxyToken || '' },
+      signal: AbortSignal.timeout(8000)
+    })
+    const rbody = await rc.json().catch(() => ({}))
+    if (!rc.ok) {
+      const err = new Error(rbody.detail || rbody.msg || `db-proxy HTTP ${rc.status}`)
+      err.status = rc.status
+      throw err
+    }
+    res.json(rbody)
+  } catch (e) {
+    console.error('[db/jobs/:jobId/cancel]', e instanceof Error ? e.message : e)
+    const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+  }
+})
+
 // /explain 为只读执行计划接口,专用路由显式解析并转发 body:
 // PROXY_PATHS 跳过 express.json(避免与透传的 stream 转发冲突),若不在此挂路由级
 // json 解析,POST body 可能不被网关读取,故照 /api/db/jobs 的方式处理。
@@ -791,10 +905,10 @@ if (config.dbProxyUrl) {
     // 敏感路径不走透传:
     //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
     //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
-    //  - /jobs 异步任务提交由上方专用路由鉴权(写检测 + token);此处兜底拦非 POST 变体
+    //  - /jobs 异步任务提交/状态/取消均由上方专用路由鉴权(写检测 + 矩阵),此处兜底拦全部子路径
     //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
     //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path) || /^\/jobs\/?$/i.test(req.path)) {
+    if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path) || /^\/jobs(\/|$)/i.test(req.path)) {
       return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
     }
     dbProxy(req, res, next)
