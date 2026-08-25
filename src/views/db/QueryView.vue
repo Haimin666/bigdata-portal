@@ -23,6 +23,7 @@ import 'codemirror/addon/edit/matchbrackets.js'
 import 'codemirror/addon/edit/closebrackets.js'
 import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
+import 'codemirror/addon/search/searchcursor.js' // match-highlighter 的前置依赖(缺它选中词全画布高亮静默失效)
 import 'codemirror/addon/display/autorefresh.js'
 import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
@@ -2666,6 +2667,12 @@ async function copyAllTsv() {
 
   :deep(.CodeMirror-selected) {
     background: rgba(97, 175, 239, 0.25);
+  }
+
+  /* 选中词全画布高亮(match-highlighter overlay;addon 本身不带样式) */
+  :deep(.cm-matchhighlight) {
+    background: rgba(229, 192, 123, 0.28);
+    border-radius: 2px;
   }
 
   :deep(.CodeMirror-activeline-background) {
