@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
 import CodeMirror from 'codemirror'
@@ -536,6 +536,7 @@ async function initEditor() {
   cm.refresh()
   // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)+ 防抖自动保存
   cm.on('change', (_c, change) => {
+    syncRunVarBar() // ${var} 增删 → 同步画布下方参数行(setValue 换 tab 也走这里)
     if (change.origin === 'setValue') return // 程序性 setValue(切换 tab/打开文件)不触发自动保存
     const t = activeTab.value
     if (t) {
@@ -544,6 +545,7 @@ async function initEditor() {
       scheduleAutoSave(t)
     }
   })
+  syncRunVarBar() // 初始内容(恢复 tab/草稿)可能已含 ${var},挂载即同步参数行
   // ── 补全触发:输入字母/下划线后 300ms 防抖弹出(仅候选非空);浮层打开时 Tab 选词 ──
   cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
     if (change.origin !== '+input') return
@@ -1011,12 +1013,6 @@ function formatSql() {
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
-/** 一键插入日期变量(${T-N})到光标处 */
-function insertDateVar(cmd: string) {
-  if (!cm) return
-  cm.replaceSelection('${' + cmd + '}')
-  cm.focus()
-}
 
 /** 单元格待提交修改(row 为结果行在 r.rows 中的索引,由 indexOf(row) 得到) */
 interface PendingEdit {
@@ -1351,9 +1347,9 @@ async function runExplain() {
     ElMessage.warning('没有可分析的 SQL(请选中或输入语句)')
     return
   }
-  const varVals = await resolveRunVars(rawExplain)
+  const varVals = collectRunVars()
   if (varVals === null) return
-  const sql = expandSqlVars(rawExplain, varVals ?? undefined)
+  const sql = expandSqlVars(rawExplain, varVals)
   showExplain.value = true
   explainLoading.value = true
   explainError.value = ''
@@ -1615,64 +1611,53 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   }
 }
 
-// ── $ 传参:${T-N} 日期变量自动替换;自定义 ${var} 执行前弹窗填值 ─────
-const VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_-]*)\}/g // 自定义变量名:字母/下划线开头
+// ── $ 传参:自动识别 SQL 中全部 ${var},画布下方参数行内联填值,执行时替换 ─────
+const VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_-]*)\}/g // 变量名:字母/下划线开头
 
-/** 上次自定义变量取值(会话内记忆,下次执行同变量免重复输) */
+/** 当前编辑器内容检测到的变量(有序去重;空数组时参数行不渲染) */
+const runVarNames = ref<string[]>([])
+/** 各变量当前输入值(参数行内联输入框 v-model) */
+const runVarValues = reactive<Record<string, string>>({})
+/** 会话内记忆:上次执行用过的取值,同名变量再现时自动预填 */
 const varMemory = new Map<string, string>()
 
-/** 提取 SQL 中的自定义变量(去重,排除内置日期变量 T 系列) */
-function extractCustomVars(sql: string): string[] {
-  const names = new Set<string>()
-  let m: RegExpExecArray | null
+/** 编辑器内容变化/tab 切换后同步参数行:新增变量预填上次值,消失变量清输入 */
+function syncRunVarBar() {
+  const sql = cm?.getValue() ?? ''
   VAR_RE.lastIndex = 0
-  while ((m = VAR_RE.exec(sql))) {
-    if (!/^T(-?\d+)?$/.test(m[1])) names.add(m[1]) // ${T}/${T-1} 走日期替换,不弹窗
+  const names: string[] = []
+  let m: RegExpExecArray | null
+  while ((m = VAR_RE.exec(sql))) if (!names.includes(m[1])) names.push(m[1])
+  for (const n of names) {
+    if (!(n in runVarValues) && varMemory.has(n)) runVarValues[n] = varMemory.get(n)!
   }
-  return Array.from(names)
+  for (const k of Object.keys(runVarValues)) {
+    if (!names.includes(k)) delete runVarValues[k]
+  }
+  runVarNames.value = names
 }
 
-/** 弹窗收集自定义变量的值(预填上次值);取消返回 null */
-async function promptForVars(names: string[]): Promise<Map<string, string> | null> {
+/** 执行前收集参数值:有未填写的变量则提示并中止(返回 null) */
+function collectRunVars(): Map<string, string> | null {
   const values = new Map<string, string>()
-  for (const name of names) {
-    try {
-      const { value } = await ElMessageBox.prompt(
-        `变量 ${name} 的值`,
-        'SQL 参数',
-        { inputValue: varMemory.get(name) || '', inputValidator: (v) => (v !== null && v.trim() !== '' ? true : '值不能为空'), confirmButtonText: '确定', cancelButtonText: '取消' }
-      )
-      values.set(name, (value || '').trim())
-      varMemory.set(name, (value || '').trim())
-    } catch {
-      return null // 用户取消 → 中止本次执行
-    }
+  const missing: string[] = []
+  for (const n of runVarNames.value) {
+    const v = (runVarValues[n] ?? '').trim()
+    if (v) {
+      values.set(n, v)
+      varMemory.set(n, v)
+    } else missing.push(n)
+  }
+  if (missing.length) {
+    ElMessage.warning(`请先在参数行填写变量:${missing.map((n) => '${' + n + '}').join('、')}`)
+    return null
   }
   return values
 }
 
-/** 画布 SQL 变量替换:
- *  - 内置日期:${T}(今天)、${T-1}(昨天)、${T-N}(${T+N})→ yyyy-MM-dd(本地时区)
- *  - 自定义:${dt} 等 → 用 values 传入的值(执行前已弹窗收集) */
+/** 画布 SQL 变量替换:${var} → 参数行填写的值(无值保持原样) */
 function expandSqlVars(sql: string, values?: Map<string, string>): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return sql.replace(/\$\{([^}]+)\}/g, (all, rawName: string) => {
-    const name = rawName.trim()
-    if (/^T(?:[+-]\d+)?$/.test(name)) {
-      const dm = name.match(/^T([+-])(\d+)$/)
-      const d = new Date()
-      if (dm) d.setDate(d.getDate() + (dm[1] === '-' ? -1 : 1) * Number(dm[2]))
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-    }
-    return values?.get(name) ?? all // 无值保持原样(引擎报错可感知)
-  })
-}
-
-/** 收集本次执行的变量值:有自定义变量才弹窗;取消返回 null(中止执行) */
-async function resolveRunVars(rawSql: string): Promise<Map<string, string> | null | undefined> {
-  const names = extractCustomVars(rawSql)
-  if (!names.length) return undefined
-  return await promptForVars(names)
+  return sql.replace(VAR_RE, (all, name: string) => values?.get(name) ?? all)
 }
 
 /** 拆 SQL 段并过滤空段/纯注释段 */
@@ -1760,10 +1745,10 @@ async function runQuery() {
     ElMessage.warning('请输入 SQL')
     return
   }
-  // 自定义 ${var} 参数:执行前弹窗填值;取消则中止
-  const varVals = await resolveRunVars(rawSql)
+  // 自定义 ${var} 参数:从画布下方参数行读取;有未填项则提示中止
+  const varVals = collectRunVars()
   if (varVals === null) return
-  const target = expandSqlVars(rawSql, varVals ?? undefined)
+  const target = expandSqlVars(rawSql, varVals)
   // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
   if (engine.value === 'pyspark') {
     loading.value = true
@@ -2119,23 +2104,14 @@ async function copyAllTsv() {
     <div class="sql-dragbar" @mousedown="onDragStart">
       <span class="drag-dots">⠿</span>
     </div>
-    <div class="sql-hint">
-      <span>Ctrl/Cmd + Enter 执行</span>
-      <span>· Tab 缩进</span>
-      <span>· Ctrl/Cmd + Space 补全</span>
-      <span>· 拖拽分割条调整画布高度</span>
-      <!-- $ 传参:一键插入日期变量,执行时替换为 yyyy-MM-dd -->
-      <el-dropdown trigger="click" @command="insertDateVar">
-        <el-button size="small" text type="primary" class="datevar-btn">${T-1} 传参 ▾</el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="T">{{ '${T} → 今天' }}</el-dropdown-item>
-            <el-dropdown-item command="T-1">{{ '${T-1} → 昨天(常用)' }}</el-dropdown-item>
-            <el-dropdown-item command="T-7">{{ '${T-7} → 7 天前' }}</el-dropdown-item>
-            <el-dropdown-item command="T-30">{{ '${T-30} → 30 天前' }}</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+    <!-- $ 传参行:自动识别 ${var},内联填值后执行;无变量时不占位 -->
+    <div v-if="runVarNames.length" class="sql-varbar">
+      <span class="varbar-title">SQL 参数</span>
+      <span v-for="n in runVarNames" :key="n" class="var-item">
+        <code class="var-name">{{ '${' + n + '}' }}</code>
+        <el-input v-model="runVarValues[n]" class="var-input" size="small" placeholder="填写值" clearable />
+      </span>
+      <span class="varbar-tip">填写后 Ctrl/Cmd + Enter 执行</span>
     </div>
 
     <!-- 错误提示 -->
@@ -2340,6 +2316,7 @@ async function copyAllTsv() {
       </template>
       <span v-else-if="loading" class="sb-item sb-running"><el-icon class="tab-spin"><Loading /></el-icon> 执行中…</span>
       <span class="sb-spacer" />
+      <span class="sb-item sb-hints">Ctrl/Cmd + Enter 执行 · Tab 缩进 · Ctrl/Cmd + Space 补全 · 拖拽分割条调整画布高度</span>
       <span class="sb-item">{{ themeMode === 'dark' ? '深色' : '浅色' }}主题</span>
     </div>
   </div>
@@ -2815,20 +2792,40 @@ async function copyAllTsv() {
   letter-spacing: 2px;
 }
 
-.sql-hint {
-  font-size: 12px;
-  color: $muted;
+/* $ 传参行:变量 chip + 内联输入框(无变量时不渲染) */
+.sql-varbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 8px;
+  gap: 6px 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: $muted;
+  background: $panel;
+  border-top: 1px solid $border;
+  flex-shrink: 0;
 
-  .datevar-btn {
-    margin-left: 4px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  .varbar-title {
+    font-weight: 600;
+    letter-spacing: 0.5px;
   }
 
-  flex-shrink: 0;
+  .var-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .var-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(127, 127, 127, 0.14);
+  }
+
+  .var-input {
+    width: 130px;
+  }
 }
 
 .err-alert {
@@ -3216,6 +3213,11 @@ async function copyAllTsv() {
 
   .sb-spacer {
     flex: 1;
+  }
+
+  .sb-hints {
+    font-size: 11px;
+    opacity: 0.75;
   }
 }
 
