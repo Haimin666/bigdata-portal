@@ -14,7 +14,7 @@
 2. **模块隔离**:开发哪个模块,只读哪个模块的文档 + 该模块涉及的代码文件,不全局扫
 3. **子代理模式**:大改动用子代理 —— 父 agent 把模块文档摘要 + 具体任务交给子代理,子代理读代码产出,父 agent 收口集成、跑校验
 4. **校验门槛**:改后端 `node --check`;改前端 `npx vue-tsc --noEmit` + `npm run build`;改 db-proxy `python3 -m py_compile`
-5. **纪律**(详见 AGENTS.md):
+5. **纪律**(详见本文 §6 协作规则):
    - 集群 API 先查文档、限并发、低频,不反复 curl 探测
    - 真实操作类接口验证一律用假 id(如 `instanceId=999999999`),绝不触发生产任务
    - 安装/权限问题不绕道,把命令整理给用户执行
@@ -25,7 +25,8 @@
 ```
 docs/
 ├── ARCHITECTURE.md      # 总体架构(三层/前端/网关/db-proxy/数据流/配置/部署)
-├── DEVELOPMENT.md       # 本文档(流程契约)
+├── DEVELOPMENT.md       # 本文档(流程契约+协作规则)
+├── GUIDE.md             # 上手指南(架构速览/启动/代理清单/踩坑记录/验证清单;原 docs/AGENTS.md)
 └── modules/
     ├── yarn.md          # YARN 应用监控(列表/资源管理器重建/Flink UI/Spark UI)
     ├── db-query.md      # 数据库查询(db-proxy/Spark/Flink/编辑器/结果多 tab)
@@ -110,3 +111,42 @@ docs/
 - Spark UI 的 SQL/时间线/日志无 REST,只能跳原生页或 iframe
 - db-proxy `datasources.json` 启动时加载,改配置必须重启
 - 生产 docker 必须 `docker compose up -d --build`(dist 不入 git,restart 跑旧镜像)
+
+## 6. Agent 协作规则(自根目录 AGENTS.md 并入,2026-08)
+
+> 原 Reasonix 桌面端工作区规则文件已并入本节并删除,开发相关规则全部收拢在 docs/ 下。
+
+### 6.1 视觉 / 附件处理(必须遵守)
+
+Reasonix 主模型(DeepSeek)**不支持视觉**:用户直接发送图片会触发 provider 400
+(`unknown variant image_url`)。桌面端已配置 `UserPromptSubmit` hook
+(`.reasonix/hooks/vision-gate.cjs`)自动拦截**仅图片**消息:图片被登记到
+`.reasonix/hooks/pending_vision.json`,本轮被阻断(不报 400),等待下一轮处理。
+**非图片附件(pdf/docx/xlsx/zip 等)不触发 hook**——先按"纯文本类文件"直接读内容处理,必要时才走豆包。
+
+**每轮开始必查** `.reasonix/hooks/pending_vision.json`:
+
+- 不存在 → 正常处理本条消息。
+- 存在且 `consumed == false`:
+  1. 读取 `images` 列表(图片绝对路径)。
+  2. **先把 `consumed` 置为 `true` 写回文件**(防重复处理)。
+  3. 优先调用 **doubao MCP 工具** `mcp__doubao__doubao_vision`
+     (`{images: [...], prompt: "请分析这些图片"}`,路径用绝对路径);
+     若 MCP 不可用,降级 `run_skill({name: "doubao-chat"})` 走 playwright-cli 手动流程
+     (`attach_chat.sh` → fill → `run-code setInputFiles` → Enter → 等「朗读」按钮出现 → 提取豆包回答)。
+  4. **审查/交叉验证**豆包结论(可能不准确/编造),整合后回答用户,回答开头注明"已由豆包识别"。
+  5. 处理完成:**把 `consumed` 置为 `true` 写回,保留 `pending_vision.json` 文件**。
+     不要删除该文件——删除后 120 秒窗口内该附件会再次触发 hook 阻断,
+     导致"回复继续"又被拦下。保留 `consumed=true` 记录即可让 hook 放行后续消息。
+- 存在但 `consumed == true` → 图片已被处理过,**正常处理本条消息**(不要删除文件,不要重复调豆包)。
+
+**其他**:
+- 绝不把图片字节/附件内容作为消息直接发给不支持视觉的模型。
+- 非图片附件(txt/csv/md/json/log/pdf/docx 等):先直接读文件内容处理;内容是图像/扫描件时才走豆包识别。
+- 豆包输出仅作参考,涉及事实/数据需 Reasonix 交叉验证后呈现。
+
+### 6.2 文档驱动开发铁律
+
+(即本文 §2 铁律与 §3/§4 全部内容——原根 AGENTS.md 的该章节与本文重复,现以本文为准;
+ 原文要点:先读文档再动手、先改文档后改代码且同 commit、大改动用子代理、
+ 冲突时代码优先但必须回写文档。)

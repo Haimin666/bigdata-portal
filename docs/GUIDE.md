@@ -1,7 +1,8 @@
-# bigdata-portal Agent 开发指南
+# bigdata-portal 开发指南(GUIDE)
 
 > 给 AI agent / 新开发者的完整上手文档:架构、启动、代理链路、历史踩坑、配合规则。
 > 开发前必读第 6、7、8 节,踩过的坑不要重复踩。
+> 流程契约与协作规则见 [`DEVELOPMENT.md`](DEVELOPMENT.md);模块级权威上下文见 `modules/*.md`。
 
 ## 1. 项目概览
 
@@ -65,7 +66,7 @@ bigdata-portal/
 ├── scripts/dev.mjs              # 一键启动:网关 + Vite
 ├── vite.config.ts               # dev 代理(ws:true)
 ├── package.json / tsconfig.json / Dockerfile
-└── docs/AGENTS.md               # 本文档
+└── docs/GUIDE.md                # 本文档(上手指南)
 ```
 
 ## 4. 启动与开发

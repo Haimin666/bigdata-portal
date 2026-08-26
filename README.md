@@ -5,7 +5,7 @@
 - **YARN 监控**、**HDFS 文件浏览** — 原生 Vue 视图(自建 UI)
 - **海豚调度 / Stingray / OMD / StreamX** — iframe 嵌入(同源代理或跨源直连)
 
-> 完整架构与开发细节见 [`docs/AGENTS.md`](docs/AGENTS.md)(Agent 开发指南,含全部踩坑记录)。
+> 文档体系(全部在 `docs/` 下):[`GUIDE.md`](docs/GUIDE.md)(上手指南:架构速览/启动/代理清单/踩坑记录) · [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)(总体架构) · [`DEVELOPMENT.md`](docs/DEVELOPMENT.md)(开发流程契约+协作规则) · `modules/*.md`(每模块权威上下文)
 
 ## 技术栈
 
