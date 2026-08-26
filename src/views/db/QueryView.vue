@@ -3313,8 +3313,8 @@ async function copyAllTsv() {
   border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
 }
-/* spark-logs-head/title/actions 已随 SparkLogPanel 组件迁出(2026-08) */
-/* Spark Stage 进度/日志体样式已随 SparkLogPanel、EXPLAIN 弹窗样式已随 ExplainDialog 组件迁出(2026-08) */
+/* 注:上方 .spark-logs-head 仍被本组件外层头部使用,勿删;
+   Stage 进度/日志体样式已随 SparkLogPanel、EXPLAIN 弹窗样式已随 ExplainDialog 组件迁出(2026-08) */
 
 /* 提交修改确认弹窗中的完整 SQL 预览 */
 .edit-sql-preview {

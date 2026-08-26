@@ -146,7 +146,9 @@ app.delete('/api/assistant/projects/:id', wrap((req) => assistantProjects.remove
 app.get('/api/assistant/projects/:id/files', wrap((req) => assistantProjects.listFiles(req.params.id, req.query.rel || '')))
 app.get('/api/assistant/projects/:id/file', wrap((req) => assistantProjects.readFile(req.params.id, req.query.rel || '')))
 app.delete('/api/assistant/projects/:id/file', wrap((req) => assistantProjects.removeFile(req.params.id, req.query.rel || '')))
-app.patch('/api/assistant/projects/:id/file', express.json(), wrap((req) => assistantProjects.renameOrSaveFile(req.params.id, req.query.rel || '', req.body?.name || '', req.body?.content)))
+app.patch('/api/assistant/projects/:id/file', express.json(), wrap((req) => assistantProjects.renameFile(req.params.id, req.body?.rel || '', req.body?.name, req.body?.newName)))
+app.post('/api/assistant/projects/:id/dir', express.json(), wrap((req) => assistantProjects.mkdir(req.params.id, req.body?.rel || '', req.body?.name || '')))
+app.post('/api/assistant/projects/:id/file', express.json(), wrap((req) => assistantProjects.createFile(req.params.id, req.body?.rel || '', req.body?.name || '', req.body?.content)))
 app.post('/api/assistant/projects/:id/upload', express.json({ limit: '20mb' }), (req, res) => {
   try {
     res.json(assistantProjects.upload(req.params.id, req.body?.name, req.body?.contentBase64))

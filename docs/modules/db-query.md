@@ -14,7 +14,7 @@
 | 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(库→表→字段,含表/字段注释,双击表预览,复制表名/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
-| API | `src/api/db.ts`(门面)+ `src/api/db/{core,mysql-oracle,spark,Flink,meta}.ts`(2026-08 拆分) | 门面 re-export 保持 `@/api/db` 导入不变;core=公共 request/getEnabledModules/共享类型;mysql-oracle=queryDb+jobs 三件套;spark=querySpark/jobs/logs/stages/status/config/auth;Flink=queryFlink/async/connectors/prejob 全家桶;meta=脚本 CRUD/listTables/listFields/getSchema/explainSql/db-perms |
+| API | `src/api/db.ts`(门面)+ `src/api/db/{core,mysql-oracle,spark,flink,meta}.ts`(2026-08 拆分) | 门面 re-export 保持 `@/api/db` 导入不变;core=公共 request/getEnabledModules/共享类型;mysql-oracle=queryDb+jobs 三件套;spark=querySpark/jobs/logs/stages/status/config/auth;Flink=queryFlink/async/connectors/prejob 全家桶;meta=脚本 CRUD/listTables/listFields/getSchema/explainSql/db-perms |
 | 网关 | `server/routes/db.js`(2026-08 拆解后;原 `server/index.js`) | `/api/db*` 透传(黑名单拦 `/jobs` **全部子路径**,异步任务提交/状态/取消均由专用路由统一鉴权)、`/api/dbquery/query` 与 `/api/db/jobs`、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway);`server/index.js` 仅保留挂载与门禁 |
 
 > 拆解行为注记:`extractTables` 对 `` `db`.`tbl` `` 反引号双段名现只返回末段表名
@@ -41,7 +41,7 @@
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化**:el-table `@header-dragend` 按 库.表(或 SQL 前 40 字符)签名写入 localStorage,刷新保留。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
-- **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停;自动滚动到底部跟随最新 200 条(双 rAF 等 DOM 就绪再滚,用户上翻阅读旧日志时暂停跟随,回到底部附近自动恢复)
+- **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停;自动滚动到底部(双 rAF 等 DOM 就绪再滚),保留行数按日志容器可视高度动态计算 50~500 行(SparkLogPanel 维护,用户上翻阅读旧日志时暂停跟随,回到底部附近自动恢复)
 - **解锁体系(已移除)**:写权限密码验证(`/api/spark/auth` + `X-Spark-Token`)已移除 —— 写 SQL 直接执行,权限由「数据权限矩阵」管控,数据源 `readOnly` 兑底;spark/flink 网关不再校验解锁 token(db-proxy 侧 `writeToken` 密钥与资源护栏保留)
 - **编辑器**:CodeMirror 5,自实现括号补全/Tab 缩进/Shift+Tab,主题跟随全局
 - **脚本树**:`data/scripts` 本地存储,文件 = 脚本(不入库);**按用户分桶**(2026-08)——`tree.json` 按用户名分桶(`users.<username>.my` 私有桶 + `users.__shared__` 公共桶);前端固定双根:「我的文件夹」(私有,仅本人可见可写)+「共享文件夹」(**所有人可读可写**,全员协作,右键含完整菜单 + 「复制到我的文件夹」,可拖入拖出);旧版顶层 `{my:[]}` 格式首次加载自动迁移进公共桶
