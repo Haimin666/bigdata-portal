@@ -25,10 +25,12 @@ import 'codemirror/addon/selection/active-line.js'
 import 'codemirror/addon/search/match-highlighter.js'
 import 'codemirror/addon/search/searchcursor.js' // match-highlighter 的前置依赖(缺它选中词全画布高亮静默失效)
 import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
+import { useSparkLogPolling } from './composables/useSparkLogPolling'
+import { sqlSchemaHint as sqlSchemaHintImpl } from './composables/useSqlCompletion'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
@@ -715,142 +717,6 @@ onUnmounted(() => {
   }
 })
 
-// ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
-// 展示层(容器高度→保留行数/贴底滚动/Stage 进度条渲染)已拆至 components/SparkLogPanel.vue;
-// 此处仅保留轮询状态与裁剪逻辑,保留行数经组件实例读取。
-const sparkLogText = ref('')
-const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
-/** Spark job/stage 进度(statusTracker,3s 与日志同节奏轮询) */
-const sparkStageData = ref<SparkStagesData>({
-  activeJobs: [],
-  stages: [],
-  numActiveJobs: 0,
-  numActiveStages: 0
-})
-let sparkLogTimer: number | null = null
-let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
-const sparkLogFileSizes = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 }) // 最近一次 poll 返回的文件大小,clear 时作为新基线
-
-/** [stage] 完成行解析(由 db-proxy 在查询结束时写入 audit 日志):
- *   [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name> */
-const stageDoneLineRe = /\[stage\] done stage=(\d+) status=(\w+) tasks=(\d+)\/(\d+) name=(.*)$/
-function parseStageDoneLines(chunk: string): SparkStage[] {
-  const out: SparkStage[] = []
-  for (const line of chunk.split('\n')) {
-    const m = line.match(stageDoneLineRe)
-    if (!m) continue
-    const done = Number(m[3])
-    const total = Number(m[4])
-    out.push({
-      stageId: Number(m[1]),
-      name: m[5],
-      status: m[2].toUpperCase(),
-      numTasks: total,
-      completedTasks: done,
-      failedTasks: 0
-    })
-  }
-  return out
-}
-/** 把 [stage] 完成行合并进面板状态(终态,直接覆盖/新增;完成后仍可追溯) */
-function applyParsedStages(stages: SparkStage[]) {
-  if (!stages.length) return
-  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
-  for (const s of stages) map.set(s.stageId, s)
-  sparkStageData.value = {
-    ...sparkStageData.value,
-    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
-  }
-}
-/** 把 statusTracker 活跃 stage 合并进面板状态(终态不被 RUNNING 覆盖) */
-function applySparkStages(st: SparkStagesData) {
-  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
-  for (const s of st.stages) {
-    const prev = map.get(s.stageId)
-    if (prev && (prev.status === 'SUCCEEDED' || prev.status === 'FAILED')) continue
-    map.set(s.stageId, s)
-  }
-  sparkStageData.value = {
-    activeJobs: st.activeJobs,
-    numActiveJobs: st.numActiveJobs,
-    numActiveStages: st.numActiveStages,
-    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
-  }
-}
-
-/** 拉取 spark 日志增量并追加(基线由 clearSparkLogs 在查询开始前建立,这里读到的都是新增) */
-async function pollSparkLogs() {
-  const seq = sparkLogSeq
-  try {
-    const data = await sparkLogs(sparkLogOffsets.value)
-    if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
-    sparkLogFileSizes.value = data.files
-    if (data.content) {
-      sparkLogText.value += data.content
-      // 保留行数按日志容器可视高度动态计算(由 SparkLogPanel 维护,填满即滚动打印)
-      const maxLogLines = sparkLogPanelRef.value?.maxLines ?? 200
-      const lines = sparkLogText.value.split('\n')
-      if (lines.length > maxLogLines) sparkLogText.value = lines.slice(-maxLogLines).join('\n')
-      // 解析 [stage] 完成行 → 更新 Stage 进度(查询结束后由 db-proxy 写入)
-      applyParsedStages(parseStageDoneLines(data.content))
-    }
-    sparkLogOffsets.value = data.offsets
-    // spark 引擎:同节奏轮询 job/stage 进度(statusTracker,与 [stage] 行按 stageId 合并)
-    if (engine.value === 'sparksql' || engine.value === 'pyspark') {
-      try {
-        const st = await sparkStages()
-        if (seq === sparkLogSeq) applySparkStages(st)
-      } catch {
-        /* stage 接口不可用不影响日志 */
-      }
-    }
-  } catch {
-    /* 日志接口失败不打断查询 */
-  }
-}
-
-function startSparkLogPolling() {
-  stopSparkLogPolling()
-  activePane.value = 0 // 查询时固定切到第一个 tab(日志)
-  void pollSparkLogs()
-  sparkLogTimer = window.setInterval(() => void pollSparkLogs(), 3000)
-}
-
-function stopSparkLogPolling() {
-  if (sparkLogTimer != null) {
-    window.clearInterval(sparkLogTimer)
-    sparkLogTimer = null
-  }
-}
-
-/** 清空并建立新基线:offset 跳到已知文件末尾,新查询只展示新增日志。
- *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志(含旧查询的 [stage] 行)。 */
-async function clearSparkLogs() {
-  sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
-  sparkLogText.value = ''
-  sparkStageData.value = { activeJobs: [], stages: [], numActiveJobs: 0, numActiveStages: 0 }
-  if (sparkLogFileSizes.value.jvm === 0 && sparkLogFileSizes.value.audit === 0) {
-    try {
-      const base = await sparkLogs({ jvm: 0, audit: 0 })
-      sparkLogFileSizes.value = base.files
-    } catch {
-      /* 探基线失败则沿用 {0,0},代价是本次会读到历史日志 */
-    }
-  }
-  sparkLogOffsets.value = { ...sparkLogFileSizes.value }
-}
-
-/** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
-const logEmptyHint = computed(() => {
-  if (engine.value !== 'sparksql' && engine.value !== 'pyspark' && engine.value !== 'flinksql') {
-    return '(该引擎不产生引擎日志)'
-  }
-  if (loading.value) return '(等待引擎输出…)'
-  const cur = activePane.value > 0 ? results.value[activePane.value - 1] : null
-  if (cur?.error) return '(查询失败,详见结果 tab 错误信息;下方为引擎日志)'
-  return '(查询成功,无引擎日志输出)'
-})
-
 // 画布高度(可拖拽)
 const canvasHeight = ref(280)
 const MIN_H = 120
@@ -880,61 +746,15 @@ function getSql(): string {
   return cm ? cm.getValue() : ''
 }
 
-/** 按分号切分 SQL 段(跳过字符串/反引号/注释内的分号) */
-function splitSqlSegments(text: string): { start: number; end: number; sql: string }[] {
-  const segs: { start: number; end: number; sql: string }[] = []
-  let segStart = 0
-  let i = 0
-  let inSingle = false
-  let inDouble = false
-  let inBacktick = false
-  let inLineComment = false
-  let inBlockComment = false
-  while (i < text.length) {
-    const ch = text[i]
-    const next = text[i + 1]
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false
-    } else if (inBlockComment) {
-      if (ch === '*' && next === '/') {
-        inBlockComment = false
-        i++
-      }
-    } else if (inSingle) {
-      if (ch === "'") {
-        if (next === "'") i++
-        else inSingle = false
-      }
-    } else if (inDouble) {
-      if (ch === '"') inDouble = false
-    } else if (inBacktick) {
-      // MySQL 反引号标识符(可含分号,如 `a;b`),遇到闭合反引号退出
-      if (ch === '`') inBacktick = false
-    } else {
-      if (ch === '-' && next === '-') {
-        inLineComment = true
-        i++
-      } else if (ch === '/' && next === '*') {
-        inBlockComment = true
-        i++
-      } else if (ch === "'") {
-        inSingle = true
-      } else if (ch === '"') {
-        inDouble = true
-      } else if (ch === '`') {
-        inBacktick = true
-      } else if (ch === ';') {
-        segs.push({ start: segStart, end: i + 1, sql: text.slice(segStart, i + 1) })
-        segStart = i + 1
-      }
-    }
-    i++
-  }
-  if (segStart < text.length) {
-    segs.push({ start: segStart, end: text.length, sql: text.slice(segStart) })
-  }
-  return segs
-}
+import {
+  splitSqlSegments,
+  parseCellValue,
+  sqlLiteral,
+  escapeHtml,
+  findRowKey,
+  maskFormatSql,
+  rowsToTsv
+} from './composables/useSqlParse'
 
 /**
  * 待执行内容:优先选中;未选中时 SQL 取光标所在段(分号切分),python 取全文。
@@ -1019,22 +839,7 @@ function formatSql() {
   }
   const s = cm.getValue().trim()
   if (!s) return
-  // 先屏蔽字符串字面量/注释(替换为占位符),避免关键字误替换破坏字面量内容
-  const protectedParts: string[] = []
-  const masked = s.replace(
-    /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|--[^\n]*|\/\*[\s\S]*?\*\//g,
-    (m) => {
-      protectedParts.push(m)
-      return `\u0000${protectedParts.length - 1}\u0000`
-    }
-  )
-  const keywords = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'UNION', 'FETCH', 'OFFSET']
-  let out = masked
-  for (const kw of keywords) {
-    out = out.replace(new RegExp(`\\b${kw}\\b`, 'gi'), (m: string) => `\n${m.toUpperCase()}`)
-  }
-  out = out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => protectedParts[Number(i)] ?? '')
-  cm.setValue(out.replace(/\n{2,}/g, '\n').trim())
+  cm.setValue(maskFormatSql(s))
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
@@ -1073,6 +878,31 @@ const MAX_RESULTS = 20
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
+
+// ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
+// 展示层(容器高度→保留行数/贴底滚动/Stage 进度条渲染)在 components/SparkLogPanel.vue;
+// 轮询状态与裁剪逻辑迁至 composables/useSparkLogPolling.ts(下方 useSparkLogPolling() 装配)。
+const {
+  sparkLogText,
+  sparkStageData,
+  logEmptyHint,
+  pollSparkLogs,
+  startSparkLogPolling: _startSparkPolling,
+  stopSparkLogPolling,
+  clearSparkLogs
+} = useSparkLogPolling({
+  engine,
+  loading,
+  activePane,
+  results,
+  panelRef: sparkLogPanelRef
+})
+/** 查询开始时的日志启动入口:固定切到第一个 tab(日志)再开轮询(保持原行为) */
+function startSparkLogPolling() {
+  activePane.value = 0
+  _startSparkPolling()
+}
+
 // 激活日志面板(切回/首次显示)时滚到底:滚动逻辑在 SparkLogPanel 内部,
 // 这里仅触发其贴底方法(避免面板停在上方需手动下拖)。
 // 注意:必须在 activePane 声明之后定义,watch 创建时会立即同步读取源 getter,
@@ -1182,30 +1012,10 @@ function cancelCellEdit() {
   editingCell.value = null
 }
 
-/** 输入文本按原值类型还原(number 尽量转数值,其余保持字符串) */
-function parseCellValue(oldVal: unknown, raw: string): unknown {
-  if (typeof oldVal === 'number') {
-    const n = Number(raw)
-    return Number.isNaN(n) ? raw : n
-  }
-  if (typeof oldVal === 'boolean') return raw === 'true'
-  return raw
-}
-
-/** SQL 字面量:数字/布尔/null 原样,字符串/日期用单引号并转义 ''。
- *  isOracle=true 时不再双写反斜杠:Oracle 无此转义语义,双写 \ 会改变存储值。 */
-function sqlLiteral(v: unknown, isOracle = false): string {
-  if (v == null) return 'NULL'
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-  if (isOracle) return `'${String(v).replace(/'/g, "''")}'`
-  // MySQL/Doris 字符串字面量中反斜杠是转义符:先转义 \ 再转义 '
-  return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
-}
+/** 输入文本按原值类型还原(实现在 composables/useSqlParse.ts,此处 re-export 供模板使用) */
+// parseCellValue / sqlLiteral / escapeHtml / findRowKey / rowsToTsv 均已迁出
 
 /** HTML 转义(确认弹窗展示完整 SQL 用) */
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-}
 
 /** 按 row 分组生成 UPDATE 语句数组(每条单语句;MySQL 反引号 / Oracle 双引号;主键列取当前行内值) */
 function buildUpdateSql(r: QueryResultItem): string[] {
@@ -1246,13 +1056,7 @@ function buildUpdateSql(r: QueryResultItem): string[] {
   return stmts
 }
 
-/** 在 row 中按大小写不敏感查找列名对应的键(找不到返回原列名) */
-function findRowKey(row: Record<string, unknown>, col: string): string {
-  if (col in row) return col
-  const upper = col.toUpperCase()
-  const hit = Object.keys(row).find((k) => k.toUpperCase() === upper)
-  return hit || col
-}
+/** 在 row 中按大小写不敏感查找列名对应的键(实现迁至 composables/useSqlParse.ts,导入使用) */
 
 /** 提交修改:确认完整 SQL → 确保解锁 → queryDb 逐条执行 → 清空并自动重查 */
 async function commitEdits() {
@@ -1393,81 +1197,10 @@ async function runExplain() {
   }
 }
 
-// ── Schema 补全缓存(按 db 缓存表+列元数据,首次补全时按需拉取)──
-interface SchemaMeta {
-  tables: Array<{ name: string; comment?: string; columns: Array<{ name: string; type?: string }> }>
-}
-const schemaCache = new Map<string, SchemaMeta>()
-
-/** 取 db 的 schema 元数据(缓存命中直接返回,未命中调 getSchema) */
-async function ensureSchema(dbName: string): Promise<SchemaMeta | null> {
-  const hit = schemaCache.get(dbName)
-  if (hit) return hit
-  try {
-    const data = await getSchema(dbName)
-    const meta: SchemaMeta = { tables: data.tables || [] }
-    schemaCache.set(dbName, meta)
-    return meta
-  } catch {
-    return null // 拉取失败静默,仅无补全
-  }
-}
-
-/** 常用 SQL 关键字(补全候选) */
-const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE', 'SET', 'VALUES', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'BETWEEN', 'LIKE']
-
-/** 收集编辑器中已出现的标识符(文中词提示):去重、排除光标前正在输入的前缀本身 */
-function collectDocWords(cm: CodeMirror.Editor, prefix: string): string[] {
-  const words = new Set<string>()
-  const re = /[A-Za-z_][A-Za-z0-9_$]{2,}/g // 长度≥3 的标识符(过滤单双字母噪声)
-  for (let l = 0; l < cm.lineCount(); l++) {
-    const line = cm.getLine(l)
-    let mm: RegExpExecArray | null
-    re.lastIndex = 0
-    while ((mm = re.exec(line))) {
-      const w = mm[0]
-      if (w.toLowerCase() !== prefix.toLowerCase()) words.add(w)
-    }
-  }
-  return Array.from(words)
-}
-
-/** 自定义 SQL 补全实现:schema 表/列 + 关键字 + 编辑器文中词(如输入过 dwd_lion_cs,输 dwd 即提示);schema 未就绪时退化为关键字+文中词,不阻塞等待 */
+// Schema 补全(缓存/点语法列提示/关键字+文中词)迁至 composables/useSqlCompletion.ts;
+// 当前 db 经参数传入,保持按库缓存与退化策略不变。
 async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | null> {
-  const cur = cm.getCursor()
-  const before = cm.getLine(cur.line).slice(0, cur.ch)
-  // 光标前标识符:支持 `表名.列名`(点号前后各一段)
-  const m = before.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)
-  // schema 未就绪时不再 return null:仍提供关键字/文中词提示
-  const meta = db.value ? await ensureSchema(db.value) : null
-  if (!m) {
-    if (!meta) return null
-    return { list: [], from: cur, to: cur }
-  }
-  const full = m[1]
-  const dotIdx = full.lastIndexOf('.')
-  let list: string[] = []
-  let fromCh: number
-  if (dotIdx >= 0 && meta) {
-    // 点语法列补全必须有 schema;无 schema 时退化为关键字/文中词
-    const tbl = full.slice(0, dotIdx)
-    const colPrefix = full.slice(dotIdx + 1).toLowerCase()
-    const t = meta.tables.find((x) => x.name.toLowerCase() === tbl.toLowerCase())
-    if (t) {
-      list = t.columns.filter((c) => c.name.toLowerCase().startsWith(colPrefix)).map((c) => c.name)
-      fromCh = cur.ch - (full.length - dotIdx - 1)
-      if (!list.length) return null
-      return { list: Array.from(new Set(list)), from: { line: cur.line, ch: fromCh }, to: cur }
-    }
-  } else {
-    const prefix = full.toLowerCase()
-    list.push(...SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(prefix)))
-  }
-  // 文中词提示(表名列名之外):当前画布出现过的标识符(输入过 dwd_lion_cs 后,输 dwd 即可提示);点语法时用列前缀过滤
-  const wordPrefix = (dotIdx >= 0 ? full.slice(dotIdx + 1) : full).toLowerCase()
-  list.push(...collectDocWords(cm, wordPrefix).filter((w) => w.toLowerCase().startsWith(wordPrefix)))
-  if (!list.length) return null
-  return { list: Array.from(new Set(list)), from: { line: cur.line, ch: cur.ch - wordPrefix.length }, to: cur }
+  return sqlSchemaHintImpl(cm, db.value)
 }
 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
@@ -2028,17 +1761,7 @@ async function copyCellSmart(val: unknown) {
   await copyCell(val)
 }
 
-/** 行记录转 TSV(带表头;null 输出空串) */
-function rowsToTsv(rows: Record<string, unknown>[], cols: string[]): string {
-  const esc = (v: unknown) => {
-    const s = v == null ? '' : String(v)
-    // 含制表符/换行的字段用双引号包围并转义,防止破坏 TSV 结构
-    return /[\t\n"]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
-  }
-  const head = cols.map(esc).join('\t')
-  const body = rows.map((row) => cols.map((c) => esc(row[c])).join('\t')).join('\n')
-  return head + '\n' + body
-}
+/** 行记录转 TSV(实现迁至 composables/useSqlParse.ts,导入使用) */
 
 /** 复制当前分页 */
 async function copyPageTsv() {

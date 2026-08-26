@@ -8,19 +8,19 @@
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/db/QueryView.vue` | 主工作台**容器**:引擎/数据源下拉、CodeMirror 编辑器、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史、解锁;支持双击表目录表节点生成预览查询自动执行;结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;编辑器 **schema 驱动补全**(Ctrl+Space);日志轮询与裁剪状态保留在此 |
+| 视图 | `src/views/db/QueryView.vue` + `composables/`(2026-08 拆分) | 主工作台:引擎/数据源下拉、CodeMirror 编辑器、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史;双击表目录表节点生成预览查询自动执行;结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;编辑器 **schema 驱动补全**(Ctrl+Space)。纯逻辑已抽至 `composables/useSqlParse.ts`(SQL 切分/字面量/TSV 导出)、`useSparkLogPolling.ts`(日志轮询/[stage] 解析)、`useSqlCompletion.ts`(schema 缓存+补全);QueryView 保留编辑器实例与组件状态装配 |
 | 视图 | `src/views/db/components/SparkLogPanel.vue` | Spark 日志终端(2026-08 拆出):增量日志滚动打印(容器高度→保留行数,ResizeObserver)、贴底滚动、Stage 进度条;父组件经 ref 读 `maxLines` 裁剪日志,刷新/清空按钮 emit 回父级 |
 | 视图 | `src/views/db/components/ExplainDialog.vue` | EXPLAIN 执行计划弹窗(2026-08 拆出):树/表二选一渲染 + explainNodeLabel;数据获取(runExplain)留在 QueryView |
 | 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(库→表→字段,含表/字段注释,双击表预览,复制表名/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | API | `src/api/db.ts`(门面)+ `src/api/db/{core,mysql-oracle,spark,flink,meta}.ts`(2026-08 拆分) | 门面 re-export 保持 `@/api/db` 导入不变;core=公共 request/getEnabledModules/共享类型;mysql-oracle=queryDb+jobs 三件套;spark=querySpark/jobs/logs/stages/status/config/auth;Flink=queryFlink/async/connectors/prejob 全家桶;meta=脚本 CRUD/listTables/listFields/getSchema/explainSql/db-perms |
-| 网关 | `server/routes/db.js`(2026-08 拆解后;原 `server/index.js`) | `/api/db*` 透传(黑名单拦 `/jobs` **全部子路径**,异步任务提交/状态/取消均由专用路由统一鉴权)、`/api/dbquery/query` 与 `/api/db/jobs`、`/api/spark/*`(spark-gateway)、`/api/flink/*`(flink-gateway);`server/index.js` 仅保留挂载与门禁 |
+| 网关 | `server/routes/db/` 目录(2026-08 二次拆解;原 `server/index.js` → `routes/db.js`)。`mysql-oracle.js`:`/api/db*` 透传(黑名单拦 `/jobs` **全部子路径**,异步任务提交/状态/取消均由专用路由统一鉴权)、`/api/dbquery/query`、`/api/db-perms`;`spark.js`:`/api/spark/*`(spark-gateway);`flink.js`:`/api/flink/*`(flink-gateway);`shared.js`:写防线 isSparkWriteSql/X-Spark-Token 体系;`server/index.js` 仅保留挂载与门禁 |
 
 > 拆解行为注记:`extractTables` 对 `` `db`.`tbl` `` 反引号双段名现只返回末段表名
 > (`tbl`,拆解前会把 `db`、`tbl` 都当表名);表级白名单校验因此更精确,无放宽。
 
-| 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发,**元数据接口同样挂载**);`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN)、写审计(audit/audit-db.log)** |
+| 服务 | `services/db-proxy/`(2026-08 拆分:装配层 `main.py`(约 50 行,FastAPI app+include_router)+ 11 个 `dbp_*.py` 平铺模块:`dbp_core` 配置/护栏/鉴权、`dbp_datasources` 连接注册表、`dbp_sqlguard` SQL 护栏、`dbp_audit` 写审计、`dbp_dbaccess` 执行/错误/超时、`dbp_engines` Spark/Flink 单例、5 个 `dbp_routers_*`(core/spark/flink/scripts/meta,48 端点)) | `/query`(MySQL/Oracle/Doris)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发,**元数据接口同样挂载**);`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN)、写审计(audit/audit-db.log)**;运行方式不变:`python3 main.py` |
 | 服务 | `services/db-proxy/spark_engine.py` | 常驻 SparkSession 执行 |
 | 服务 | `services/db-proxy/flink_engine.py` / `flink_prejob.py` / `flink_connectors.py` | Flink 三通道 |
 

@@ -11,7 +11,7 @@ import cookieParser from 'cookie-parser'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import config from './config.js'
 import { setupAuth } from './auth.js'
-import { setupDbRoutes } from './routes/db.js'
+import { setupDbRoutes } from './routes/db/index.js'
 import { setupProxy, setupWsUpgrade } from './routes/proxy.js'
 
 // http-proxy-middleware v3 每个代理实例都会向同一 server 注册 close 监听
