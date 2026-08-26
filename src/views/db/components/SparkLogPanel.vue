@@ -5,9 +5,8 @@
 //   1. 展示日志文本 + 空态提示;
 //   2. 按容器可视高度动态计算保留行数(updateMaxLogLines)并在内容变化后贴底滚动;
 //   3. Stage 进度条渲染。
-import { ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { SparkStage, SparkStagesData } from '@/api/db'
-import LogViewer from '@/components/LogViewer.vue'
 
 const props = defineProps<{
   logText: string
@@ -18,22 +17,52 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: 'refresh'): void; (e: 'clear'): void }>()
 
-// 轮询端保留行数:固定 500 行上限(原按容器高度动态计算,现日志体为 Monaco 只读视图,
-// 自带虚拟滚动,大文本不卡;轮询端裁剪仅用于控制传输体积)
-const maxLines = ref(500)
+const LOG_LINE_HEIGHT = 20 // 12px 字体 × 1.55 行高 ≈ 18.6px,取整留余量
+
+const box = ref<HTMLElement | null>(null)
+const maxLines = ref(200)
+
+/** 容器可视高度能容纳的行数(50~500 夹取);由 ResizeObserver 在尺寸变化时重算 */
+function updateMaxLogLines() {
+  const el = box.value
+  if (!el) return
+  const visible = Math.floor((el.clientHeight - 24) / LOG_LINE_HEIGHT) // 减 padding 上下 12px×2
+  maxLines.value = Math.max(50, Math.min(500, visible))
+}
 
 defineExpose({
   /** 供父级轮询读取当前保留行数(裁剪日志用) */
   maxLines,
-  /** 兼容旧调用点(切页签时父级会调);Monaco 视图自带贴底,无需额外处理 */
-  updateMaxLogLines() {}
+  updateMaxLogLines
 })
 
-// 页签激活时触发一次刷新语义保留(内容 watch 由 LogViewer 内部处理贴底)
+// 内容增量/页签切换后自动贴底(两帧等 DOM 就绪再取 scrollHeight,才能精确到底)
 watch(
-  () => props.active,
-  () => {}
+  () => [props.logText, props.active] as const,
+  ([, act], [, prevAct]) => {
+    if (!act && prevAct === false) return
+    if (act) void scrollToBottom()
+  }
 )
+
+function scrollToBottom() {
+  const el = box.value
+  if (!el) return
+  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    el.scrollTop = el.scrollHeight
+  })))
+}
+
+let resizeObserver: ResizeObserver | null = null
+onMounted(() => {
+  resizeObserver = new ResizeObserver(() => updateMaxLogLines())
+  if (box.value) resizeObserver.observe(box.value)
+  updateMaxLogLines()
+})
+onUnmounted(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
 
 // ── Stage 渲染辅助(逐字迁自 QueryView)─────────────────────
 function stagePct(s: SparkStage): number {
@@ -47,7 +76,6 @@ function stageProgressStatus(s: SparkStage): '' | 'success' | 'exception' {
 function stageStatusClass(s: string): string {
   return String(s || 'UNKNOWN').toLowerCase()
 }
-
 </script>
 
 <template>
@@ -81,8 +109,7 @@ function stageStatusClass(s: string): string {
         />
       </div>
     </div>
-    <!-- 日志体:通用 LogViewer(Monaco 只读,自动贴底);空态文案沿用 logEmptyHint -->
-    <LogViewer class="spark-logs-body" :text="logText" :empty="emptyHint" />
+    <pre ref="box" class="spark-logs-body">{{ logText || emptyHint }}</pre>
   </div>
 </template>
 

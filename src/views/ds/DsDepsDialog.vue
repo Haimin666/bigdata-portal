@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { useResizeObserver } from '@vueuse/core'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import G6 from '@antv/g6'
@@ -296,9 +295,11 @@ function renderChart() {
 
   // 窗口 resize 自适应
   graph.on('canvas:click', () => {})
-  useResizeObserver(g6El, () => {
+  const ro = new ResizeObserver(() => {
     if (g6El.value) graph?.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
   })
+  ro.observe(g6El.value)
+  ;(graph as any).__ro = ro
 }
 
 async function load() {
@@ -521,9 +522,11 @@ function renderTaskGraph() {
     const m = evt.item.getModel()
     ElMessage.info(`任务: ${m.label} (${m.taskType || '未知类型'})`)
   })
-  useResizeObserver(taskG6El, () => {
+  const ro = new ResizeObserver(() => {
     if (taskG6El.value) taskGraphInst?.changeSize(taskG6El.value.clientWidth, taskG6El.value.clientHeight)
   })
+  ro.observe(taskG6El.value)
+  ;(taskGraphInst as any).__ro = ro
 }
 
 async function loadTaskGraph() {

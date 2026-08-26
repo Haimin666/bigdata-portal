@@ -17,7 +17,6 @@ import {
   type TableFieldDetail
 } from '@/api/db'
 import { copyText } from '@/utils/clipboard'
-import { fmtHistTime } from '@/utils/datetime'
 import { useAuthStore } from '@/store/auth'
 
 defineOptions({ name: 'SqlTreePanel' })
@@ -280,9 +279,15 @@ function loadHistory() {
   favList.value = readStore(favKey())
 }
 
-/** 时间格式:今天 HH:mm,跨天 MM-DD HH:mm(dayjs 统一) */
+/** 时间格式:今天 HH:mm,跨天 MM-DD HH:mm */
 function formatTime(ts: number): string {
-  return fmtHistTime(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
 /** 点击历史/收藏条目:回填编辑器(不自动执行);有缓存结果则一并交给父组件直接展示 */

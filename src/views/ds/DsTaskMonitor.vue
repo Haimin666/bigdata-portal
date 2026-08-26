@@ -15,11 +15,9 @@ import {
   type DsTaskInstance
 } from '@/api/ds'
 import { formatTimestamp } from '@/utils/format'
-import { dsRangeDates } from '@/utils/datetime'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
-import LogViewer from '@/components/LogViewer.vue'
 import DsDepsPanel from './DsDepsPanel.vue'
 import { searchWorkflows, rerunInstances, rerunFromNode, refreshDeps, fetchDepsStatus } from '@/api/dsDeps'
 import { useAuthStore } from '@/store/auth'
@@ -111,7 +109,19 @@ function isRunning(state: string): boolean {
 /** 时间范围 → [startDate, endDate],海豚 API 格式 yyyy-MM-dd HH:mm:ss
  *  today = 当天 00:00:00 → 现在(本地时区);其余 = 近 N 天 */
 function rangeDates(): { start?: string; end?: string } {
-  return dsRangeDates(rangeKey.value) // dayjs 统一:today=当天 00:00 → 现在;其余近 N 天
+  const now = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  if (rangeKey.value === 'today') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    return { start: fmt(start), end: fmt(now) }
+  }
+  const hours: Record<string, number> = { '1d': 24, '3d': 24 * 3, '7d': 24 * 7 }
+  const h = hours[rangeKey.value]
+  if (!h) return {}
+  const start = new Date(now.getTime() - h * 3600 * 1000)
+  return { start: fmt(start), end: fmt(now) }
 }
 
 // 请求序号:防止快速切换筛选/项目/分页时旧响应覆盖新结果
@@ -876,8 +886,7 @@ async function onRefreshDeps() {
     <!-- 日志弹窗 -->
     <el-dialog v-model="logVisible" title="任务日志" width="70%" top="4vh">
       <div v-loading="logLoading" class="log-box">
-        <!-- 日志体:通用 LogViewer(Monaco 只读) -->
-        <LogViewer :text="logContent" empty="暂无日志" height="100%" />
+        <pre>{{ logContent || '暂无日志' }}</pre>
       </div>
       <template #footer>
         <el-button :loading="logLoading" @click="loadLog(true)">加载更多</el-button>
@@ -1078,8 +1087,20 @@ async function onRefreshDeps() {
 }
 
 .log-box {
-  height: 60vh; /* LogViewer(Monaco)内部自带滚动,容器定高即可 */
+  max-height: 60vh;
+  overflow: auto;
+  background: #1e1e1e;
   border-radius: 4px;
-  overflow: hidden;
+  padding: 10px;
+}
+
+.log-box pre {
+  margin: 0;
+  color: #d4d4d4;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 </style>

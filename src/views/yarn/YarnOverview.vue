@@ -2,8 +2,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import type { ClusterMetrics, QueueResources } from '@/types/yarn'
 import { formatMem, progressColor } from '@/utils/format'
-import EChart from '@/components/EChart.vue'
-import type { EChartsOption } from 'echarts'
 
 defineOptions({ name: 'YarnOverview' })
 
@@ -76,49 +74,6 @@ function queueConfigText(q: QueueResources): string {
 
 const hasData = computed(() => memTotal.value > 0 || props.queueTree.length > 0)
 
-// ── 队列内存占比图(echarts 横向条形;只取一级队列,含子级聚合)──
-const queueChartOption = computed<EChartsOption>(() => {
-  const roots = props.queueTree
-  const names = roots.map((q) => q.queueName)
-  // used/quota 百分比(与表格 memUsage 同源)
-  const pcts = roots.map((q) => memUsage(q))
-  const usedMem = roots.map((q) => Math.round(q.memory / 1024)) // GiB 展示
-  return {
-    tooltip: {
-      trigger: 'item',
-      formatter: (pp: unknown) => {
-        const p = pp as { name?: string; value?: number; dataIndex?: number }
-        const i = p.dataIndex ?? 0
-        const q = roots[i]
-        if (!q) return ''
-        return `<b>${q.queueName}</b><br/>已用 ${formatMem(q.memory, props.humanize)} / 配额 ${formatMem(queueMemQuota(q), props.humanize)}<br/>占用 ${memUsage(q)}% · 活跃应用 ${q.numActiveApps ?? 0}`
-      }
-    },
-    grid: { left: 8, right: 40, top: 8, bottom: 8, containLabel: true },
-    xAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
-    yAxis: { type: 'category', data: names, inverse: true, axisTick: { show: false } },
-    series: [
-      {
-        name: '内存占用',
-        type: 'bar',
-        data: pcts,
-        barMaxWidth: 14,
-        itemStyle: { borderRadius: [0, 4, 4, 0] },
-        label: {
-          show: true,
-          position: 'right',
-          formatter: (pp: unknown) => {
-          const p = pp as { dataIndex?: number }
-          return `${pcts[p.dataIndex ?? 0]}% · ${usedMem[p.dataIndex ?? 0]}Gi`
-        },
-          fontSize: 11,
-          color: '#8a94a3'
-        }
-      }
-    ]
-  }
-})
-
 // 队列树刷新后保持用户上次手动展开的行:
 // 不再用 tableKey 重建表格(会丢展开态),数据更新时对已展开的 queueName 重新 toggleRowExpansion。
 const tableRef = ref()
@@ -168,10 +123,6 @@ watch(
     <!-- 各队列资源使用情况(树形) -->
     <div class="queue-panel">
       <div class="panel-title">队列资源使用</div>
-      <!-- 一级队列内存占用占比图(echarts) -->
-      <div v-if="queueTree.length" class="queue-chart">
-        <EChart :option="queueChartOption" height="180px" />
-      </div>
       <el-table
         v-if="queueTree.length"
         ref="tableRef"
@@ -260,10 +211,6 @@ watch(
   font-size: 13px;
   font-weight: 600;
   color: $text;
-}
-
-.queue-chart {
-  margin-bottom: 10px;
 }
 
 .queue-panel {

@@ -1,5 +1,3 @@
-import { fmtTimestampHuman } from './datetime'
-
 import type { StatusColor } from '@/types/yarn'
 
 export function yarnStateColor(state: string): StatusColor {
@@ -39,7 +37,14 @@ export function yarnStateHex(state: string): string | undefined {
 export function formatTimestamp(ts: number, humanize: boolean): string {
   if (!ts) return 'n/a'
   if (!humanize) return String(ts)
-  return fmtTimestampHuman(ts) // dayjs 统一(相对时间中文文案,格式固定不随浏览器)
+  const date = new Date(ts)
+  const diff = Date.now() - ts
+  let rel: string
+  if (diff < 60000) rel = '刚刚'
+  else if (diff < 3600000) rel = `${Math.floor(diff / 60000)} 分钟前`
+  else if (diff < 86400000) rel = `${Math.floor(diff / 3600000)} 小时前`
+  else rel = `${Math.floor(diff / 86400000)} 天前`
+  return `${date.toLocaleString()} (${rel})`
 }
 
 export function formatElapsed(ms: number, humanize: boolean): string {

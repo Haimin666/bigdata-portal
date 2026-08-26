@@ -14,20 +14,6 @@ const gatewayProxy = {
 
 export default defineConfig({
   plugins: [vue()],
-  // Monaco Editor worker 配置(vite 官方推荐方式):语法高亮/补全在 worker 计算,主线程不卡
-  worker: {
-    format: 'es'
-  },
-  build: {
-    rollupOptions: {
-      output: {
-        // Monaco 体积大(~3MB 源码),单独分包避免拖累业务 chunk;manualChunks 需为函数形态以稳定拆分
-        manualChunks(id) {
-          if (id.includes('node_modules/monaco-editor')) return 'monaco-editor'
-        }
-      }
-    }
-  },
   css: {
     preprocessorOptions: {
       scss: {

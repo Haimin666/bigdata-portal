@@ -2,8 +2,6 @@
 import { computed } from 'vue'
 import { formatBytes, progressColor } from '@/utils/format'
 import type { HdfsDataNodeInfo, HdfsDiskOverview } from '@/types/hdfs'
-import EChart from '@/components/EChart.vue'
-import type { EChartsOption } from 'echarts'
 
 defineOptions({ name: 'HdfsDiskOverview' })
 
@@ -25,37 +23,6 @@ const nonDfsPct = computed(() => {
   return t > 0 ? Math.min(100, Math.round((n / t) * 100)) : 0
 })
 
-// ── 集群容量环形图(echarts:已用/非DFS/剩余)──
-const diskChartOption = computed<EChartsOption>(() => {
-  const total = cluster.value?.CapacityTotal ?? 0
-  const used = cluster.value?.CapacityUsed ?? 0
-  const nonDfs = cluster.value?.CapacityUsedNonDFS ?? 0
-  const remaining = Math.max(0, total - used - nonDfs)
-  return {
-    tooltip: {
-      trigger: 'item',
-      formatter: (pp: unknown) => {
-        const p = pp as { name?: string; value?: number }
-        return `${p.name}: ${formatBytes(p.value ?? 0)}(${total > 0 ? Math.round((p.value ?? 0) / total * 100) : 0}%)`
-      }
-    },
-    series: [
-      {
-        name: '集群容量',
-        type: 'pie',
-        radius: ['62%', '82%'],
-        label: { show: false },
-        itemStyle: { borderRadius: 3 },
-        data: [
-          { name: '数据已用', value: used, itemStyle: { color: '#e6645c' } },
-          { name: '非 DFS', value: nonDfs, itemStyle: { color: '#e6a23c' } },
-          { name: '剩余', value: remaining, itemStyle: { color: '#67c23a' } }
-        ]
-      }
-    ]
-  }
-})
-
 // ── 节点维度 ─────────────────────────────────────────────
 function nodeUsedPct(n: HdfsDataNodeInfo): number {
   return n.capacity > 0 ? Math.min(100, Math.round((n.usedSpace / n.capacity) * 100)) : 0
@@ -68,13 +35,8 @@ function nodeState(n: HdfsDataNodeInfo): string {
 
 <template>
   <div class="hdfs-disk" v-loading="loading">
-    <!-- 集群总览(紧凑,不挤占文件浏览):左环形图 + 右进度条组 -->
-    <div class="overview-strip with-chart">
-      <div class="disk-ring">
-        <EChart :option="diskChartOption" height="150px" />
-        <span class="ring-center">{{ usedPct }}%</span>
-      </div>
-      <div class="strip-rest">
+    <!-- 集群总览(紧凑,不挤占文件浏览) -->
+    <div class="overview-strip">
       <div class="mini">
         <span class="mini-label">集群容量</span>
         <el-progress :percentage="usedPct" :stroke-width="8" :show-text="false" :color="progressColor" />
@@ -94,7 +56,6 @@ function nodeState(n: HdfsDataNodeInfo): string {
         <span class="mini-label">节点</span>
         <span class="mini-stat">{{ cluster?.NumLiveDataNodes ?? 0 }} 在线 / {{ cluster?.NumDeadDataNodes ?? 0 }} 离线</span>
         <span class="mini-meta">块 {{ cluster?.BlocksTotal ?? 0 }} · 负载 {{ cluster?.TotalLoad ?? 0 }}</span>
-      </div>
       </div>
     </div>
 
@@ -136,37 +97,6 @@ function nodeState(n: HdfsDataNodeInfo): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.with-chart {
-  display: flex;
-  gap: 12px;
-}
-
-.disk-ring {
-  position: relative;
-  width: 190px;
-  flex-shrink: 0;
-}
-
-.ring-center {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  font-weight: 600;
-  color: $text;
-  pointer-events: none;
-}
-
-.strip-rest {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
 }
 
 .overview-strip {

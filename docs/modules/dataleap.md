@@ -8,7 +8,7 @@
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 视图 | `src/views/dataleap/DataLeapView.vue` | 主视图:节点树(按 dir 分组)/ 编辑区(textarea)/ 血缘图(G6, 尺寸自适应已收编 useResizeObserver)/ 执行历史 / 发布预览 |
+| 视图 | `src/views/dataleap/DataLeapView.vue` | 主视图:节点树(按 dir 分组)/ 编辑区(CodeMirror)/ 血缘图(G6)/ 执行历史 / 发布预览 |
 | 视图 | `src/views/dataleap/components/CronSetter.vue` | cron 5 字段可视化设置器 |
 | API | `src/api/dataleap.ts` | nodes CRUD / deps / graph / run / runs / publish 封装 |
 | 网关 | `server/dataleap.js` | Express Router + cron 调度器(30s tick,分钟级匹配)+ DS 序列化 |
