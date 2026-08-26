@@ -32,6 +32,10 @@ import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
+import SparkLogPanel from './components/SparkLogPanel.vue'
+import ExplainDialog from './components/ExplainDialog.vue'
+// Spark 日志面板:容器高度→保留行数计算在组件内,父级在轮询后调用其方法
+const sparkLogPanelRef = ref<InstanceType<typeof SparkLogPanel>>()
 
 defineOptions({ name: 'DbQueryView' })
 
@@ -704,8 +708,6 @@ onUnmounted(() => {
   }
   flushTempDrafts()
   stopSparkLogPolling()
-  logResizeObserver?.disconnect()
-  logResizeObserver = null
   if (cm) {
     const el = cm.getWrapperElement()
     el.remove()
@@ -714,69 +716,20 @@ onUnmounted(() => {
 })
 
 // ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
+// 展示层(容器高度→保留行数/贴底滚动/Stage 进度条渲染)已拆至 components/SparkLogPanel.vue;
+// 此处仅保留轮询状态与裁剪逻辑,保留行数经组件实例读取。
 const sparkLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
-const sparkLogBox = ref<HTMLElement | null>(null)
 /** Spark job/stage 进度(statusTracker,3s 与日志同节奏轮询) */
-const sparkStageData = ref<{ activeJobs: Array<{ jobId: number; status: string; stageIds: number[] }>; stages: SparkStage[]; numActiveJobs: number; numActiveStages: number }>({
+const sparkStageData = ref<SparkStagesData>({
   activeJobs: [],
   stages: [],
   numActiveJobs: 0,
   numActiveStages: 0
 })
-function stagePct(s: SparkStage): number {
-  return s.numTasks > 0 ? Math.round((s.completedTasks / s.numTasks) * 100) : 0
-}
-function stageProgressStatus(s: SparkStage): '' | 'success' | 'exception' {
-  if (s.status === 'FAILED') return 'exception'
-  if (s.status === 'SUCCEEDED') return 'success'
-  return ''
-}
-function stageStatusClass(s: string): string {
-  return String(s || 'UNKNOWN').toLowerCase()
-}
-const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度动态计算,填满即滚动打印
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
 const sparkLogFileSizes = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 }) // 最近一次 poll 返回的文件大小,clear 时作为新基线
-let logResizeObserver: ResizeObserver | null = null
-const LOG_LINE_HEIGHT = 20 // 12px 字体 × 1.55 行高 ≈ 18.6px,取整留余量
-
-// 日志面板大小变化 → 重算保留行数:可视区能显示多少行就保留多少行(终端式滚动打印),
-// 容器被拖高/放大时能看到更多历史,缩小/折叠时自动收敛内存。
-function updateMaxLogLines() {
-  const el = sparkLogBox.value
-  if (!el) return
-  const visible = Math.floor((el.clientHeight - 24) / LOG_LINE_HEIGHT) // 减 padding 上下 12px×2
-  maxLogLines.value = Math.max(50, Math.min(500, visible))
-}
-
-// 引擎日志按布局高度自动贴底滚动:只要日志面板处于激活态,内容增量/切换/挂载后
-// 都自动滚到最底部让最新日志始终可见,无需手动拖拽滚动条到底。
-// 大块日志追加后 DOM 未就绪时 scrollHeight 是旧值,须等两帧再滚才能精确到底。
-function scrollLogToBottom() {
-  const el = sparkLogBox.value
-  if (!el) return
-  void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (sparkLogBox.value) sparkLogBox.value.scrollTop = sparkLogBox.value.scrollHeight
-  })))
-}
-
-// 日志容器挂载(首次渲染)后滚到底,并挂 ResizeObserver 跟踪容器尺寸变化
-watch(sparkLogBox, (el) => {
-  logResizeObserver?.disconnect()
-  logResizeObserver = null
-  if (el) {
-    updateMaxLogLines()
-    logResizeObserver = new ResizeObserver(() => updateMaxLogLines())
-    logResizeObserver.observe(el)
-    if (activePane.value === 0) scrollLogToBottom()
-  }
-})
-// 日志内容增量/清空/裁剪时跟随最新(仅日志面板激活时)
-watch(sparkLogText, () => {
-  if (activePane.value === 0) scrollLogToBottom()
-})
 
 /** [stage] 完成行解析(由 db-proxy 在查询结束时写入 audit 日志):
  *   [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name> */
@@ -834,9 +787,10 @@ async function pollSparkLogs() {
     sparkLogFileSizes.value = data.files
     if (data.content) {
       sparkLogText.value += data.content
-      // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
+      // 保留行数按日志容器可视高度动态计算(由 SparkLogPanel 维护,填满即滚动打印)
+      const maxLogLines = sparkLogPanelRef.value?.maxLines ?? 200
       const lines = sparkLogText.value.split('\n')
-      if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
+      if (lines.length > maxLogLines) sparkLogText.value = lines.slice(-maxLogLines).join('\n')
       // 解析 [stage] 完成行 → 更新 Stage 进度(查询结束后由 db-proxy 写入)
       applyParsedStages(parseStageDoneLines(data.content))
     }
@@ -1119,11 +1073,12 @@ const MAX_RESULTS = 20
 // 当前激活面板:0 = 日志 tab;1..n = 结果 tab(对应 results[i],pane = i + 1)
 const activePane = ref(0)
 const currentResult = computed(() => (activePane.value > 0 ? results.value[activePane.value - 1] : null) ?? null)
-// 激活日志面板(切回/首次显示)时滚到底,避免面板停在上方需手动下拖。
+// 激活日志面板(切回/首次显示)时滚到底:滚动逻辑在 SparkLogPanel 内部,
+// 这里仅触发其贴底方法(避免面板停在上方需手动下拖)。
 // 注意:必须在 activePane 声明之后定义,watch 创建时会立即同步读取源 getter,
 // 若放在 activePane 之前会因 const 的 TDZ 报 "Cannot access before initialization"。
 watch(() => activePane.value, (pane) => {
-  if (pane === 0) scrollLogToBottom()
+  if (pane === 0) nextTick(() => sparkLogPanelRef.value?.updateMaxLogLines())
 })
 // 结果表格翻页(默认 15 条/页)
 const pageSize = ref(15)
@@ -1396,22 +1351,7 @@ function getExplainSql(): string {
   return segs[0] || ''
 }
 
-/** 执行计划节点 → 展示文本(表名/访问方式 + rows/cost 等统计) */
-function explainNodeLabel(n: ExplainNode | null | undefined): string {
-  if (!n) return ''
-  const parts: string[] = []
-  const op = String(n.operation || n.name || '').trim()
-  if (op) parts.push(op)
-  const obj = String(n.object_name || '').trim()
-  if (obj && obj !== op) parts.push(obj)
-  if (n.access_type) parts.push(String(n.access_type))
-  const stats: string[] = []
-  if (n.rows != null) stats.push(`rows=${n.rows}`)
-  if (n.filtered != null) stats.push(`filtered=${n.filtered}`)
-  if (n.cost != null) stats.push(`cost=${n.cost}`)
-  if (n.extra) stats.push(String(n.extra))
-  return [...parts, ...stats].join(' ')
-}
+/** 执行计划节点展示文本已随 ExplainDialog 组件迁出(2026-08);数据获取留在本组件 */
 
 /** 触发 EXPLAIN:取当前数据源 + 当前编辑器选中/首条 SQL,弹结果面板 */
 async function runExplain() {
@@ -2272,7 +2212,7 @@ async function copyAllTsv() {
       </div>
       <!-- 下方当前面板内容 -->
       <div class="result-content">
-        <!-- 日志面板(第一个 tab) -->
+        <!-- 日志面板(第一个 tab;内容区已拆为 SparkLogPanel 组件) -->
         <template v-if="activePane === 0">
           <div class="result-card log-card">
             <div class="spark-logs-head">
@@ -2282,29 +2222,15 @@ async function copyAllTsv() {
                 <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
               </span>
             </div>
-            <div v-if="sparkStageData.stages.length" class="spark-stages">
-              <div class="spark-stages-head">
-                <span class="spark-stages-title">Stage 进度</span>
-                <span v-if="sparkStageData.numActiveJobs" class="spark-stages-meta">
-                  {{ sparkStageData.numActiveJobs }} 个活跃 Job · {{ sparkStageData.numActiveStages }} 个活跃 Stage
-                </span>
-              </div>
-              <div v-for="s in sparkStageData.stages" :key="s.stageId" class="spark-stage">
-                <div class="spark-stage-line">
-                  <span class="spark-stage-id">Stage {{ s.stageId }}</span>
-                  <span class="spark-stage-name" :title="s.name">{{ s.name }}</span>
-                  <span class="spark-stage-status" :class="stageStatusClass(s.status)">{{ s.status }}</span>
-                  <span class="spark-stage-count">{{ s.completedTasks }}/{{ s.numTasks }} tasks</span>
-                </div>
-                <el-progress
-                  :percentage="stagePct(s)"
-                  :show-text="false"
-                  :stroke-width="5"
-                  :status="stageProgressStatus(s)"
-                />
-              </div>
-            </div>
-            <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
+            <SparkLogPanel
+              ref="sparkLogPanelRef"
+              :log-text="sparkLogText"
+              :empty-hint="logEmptyHint"
+              :stage-data="sparkStageData"
+              :active="activePane === 0"
+              @refresh="void pollSparkLogs()"
+              @clear="() => void clearSparkLogs()"
+            />
           </div>
         </template>
         <!-- 结果内容 -->
@@ -2452,37 +2378,14 @@ async function copyAllTsv() {
   <!-- Flink PreJob 提交/管理弹窗 -->
   <FlinkPreJobDialog v-model="showFlinkPreJob" />
 
-  <!-- EXPLAIN 执行计划面板 -->
-  <el-dialog
+  <!-- EXPLAIN 执行计划面板(展示逻辑在 components/ExplainDialog.vue;数据获取留在本组件 runExplain) -->
+  <ExplainDialog
     v-model="showExplain"
-    title="EXPLAIN 执行计划"
-    width="720px"
-    :close-on-click-modal="false"
-    append-to-body
-  >
-    <div v-loading="explainLoading" class="explain-body">
-      <el-alert v-if="explainError" type="error" :title="explainError" show-icon :closable="false" class="explain-error" />
-      <template v-else-if="explainTree">
-        <el-tree
-          :data="[explainTree]"
-          :props="{ label: 'operation', children: 'children' }"
-          default-expand-all
-          :expand-on-click-node="false"
-          class="explain-tree"
-        >
-          <template #default="{ data }">
-            <span class="explain-node">{{ explainNodeLabel(data) }}</span>
-          </template>
-        </el-tree>
-      </template>
-      <template v-else-if="explainTable">
-        <el-table :data="explainTable.rows" border size="small" max-height="420" class="explain-table">
-          <el-table-column v-for="c in explainTable.columns" :key="c" :prop="c" :label="c" min-width="140" />
-        </el-table>
-      </template>
-      <el-empty v-else-if="!explainLoading" description="暂无执行计划" />
-    </div>
-  </el-dialog>
+    :loading="explainLoading"
+    :error="explainError"
+    :tree="explainTree"
+    :table="explainTable"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -3410,150 +3313,8 @@ async function copyAllTsv() {
   border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
 }
-.spark-logs-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-.spark-logs-actions {
-  display: flex;
-  align-items: center;
-}
-/* ── Spark Stage 进度(日志面板顶部) ────────────────────────── */
-.spark-stages {
-  border-bottom: 1px solid $border;
-  padding: 8px 14px;
-  max-height: 200px;
-  overflow: auto;
-
-  .spark-stages-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-
-    .spark-stages-title {
-      font-size: 12px;
-      font-weight: 600;
-      color: $text;
-    }
-
-    .spark-stages-meta {
-      font-size: 11px;
-      color: $muted;
-    }
-  }
-
-  .spark-stage {
-    margin-bottom: 6px;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
-  }
-
-  .spark-stage-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    margin-bottom: 2px;
-
-    .spark-stage-id {
-      color: $primary;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-
-    .spark-stage-name {
-      color: $text;
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .spark-stage-status {
-      flex-shrink: 0;
-      font-size: 10px;
-      padding: 0 5px;
-      border-radius: 3px;
-      color: $muted;
-      background: var(--el-fill-color-light);
-
-      &.running {
-        color: $primary;
-        background: rgba(64, 158, 255, 0.12);
-      }
-
-      &.succeeded {
-        color: #67c23a;
-        background: rgba(103, 194, 58, 0.12);
-      }
-
-      &.failed {
-        color: #f56c6c;
-        background: rgba(245, 108, 108, 0.12);
-      }
-    }
-
-    .spark-stage-count {
-      color: $muted;
-      flex-shrink: 0;
-      font-variant-numeric: tabular-nums;
-    }
-  }
-}
-
-.spark-logs-body {
-  flex: 1;
-  min-height: 0; /* 关键:日志容器按布局高度收缩并在内部滚动,而不是撑高整页 */
-  margin: 0;
-  padding: 10px 14px;
-  overflow: auto;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--el-text-color-regular);
-  background: var(--el-fill-color-light);
-}
-
-/* ── EXPLAIN 面板 ─────────────────────────────────────── */
-.explain-body {
-  max-height: 520px;
-  overflow: auto;
-}
-
-.explain-error {
-  margin-bottom: 0;
-}
-
-.explain-tree {
-  font-size: 12px;
-
-  :deep(.el-tree-node__content) {
-    height: auto;
-    min-height: 28px;
-    padding: 2px 0;
-  }
-}
-
-.explain-node {
-  display: inline-block;
-  padding: 2px 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  word-break: break-all;
-}
-
-.explain-table {
-  width: 100%;
-}
+/* spark-logs-head/title/actions 已随 SparkLogPanel 组件迁出(2026-08) */
+/* Spark Stage 进度/日志体样式已随 SparkLogPanel、EXPLAIN 弹窗样式已随 ExplainDialog 组件迁出(2026-08) */
 
 /* 提交修改确认弹窗中的完整 SQL 预览 */
 .edit-sql-preview {
