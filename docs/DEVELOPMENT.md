@@ -90,6 +90,19 @@ docs/
 2. 若影响全局(配置/认证/主题/路由)→ 同步更新 `docs/ARCHITECTURE.md`
 3. commit message 引用模块名,如 `feat(yarn): ...`
 
+### 4.4 并行开发流程(多人/多代理同时开工)
+
+1. **领任务**:从归属表(§3.1)认领模块 → 只读该模块文档 + 白名单文件,不读无关模块
+2. **开工前**:`git pull --rebase`;在群里声明"我要改 <模块>:<文件清单>"
+3. **开发中**:新 API 落 `server/routes/<module>.js`(Express Router)+ `src/api/<module>/`(或单文件);
+   需要挂载/注册时改 `server/index.js` / `router` / `menu.ts`,只加自己那一行
+4. **验证口径**(每模块提交前必跑):
+   - 后端:`node --check server/index.js server/routes/*.js` + `PORT=5199 node server/index.js` 冒烟(curl `/api/auth/config` 200)
+   - 前端:`npm run type-check`(vue-tsc 全绿)+ 改了视图再跑 `npm run build`
+   - 涉及集群的接口用假 id 验证(如 `jobId=999999999`),绝不触发真实任务
+5. **提交**:模块名前缀 commit;共享文件改动单独一个 commit(方便冲突定位)
+6. **收尾**:更新本模块文档;若动了白名单边界(新增共享文件),同步改 §3.1 归属表
+
 ## 5. 当前已知技术债(开发时注意)
 
 - YARN iframe 代理对复杂 JS 路由页(Spark UI 时间线等)重写脆弱,自建 UI 弹窗优先
