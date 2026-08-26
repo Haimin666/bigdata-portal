@@ -3,28 +3,10 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
 import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
-import CodeMirror from 'codemirror'
-import 'codemirror/lib/codemirror.css'
-import 'codemirror/mode/sql/sql.js'
-import 'codemirror/mode/python/python.js'
-// 官方 addon(静态 import,Vite 下以 CJS 转换后挂到同一 CodeMirror 实例):
-// 补全 / 折叠 / 括号匹配与自动闭合 / 光标行 / 选中高亮 / 容器自适应刷新
-import 'codemirror/addon/hint/show-hint.js'
-import 'codemirror/addon/hint/sql-hint.js'
-import 'codemirror/addon/hint/anyword-hint.js'
-import 'codemirror/addon/hint/show-hint.css'
-import 'codemirror/addon/fold/foldcode.js'
-import 'codemirror/addon/fold/foldgutter.js'
-import 'codemirror/addon/fold/indent-fold.js'
-import 'codemirror/addon/fold/brace-fold.js'
-import 'codemirror/addon/fold/comment-fold.js'
-import 'codemirror/addon/fold/foldgutter.css'
-import 'codemirror/addon/edit/matchbrackets.js'
-import 'codemirror/addon/edit/closebrackets.js'
-import 'codemirror/addon/selection/active-line.js'
-import 'codemirror/addon/search/match-highlighter.js'
-import 'codemirror/addon/search/searchcursor.js' // match-highlighter 的前置依赖(缺它选中词全画布高亮静默失效)
-import 'codemirror/addon/display/autorefresh.js'
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
+import 'monaco-editor/esm/vs/editor/editor.all.js'
+import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js'
+import 'monaco-editor/esm/vs/basic-languages/python/python.contribution.js'
 import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { copyText } from '@/utils/clipboard'
@@ -34,6 +16,13 @@ import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
 
 defineOptions({ name: 'DbQueryView' })
+
+const monacoEnvironment = self as unknown as { MonacoEnvironment?: monaco.Environment }
+monacoEnvironment.MonacoEnvironment = {
+  getWorker() {
+    return new Worker(new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url), { type: 'module' })
+  }
+}
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
@@ -141,28 +130,36 @@ interface EditorTab {
   id: string
   file: ScriptNode | null // 绑定的文件;null = 未命名查询
   name: string
-  content: string // 内容快照(自动保存/草稿用;编辑实时内容在 doc 里)
+  content: string // 内容快照(自动保存/草稿用;编辑实时内容在 model 里)
   dirty: boolean
-  doc: CodeMirror.Doc // 每文件独立文档:独立撤销历史(Cmd+Z 不串文件)+ 光标位置
+  model: monaco.editor.ITextModel // 每 tab 独立模型:独立撤销历史与光标状态
 }
 let tabSeq = 0
+function tabLanguage(tab: Pick<EditorTab, 'file'>): string {
+  if (tab.file?.name.toLowerCase().endsWith('.py')) return 'python'
+  return engine.value === 'pyspark' ? 'python' : 'sql'
+}
+function createTabModel(tab: Pick<EditorTab, 'id' | 'file' | 'name'>, content: string): monaco.editor.ITextModel {
+  const uri = monaco.Uri.parse(`db-query:/tabs/${encodeURIComponent(tab.id)}/${encodeURIComponent(tab.name)}`)
+  monaco.editor.getModel(uri)?.dispose()
+  return monaco.editor.createModel(content, tabLanguage(tab), uri)
+}
 function newTab(name: string, content: string, id?: string): EditorTab {
+  const partial = { id: id || `tab-${++tabSeq}`, file: null, name }
   return {
-    id: id || `tab-${++tabSeq}`,
-    file: null,
+    ...partial,
     name,
     content,
     dirty: false,
-    doc: CodeMirror.Doc(content, 'text/x-sql')
+    model: createTabModel({ ...partial, name }, content)
   }
 }
 
-/** 把 tab 的文档挂到编辑器(已挂则同步快照兜底);替代旧 setValue 整体替换方案 */
+/** 把 tab 的独立模型挂到编辑器;替代旧 setValue 整体替换方案 */
 function showTabInEditor(t: EditorTab) {
-  if (!cm) return
-  if (!t.doc) t.doc = CodeMirror.Doc(t.content, 'text/x-sql') // 兼容旧路径
-  if (cm.getDoc() !== t.doc) cm.swapDoc(t.doc)
-  syncRunVarBar() // swapDoc 不触发 change 事件,参数行需按新文档内容重建
+  if (!sqlEditor) return
+  sqlEditor.setModel(t.model)
+  syncRunVarBar() // setModel 不触发内容变化事件,参数行需按新模型重建
 }
 
 // ── 临时 query 草稿(未命名 tab 也自动保存到 localStorage)──────
@@ -206,6 +203,8 @@ function initTabs() {
   if (drafts.length) {
     for (const d of drafts) {
       tabs.value.push(newTab(d.name || '未命名查询', d.content, d.id))
+      const seq = Number(d.id.match(/^tab-(\d+)$/)?.[1])
+      if (Number.isFinite(seq)) tabSeq = Math.max(tabSeq, seq)
       if (tabs.value.length >= MAX_TABS) break
     }
     activeTabId.value = tabs.value[tabs.value.length - 1].id // 激活最近一次编辑的草稿
@@ -228,7 +227,7 @@ async function autoSaveTab(tab: EditorTab) {
   if (!tabs.value.includes(tab)) return // tab 已关闭
   // 仅当该 tab 仍是活跃 tab 时才读编辑器实时内容;否则用切换时已写回的快照。
   // 否则迟到的防抖定时器会把别的 tab 内容存进本 tab,覆盖磁盘上的原文件!
-  if (activeTab.value === tab) tab.content = cm?.getValue() ?? tab.content
+  if (activeTab.value === tab) tab.content = sqlEditor?.getValue() ?? tab.content
   if (tab.file) {
     try {
       await saveScriptContent(tab.file.id, tab.content)
@@ -250,7 +249,7 @@ initTabs()
 /** 把当前编辑器内容写回当前 tab(切换/关闭前调用) */
 function flushActiveContent() {
   const t = activeTab.value
-  if (t) t.content = cm?.getValue() ?? ''
+  if (t) t.content = sqlEditor?.getValue() ?? ''
 }
 
 /** 切换 tab:写回当前内容 → 挂载目标文档(独立撤销历史) */
@@ -265,7 +264,7 @@ function switchTab(id: string) {
     showTabInEditor(next)
     if (next.file?.name.toLowerCase().endsWith('.py')) engine.value = 'pyspark'
   }
-  cm?.focus()
+  sqlEditor?.focus()
 }
 
 /** 关闭 tab:有未保存修改先确认;关闭后激活相邻 tab,全关则新建一个未命名 tab */
@@ -282,6 +281,7 @@ async function closeTab(id: string) {
   const idx = tabs.value.indexOf(tab)
   flushActiveContent()
   tabs.value.splice(idx, 1)
+  tab.model.dispose()
   if (!tab.file) removeTempDraft(tab.id) // 临时 tab 关闭即丢弃草稿
   if (activeTabId.value === id) {
     if (tabs.value.length === 0) {
@@ -295,7 +295,7 @@ async function closeTab(id: string) {
       showTabInEditor(next)
     }
   }
-  cm?.focus()
+  sqlEditor?.focus()
 }
 
 /** 新建查询:追加一个未命名 tab(最多 MAX_TABS 个) */
@@ -309,7 +309,7 @@ function newQuery() {
   tabs.value.push(nt)
   activeTabId.value = nt.id
   showTabInEditor(nt)
-  cm?.focus()
+  sqlEditor?.focus()
 }
 
 /** 保存当前所有临时 tab 草稿(离开页面前兜底,防抖未触发时) */
@@ -340,7 +340,7 @@ async function onOpenFile(node: ScriptNode) {
       name: node.name,
       content,
       dirty: false,
-      doc: CodeMirror.Doc(content || '', 'text/x-sql')
+      model: createTabModel({ id: `file-${node.id}`, file: node, name: node.name }, content || '')
     }
     tabs.value.push(tab)
     activeTabId.value = tab.id
@@ -357,22 +357,22 @@ async function onOpenFile(node: ScriptNode) {
 
 /** 表目录点击 → 在光标处插入表名/字段名 */
 function onInsert(text: string) {
-  const c = cm
+  const c = sqlEditor
   if (!c) return
-  const cur = c.getCursor()
-  c.replaceRange(text, cur)
-  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
+  const position = c.getPosition()!
+  c.executeEdits('portal-insert', [{ range: c.getSelection() || monaco.Selection.fromPositions(position, position), text }])
+  c.pushUndoStop()
   c.focus()
 }
 
 /** 历史/收藏条目点击(SqlTreePanel runSql 事件):历史是缓存,只回填编辑器不自动执行;
  *  有结果快照时直接开一个「缓存」结果 tab 免重查展示 */
 function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record<string, unknown>[] }) {
-  const c = cm
+  const c = sqlEditor
   if (!c) return
   const s = String(sql || '')
   if (!s.trim()) return
-  c.setValue(s)
+  setEditorValue(s, false)
   c.focus()
   if (result && Array.isArray(result.columns) && Array.isArray(result.rows)) {
     results.value.push({
@@ -416,13 +416,13 @@ async function onOpenTable(payload: { db: string; table: string }) {
       name: `${payload.db}.${payload.table}`,
       content: sql,
       dirty: false,
-      doc: CodeMirror.Doc(sql, 'text/x-sql')
+      model: createTabModel({ id: tabId, file: null, name: `${payload.db}.${payload.table}` }, sql)
     }
     tabs.value.push(tab)
     activeTabId.value = tab.id
     showTabInEditor(tab)
   }
-  cm?.setValue(sql)
+  setEditorValue(sql, false)
   await runQuery()
   // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
   const r = results.value[results.value.length - 1]
@@ -454,7 +454,7 @@ async function saveActive() {
   if (!tab) return
   if (tab.file) {
     try {
-      await saveScriptContent(tab.file.id, cm?.getValue() ?? '')
+      await saveScriptContent(tab.file.id, sqlEditor?.getValue() ?? '')
       tab.dirty = false
       ElMessage.success(`已保存 ${tab.name}`)
       treePanelRef.value?.reloadMy()
@@ -472,7 +472,7 @@ async function saveActive() {
     let name = (value || '').trim()
     if (!name.toLowerCase().endsWith('.sql')) name += '.sql'
     const node = await createScriptNode(null, name, 'file')
-    await saveScriptContent(node.id, cm?.getValue() ?? '')
+    await saveScriptContent(node.id, sqlEditor?.getValue() ?? '')
     tab.file = node
     tab.name = name
     tab.dirty = false
@@ -521,17 +521,15 @@ const filteredDbs = computed(() => {
 // 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
 const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark' && d.type !== 'flinksql'))
 
-// ── CodeMirror 编辑器 ───────────────────────────────────────
-const cmRef = ref<HTMLElement>()
+// ── Monaco 编辑器 ────────────────────────────────────────────
+const monacoRef = ref<HTMLElement>()
 const canvasRef = ref<HTMLElement>()
-let cm: CodeMirror.Editor | null = null
-let completionTimer: number | null = null
-
-// 默认 SQL:清空(用户自行编写)
-const DEFAULT_SQL = ''
+let sqlEditor: monaco.editor.IStandaloneCodeEditor | null = null
+let completionDisposables: monaco.IDisposable[] = []
+let applyingEditorValue = false
 
 // 编辑器主题:dark(默认)/ light,持久化到 localStorage
-// 只作用于本页 sql-canvas 画布(CodeMirror 区域),与全局主题解耦:
+// 只作用于本页 sql-canvas 画布(Monaco 区域),与全局主题解耦:
 // 初始跟随全局(getTheme),之后用户按按钮仅切画布,不影响全局
 const THEME_KEY = 'db-query-theme'
 const themeMode = ref<'dark' | 'light'>(
@@ -547,8 +545,6 @@ const MAX_FONT = 24
 function toggleTheme() {
   themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
   localStorage.setItem(THEME_KEY, themeMode.value)
-  // 仅切换画布 class(.sql-canvas.dark / .light),不调 applyTheme,避免污染全局主题
-  nextTick(() => cm?.refresh())
 }
 
 function adjustFont(delta: number) {
@@ -557,124 +553,147 @@ function adjustFont(delta: number) {
 }
 
 async function initEditor() {
-  if (!cmRef.value || cm) return
+  if (!monacoRef.value || sqlEditor) return
   const initial = activeTab.value
-  cm = CodeMirror(cmRef.value, {
-    value: initial?.doc ?? initial?.content ?? DEFAULT_SQL,
-    mode: 'text/x-sql',
-    lineNumbers: true,
-    indentWithTabs: false,
-    tabSize: 2,
-    indentUnit: 2,
-    lineWrapping: true,
-    theme: 'default',
-    // ── 官方 addon 增强 ──────────────────────────────
-    // 括号匹配与自动闭合(替换自实现)
-    matchBrackets: true,
-    autoCloseBrackets: true,
-    // 光标行高亮 + 选中词高亮
-    styleActiveLine: true,
-    highlightSelectionMatches: true,
-    // 代码折叠(SQL 子查询/CTE、python 函数体)
-    foldGutter: true,
-    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
-    foldOptions: {
-      rangeFinder: CodeMirror.fold.combine(CodeMirror.fold.brace, CodeMirror.fold.indent, CodeMirror.fold.comment)
-    },
-    // 容器尺寸变化自动 refresh(tab 常驻池中非激活创建也能正确布局)
-    autoRefresh: true
+
+  monaco.editor.defineTheme('db-query-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'keyword', foreground: 'd19a66', fontStyle: 'bold' },
+      { token: 'string', foreground: '98c379' },
+      { token: 'comment', foreground: '7a818c', fontStyle: 'italic' },
+      { token: 'number', foreground: '61afef' },
+      { token: 'type', foreground: '56b6c2' },
+      { token: 'identifier', foreground: 'e06c75' },
+      { token: 'operator', foreground: '56b6c2' }
+    ],
+    colors: {
+      'editor.background': '#34373c',
+      'editor.foreground': '#c8ccd4',
+      'editorLineNumber.foreground': '#7a818c',
+      'editorLineNumber.activeForeground': '#b8bec8',
+      'editor.lineHighlightBackground': '#61afef14',
+      'editor.selectionBackground': '#61afef40',
+      'editor.wordHighlightBackground': '#e5c07b47',
+      'editorBracketMatch.background': '#e5c07b40',
+      'editorBracketMatch.border': '#e5c07b',
+      'editorWidget.background': '#252b3b',
+      'editorWidget.foreground': '#cdd6f4',
+      'editorSuggestWidget.selectedBackground': '#569cd648'
+    }
   })
-  // 首次挂载若容器尺寸未稳定(如 tab 常驻池中非激活创建),内容会挤到行号前。
-  // 等 DOM 稳定后强制 refresh 重算布局。
-  await nextTick()
-  cm.refresh()
+  monaco.editor.defineTheme('db-query-light', {
+    base: 'vs',
+    inherit: true,
+    rules: [
+      { token: 'keyword', foreground: 'c2185b', fontStyle: 'bold' },
+      { token: 'string', foreground: '0a5f5f' },
+      { token: 'comment', foreground: '8a9199', fontStyle: 'italic' },
+      { token: 'number', foreground: '0b4f8a' },
+      { token: 'type', foreground: '6f42c1' },
+      { token: 'identifier', foreground: '953800' },
+      { token: 'operator', foreground: '0b4f8a' }
+    ],
+    colors: {
+      'editor.background': '#f7f8fa',
+      'editor.foreground': '#3a3f45',
+      'editorLineNumber.foreground': '#8a9199',
+      'editorLineNumber.activeForeground': '#4d555e',
+      'editor.lineHighlightBackground': '#0969da0d',
+      'editor.selectionBackground': '#0969da26',
+      'editor.wordHighlightBackground': '#e5c07b40',
+      'editorBracketMatch.background': '#c2185b1f',
+      'editorBracketMatch.border': '#c2185b',
+      'editorWidget.background': '#ffffff',
+      'editorWidget.foreground': '#24292f',
+      'editorSuggestWidget.selectedBackground': '#e8f0fe'
+    }
+  })
+
+  sqlEditor = monaco.editor.create(monacoRef.value, {
+    model: initial?.model,
+    lineNumbers: 'on',
+    tabSize: 2,
+    insertSpaces: true,
+    wordWrap: 'on',
+    theme: themeMode.value === 'dark' ? 'db-query-dark' : 'db-query-light',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: fontSize.value,
+    lineHeight: 1.6,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    folding: true,
+    showFoldingControls: 'mouseover',
+    matchBrackets: 'near',
+    renderLineHighlight: 'all',
+    selectionHighlight: true,
+    smoothScrolling: true,
+    cursorBlinking: 'smooth',
+    multiCursorModifier: 'alt',
+    mouseWheelZoom: true,
+    quickSuggestions: { other: true, comments: false, strings: false },
+    suggestOnTriggerCharacters: true,
+    wordBasedSuggestions: 'off',
+    suggestSelection: 'first',
+    padding: { top: 10, bottom: 12 }
+  })
+
+  completionDisposables = ['sql', 'python'].map((languageId) =>
+    monaco.languages.registerCompletionItemProvider(languageId, {
+      triggerCharacters: ['.', '_', '$'],
+      provideCompletionItems: (model, position) => provideEditorCompletions(model, position)
+    })
+  )
+
   // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)+ 防抖自动保存
-  cm.on('change', (_c, change) => {
+  sqlEditor.onDidChangeModelContent(() => {
     syncRunVarBar() // ${var} 增删 → 同步画布下方参数行(setValue 换 tab 也走这里)
-    if (change.origin === 'setValue') return // 程序性 setValue(切换 tab/打开文件)不触发自动保存
+    if (applyingEditorValue) return
     const t = activeTab.value
     if (t) {
       t.dirty = true
-      t.content = cm?.getValue() ?? t.content // 立即同步快照,防抖触发时即使已切走也不会取错内容
+      t.content = sqlEditor?.getValue() ?? t.content // 立即同步快照,防抖触发时即使已切走也不会取错内容
       scheduleAutoSave(t)
     }
   })
   syncRunVarBar() // 初始内容(恢复 tab/草稿)可能已含 ${var},挂载即同步参数行
-  // ── 补全触发:输入字母/下划线后 300ms 防抖弹出(仅候选非空);浮层打开时 Tab 选词 ──
-  cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
-    if (change.origin !== '+input') return
-    const ch = change.text[0] || ''
-    if (!/[\w.]/.test(ch)) return
-    if (completionTimer) clearTimeout(completionTimer)
-    completionTimer = window.setTimeout(() => {
-      // pyspark 用内置单词补全;SQL 用 schema 感知补全(表名/列名/关键字)
-      c.showHint({
-        completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
-      })
-    }, 150)
+
+  const cmd = (keybinding: number, handler: () => void) => sqlEditor?.addCommand(keybinding, handler)
+  cmd(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => { void runQuery() })
+  cmd(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { void saveActive() })
+  cmd(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, formatSql)
+  cmd(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
+    void sqlEditor?.getAction('editor.action.commentLine')?.run()
   })
-  // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
-  cm.setOption('extraKeys', {
-    'Ctrl-Enter': () => {      void runQuery()
-    },
-    'Cmd-Enter': () => {
-      void runQuery()
-    },
-    'Ctrl-S': () => {
-      void saveActive()
-    },
-    'Cmd-S': () => {
-      void saveActive()
-    },
-    'Ctrl-Space': (c: CodeMirror.Editor) => {
-      // pyspark 用内置单词补全;SQL 用 schema 感知补全
-      c.showHint({
-        completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
-      })
-    },
-    'Cmd-Shift-F': () => {
-      formatSql()
-    },
-    'Ctrl-Shift-F': () => {
-      formatSql()
-    },
-    'Cmd-/': (c: CodeMirror.Editor) => commentSelection(c),
-    'Ctrl-/': (c: CodeMirror.Editor) => commentSelection(c),
-    Tab: (c: CodeMirror.Editor) => {
-      // 补全浮层打开时:交给 show-hint 选词(不要缩进)
-      if (c.state.completionActive) return
-      const from = c.getCursor('from')
-      const to = c.getCursor('to')
-      c.operation(() => {
-        if (from.line !== to.line) {
-          // 多行选中:每行行首插入两个空格(不破坏选中内容)
-          for (let l = from.line; l <= to.line; l++) {
-            c.replaceRange('  ', { line: l, ch: 0 }, { line: l, ch: 0 })
-          }
-        } else {
-          // 单行/无选中:在光标处插入两个空格
-          const cur = c.getCursor()
-          c.replaceSelection('  ')
-          c.setCursor({ line: cur.line, ch: cur.ch + 2 })
-        }
-      })
-    },
-    'Shift-Tab': (c: CodeMirror.Editor) => {
-      const from = c.getCursor('from')
-      const to = c.getCursor('to')
-      c.operation(() => {
-        // 每行行首去掉最多两个空格
-        for (let l = from.line; l <= to.line; l++) {
-          const line = c.getLine(l)
-          const lead = line.match(/^ {0,2}/)?.[0].length ?? 0
-          if (lead > 0) c.replaceRange('', { line: l, ch: 0 }, { line: l, ch: lead })
-        }
-      })
-    }
+  cmd(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, () => {
+    sqlEditor?.trigger('', 'editor.action.triggerSuggest', {})
   })
+
+  sqlEditor.focus()
 }
+
+function setEditorValue(value: string, markDirty = true) {
+  const editor = sqlEditor
+  const model = editor?.getModel()
+  if (!editor || !model) return
+  if (!markDirty) applyingEditorValue = true
+  try {
+    editor.pushUndoStop()
+    editor.executeEdits('portal-replace', [{ range: model.getFullModelRange(), text: value }])
+    editor.pushUndoStop()
+  } finally {
+    applyingEditorValue = false
+  }
+}
+
+watch(themeMode, (value) => {
+  monaco.editor.setTheme(value === 'dark' ? 'db-query-dark' : 'db-query-light')
+})
+watch(fontSize, (value) => {
+  sqlEditor?.updateOptions({ fontSize: value })
+})
 
 onMounted(() => {
   void initEditor()
@@ -689,11 +708,13 @@ onUnmounted(() => {
   stopSparkLogPolling()
   logResizeObserver?.disconnect()
   logResizeObserver = null
-  if (cm) {
-    const el = cm.getWrapperElement()
-    el.remove()
-    cm = null
+  completionDisposables.forEach((item) => item.dispose())
+  completionDisposables = []
+  if (sqlEditor) {
+    sqlEditor.dispose()
+    sqlEditor = null
   }
+  tabs.value.forEach((tab) => tab.model.dispose())
 })
 
 // ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
@@ -906,7 +927,7 @@ function onDragStart(e: MouseEvent) {
 
 /** 当前 SQL 文本 */
 function getSql(): string {
-  return cm ? cm.getValue() : ''
+  return sqlEditor?.getValue() ?? ''
 }
 
 /** 按分号切分 SQL 段(跳过字符串/反引号/注释内的分号) */
@@ -970,46 +991,28 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
  * 找不到段(如全文只有注释)回退全文。
  */
 function getSqlToRun(): string {
-  if (!cm) return getSql()
+  const editor = sqlEditor
+  const model = editor?.getModel()
+  if (!editor || !model) return getSql()
   // 1. 有选区 → 执行选中
-  const sel = cm.getSelection()
-  if (sel.trim()) return sel
+  const selection = editor.getSelection()
+  const selected = selection ? model.getValueInRange(selection) : ''
+  if (selected.trim()) return selected
   // 2. python 编辑器:无选区执行全文(整段提交,不做分号切分)
-  if (engine.value === 'pyspark') return cm.getValue()
+  if (model.getLanguageId() === 'python') return model.getValue()
   // 3. 无选区 → 光标所在段
-  const cursorIdx = cm.indexFromPos(cm.getCursor())
-  for (const seg of splitSqlSegments(cm.getValue())) {
+  const position = editor.getPosition() ?? model.getPositionAt(0)
+  const cursorIdx = model.getOffsetAt(position)
+  for (const seg of splitSqlSegments(model.getValue())) {
     if (seg.start <= cursorIdx && cursorIdx <= seg.end) {
       const s = seg.sql.trim()
       if (s) return s
     }
   }
-  return cm.getValue()
+  return model.getValue()
 }
 
 // ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
-/** 注释/取消注释选中 SQL(每行前加 -- ) */
-function commentSelection(c: CodeMirror.Editor) {
-  // 行注释:选区覆盖的每一行行首加/去 "-- "(再按一次取消);无选区时仅当前行
-  const from = c.getCursor('from')
-  const to = c.getCursor('to')
-  // 选区末尾停在行首时不算该行(Shift+Down 常见情况)
-  const endLine = to.ch === 0 && to.line > from.line ? to.line - 1 : to.line
-  const lines = []
-  for (let l = from.line; l <= endLine; l++) lines.push(l)
-  const allCommented = lines.every((l) => /^\s*-- /.test(c.getLine(l)))
-  for (const l of lines) {
-    const text = c.getLine(l)
-    if (allCommented) {
-      c.replaceRange(text.replace(/^(\s*)-- /, '$1'), { line: l, ch: 0 }, { line: l, ch: text.length })
-    } else {
-      const indent = text.match(/^\s*/)![0]
-      c.replaceRange(`${indent}-- ${text.slice(indent.length)}`, { line: l, ch: 0 }, { line: l, ch: text.length })
-    }
-  }
-  c.setSelection({ line: from.line, ch: 0 }, { line: endLine, ch: c.getLine(endLine).length })
-}
-
 /** 结果表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
 function colSig(): string {
   const r = currentResult.value
@@ -1041,12 +1044,13 @@ const engineLabel = computed(() => {
 })
 
 function formatSql() {
-  if (!cm) return
-  if (engine.value === 'pyspark') {
+  const model = sqlEditor?.getModel()
+  if (!sqlEditor || !model) return
+  if (model.getLanguageId() === 'python') {
     ElMessage.info('Python 模式暂不支持格式化')
     return
   }
-  const s = cm.getValue().trim()
+  const s = model.getValue().trim()
   if (!s) return
   // 先屏蔽字符串字面量/注释(替换为占位符),避免关键字误替换破坏字面量内容
   const protectedParts: string[] = []
@@ -1063,7 +1067,7 @@ function formatSql() {
     out = out.replace(new RegExp(`\\b${kw}\\b`, 'gi'), (m: string) => `\n${m.toUpperCase()}`)
   }
   out = out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => protectedParts[Number(i)] ?? '')
-  cm.setValue(out.replace(/\n{2,}/g, '\n').trim())
+  setEditorValue(out.replace(/\n{2,}/g, '\n').trim())
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
@@ -1363,10 +1367,13 @@ const explainTable = ref<{ columns: string[]; rows: Record<string, unknown>[] } 
 
 /** 取当前活动 tab 编辑器选中文本;空则取全文第一条语句 */
 function getExplainSql(): string {
-  if (!cm) return ''
-  const sel = cm.getSelection().trim()
-  if (sel) return sel
-  const segs = splitSqlSegments(cm.getValue()).map((s) => s.sql.trim()).filter(Boolean)
+  const editor = sqlEditor
+  const model = editor?.getModel()
+  if (!editor || !model) return ''
+  const selection = editor.getSelection()
+  const selected = selection ? model.getValueInRange(selection).trim() : ''
+  if (selected) return selected
+  const segs = splitSqlSegments(model.getValue()).map((s) => s.sql.trim()).filter(Boolean)
   return segs[0] || ''
 }
 
@@ -1451,11 +1458,11 @@ async function ensureSchema(dbName: string): Promise<SchemaMeta | null> {
 const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE', 'SET', 'VALUES', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'BETWEEN', 'LIKE']
 
 /** 收集编辑器中已出现的标识符(文中词提示):去重、排除光标前正在输入的前缀本身 */
-function collectDocWords(cm: CodeMirror.Editor, prefix: string): string[] {
+function collectDocWords(model: monaco.editor.ITextModel, prefix: string): string[] {
   const words = new Set<string>()
   const re = /[A-Za-z_][A-Za-z0-9_$]{2,}/g // 长度≥3 的标识符(过滤单双字母噪声)
-  for (let l = 0; l < cm.lineCount(); l++) {
-    const line = cm.getLine(l)
+  for (let l = 0; l < model.getLineCount(); l++) {
+    const line = model.getLineContent(l + 1)
     let mm: RegExpExecArray | null
     re.lastIndex = 0
     while ((mm = re.exec(line))) {
@@ -1466,42 +1473,74 @@ function collectDocWords(cm: CodeMirror.Editor, prefix: string): string[] {
   return Array.from(words)
 }
 
-/** 自定义 SQL 补全实现:schema 表/列 + 关键字 + 编辑器文中词(如输入过 dwd_lion_cs,输 dwd 即提示);schema 未就绪时退化为关键字+文中词,不阻塞等待 */
-async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | null> {
-  const cur = cm.getCursor()
-  const before = cm.getLine(cur.line).slice(0, cur.ch)
-  // 光标前标识符:支持 `表名.列名`(点号前后各一段)
-  const m = before.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)
-  // schema 未就绪时不再 return null:仍提供关键字/文中词提示
+function completionItem(
+  label: string,
+  kind: monaco.languages.CompletionItemKind,
+  range: monaco.IRange,
+  detail?: string
+): monaco.languages.CompletionItem {
+  return { label, kind, detail, insertText: label, range }
+}
+
+/** Monaco 补全:schema 表/列 + 关键字 + 当前文档标识符;PySpark 提供文档词 */
+async function provideEditorCompletions(
+  model: monaco.editor.ITextModel,
+  position: monaco.Position
+): Promise<monaco.languages.CompletionList> {
+  const beforeCursor = model.getValueInRange({
+    startLineNumber: position.lineNumber,
+    startColumn: 1,
+    endLineNumber: position.lineNumber,
+    endColumn: position.column
+  })
+  const identifier = beforeCursor.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)?.[1] ?? ''
+  const dotIndex = identifier.lastIndexOf('.')
+  const prefix = (dotIndex >= 0 ? identifier.slice(dotIndex + 1) : identifier).toLowerCase()
+  const range: monaco.IRange = {
+    startLineNumber: position.lineNumber,
+    endLineNumber: position.lineNumber,
+    startColumn: position.column - prefix.length,
+    endColumn: position.column
+  }
+
+  if (model.getLanguageId() === 'python') {
+    const suggestions = collectDocWords(model, prefix)
+      .filter((word) => word.toLowerCase().startsWith(prefix))
+      .map((word) => completionItem(word, monaco.languages.CompletionItemKind.Variable, range))
+    return { suggestions }
+  }
+
+  const suggestions: monaco.languages.CompletionItem[] = []
   const meta = db.value ? await ensureSchema(db.value) : null
-  if (!m) {
-    if (!meta) return null
-    return { list: [], from: cur, to: cur }
+  if (dotIndex >= 0 && meta) {
+    const tableName = identifier.slice(0, dotIndex).replace(/[`"']/g, '')
+    const table = meta.tables.find((item) => item.name.toLowerCase() === tableName.toLowerCase())
+    table?.columns
+      .filter((column) => column.name.toLowerCase().startsWith(prefix))
+      .forEach((column) => suggestions.push(completionItem(
+        column.name,
+        monaco.languages.CompletionItemKind.Field,
+        range,
+        [column.type, column.name].filter(Boolean).join(' · ')
+      )))
+    return { suggestions }
   }
-  const full = m[1]
-  const dotIdx = full.lastIndexOf('.')
-  let list: string[] = []
-  let fromCh: number
-  if (dotIdx >= 0 && meta) {
-    // 点语法列补全必须有 schema;无 schema 时退化为关键字/文中词
-    const tbl = full.slice(0, dotIdx)
-    const colPrefix = full.slice(dotIdx + 1).toLowerCase()
-    const t = meta.tables.find((x) => x.name.toLowerCase() === tbl.toLowerCase())
-    if (t) {
-      list = t.columns.filter((c) => c.name.toLowerCase().startsWith(colPrefix)).map((c) => c.name)
-      fromCh = cur.ch - (full.length - dotIdx - 1)
-      if (!list.length) return null
-      return { list: Array.from(new Set(list)), from: { line: cur.line, ch: fromCh }, to: cur }
-    }
-  } else {
-    const prefix = full.toLowerCase()
-    list.push(...SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(prefix)))
-  }
-  // 文中词提示(表名列名之外):当前画布出现过的标识符(输入过 dwd_lion_cs 后,输 dwd 即可提示);点语法时用列前缀过滤
-  const wordPrefix = (dotIdx >= 0 ? full.slice(dotIdx + 1) : full).toLowerCase()
-  list.push(...collectDocWords(cm, wordPrefix).filter((w) => w.toLowerCase().startsWith(wordPrefix)))
-  if (!list.length) return null
-  return { list: Array.from(new Set(list)), from: { line: cur.line, ch: cur.ch - wordPrefix.length }, to: cur }
+
+  meta?.tables
+    .filter((table) => table.name.toLowerCase().startsWith(prefix))
+    .forEach((table) => suggestions.push(completionItem(
+      table.name,
+      monaco.languages.CompletionItemKind.Class,
+      range,
+      table.comment || 'table'
+    )))
+  SQL_KEYWORDS
+    .filter((keyword) => keyword.toLowerCase().startsWith(prefix))
+    .forEach((keyword) => suggestions.push(completionItem(keyword, monaco.languages.CompletionItemKind.Keyword, range)))
+  collectDocWords(model, prefix)
+    .filter((word) => word.toLowerCase().startsWith(prefix))
+    .forEach((word) => suggestions.push(completionItem(word, monaco.languages.CompletionItemKind.Text, range, '当前文档')))
+  return { suggestions }
 }
 
 // ── Flink 流批模式与弹窗 ────────────────────────────────────
@@ -1511,12 +1550,12 @@ const showFlinkPreJob = ref(false)
 
 /** 连接器弹窗生成 DDL → 插入编辑器(多段用空行分隔) */
 function onInsertFlinkDdl(ddls: string[]) {
-  const c = cm
+  const c = sqlEditor
   if (!c || !ddls.length) return
   const text = ddls.join('\n\n')
-  const cur = c.getCursor()
-  c.replaceRange(text, cur)
-  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
+  const position = c.getPosition()!
+  c.executeEdits('portal-insert', [{ range: c.getSelection() || monaco.Selection.fromPositions(position, position), text }])
+  c.pushUndoStop()
   c.focus()
   ElMessage.success(`已插入 ${ddls.length} 条 CREATE TABLE`)
 }
@@ -1677,7 +1716,7 @@ const varMemory = new Map<string, string>()
 
 /** 编辑器内容变化/tab 切换后同步参数行:新增变量预填上次值,消失变量清输入 */
 function syncRunVarBar() {
-  const sql = cm?.getValue() ?? ''
+  const sql = sqlEditor?.getValue() ?? ''
   VAR_RE.lastIndex = 0
   const names: string[] = []
   let m: RegExpExecArray | null
@@ -1993,11 +2032,9 @@ watch(engine, async (val) => {
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
-  if (cm) {
-    // python 编辑器切换为 python 模式,其余为 SQL 模式
-    cm.setOption('mode', val === 'pyspark' ? 'text/x-python' : 'text/x-sql')
-    cm.refresh()
-  }
+  const model = sqlEditor?.getModel()
+  if (!model || activeTab.value?.file?.name.toLowerCase().endsWith('.py')) return
+  monaco.editor.setModelLanguage(model, val === 'pyspark' ? 'python' : 'sql')
 })
 
 /** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
@@ -2169,9 +2206,9 @@ async function copyAllTsv() {
       <span class="file-tabs-spacer" />
     </div>
 
-    <!-- SQL 画布(CodeMirror) -->
+    <!-- SQL 画布(Monaco Editor) -->
     <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
-      <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
+      <div ref="monacoRef" class="sql-editor"></div>
     </div>
 
     <!-- 拖拽分割条 -->
@@ -2607,19 +2644,9 @@ async function copyAllTsv() {
 
 .theme-btn {
   padding: 4px;
-  font-size: 16px;
 }
 
-.exec-kbd {
-  margin-left: 6px;
-  padding: 1px 5px;
-  font-size: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.15);
-}
-
-/* ── SQL 画布(CodeMirror) ────────────────────────────────── */
+/* ── SQL 画布(Monaco Editor) ────────────────────────────── */
 .sql-canvas {
   position: relative;
   display: flex;
@@ -2637,216 +2664,24 @@ async function copyAllTsv() {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  overflow: hidden;
 
-  /* CodeMirror 公共(字体由 --cm-font-size 控制) */
-  :deep(.CodeMirror) {
-    flex: 1;
-    width: 100%;
-    height: 100%;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: var(--cm-font-size, 15px);
-    line-height: 1.6;
+  :deep(.monaco-editor) {
+    position: absolute;
+    inset: 0;
+    outline: none;
   }
 
-  :deep(.CodeMirror-scroll) {
-    width: 100%;
-    height: 100%;
-    overflow: auto;
+  :deep(.monaco-editor .suggest-widget) {
+    z-index: 3000;
+    overflow: visible;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
   }
 
-  :deep(.CodeMirror-linenumber) {
-    font-size: var(--cm-font-size, 15px);
-    padding: 0 8px 0 4px;
-  }
-
-  :deep(.CodeMirror-cursor) {
-    border-left: 2px solid;
-  }
-
-  :deep(.CodeMirror-selected) {
-    background: rgba(97, 175, 239, 0.25);
-  }
-
-  /* 选中词全画布高亮(match-highlighter overlay;addon 本身不带样式) */
-  :deep(.cm-matchhighlight) {
-    background: rgba(229, 192, 123, 0.28);
-    border-radius: 2px;
-  }
-
-  :deep(.CodeMirror-activeline-background) {
-    background: rgba(97, 175, 239, 0.08);
-  }
-
-  :deep(.CodeMirror-matchingbracket) {
-    font-weight: 700;
-    background: rgba(229, 192, 123, 0.2);
-    border-radius: 2px;
-  }
-
-  :deep(.bracket-match) {
-    background: rgba(229, 192, 123, 0.35);
-    border-radius: 2px;
-  }
-
-  /* 语法 token 公共字体 */
-  :deep(.cm-keyword),
-  :deep(.cm-string),
-  :deep(.cm-comment),
-  :deep(.cm-number),
-  :deep(.cm-builtin),
-  :deep(.cm-variable),
-  :deep(.cm-operator) {
-    font-size: var(--cm-font-size, 15px);
-  }
-
-  /* ── 深色主题(柔和深灰蓝) ───────────────────────────── */
-  .sql-canvas.dark & {
-    :deep(.CodeMirror) {
-      background: #34373c;
-      color: #c8ccd4;
-    }
-    :deep(.CodeMirror-gutters) {
-      background: #2e3135;
-      border-right: 1px solid #26292d;
-    }
-    :deep(.CodeMirror-linenumber) {
-      color: #7a818c;
-    }
-    :deep(.CodeMirror-cursor) {
-      border-left-color: #e6e8ec;
-    }
-    :deep(.cm-keyword) {
-      color: #d19a66;
-      font-weight: 600;
-    }
-    :deep(.cm-string) {
-      color: #98c379;
-    }
-    :deep(.cm-comment) {
-      color: #7a818c;
-      font-style: italic;
-    }
-    :deep(.cm-number) {
-      color: #61afef;
-    }
-    :deep(.cm-builtin) {
-      color: #56b6c2;
-    }
-    :deep(.cm-variable) {
-      color: #e06c75;
-    }
-    :deep(.cm-operator) {
-      color: #56b6c2;
-    }
-    :deep(.CodeMirror-matchingbracket) {
-      color: #e5c07b !important;
-      background: rgba(229, 192, 123, 0.25);
-      border-bottom: 2px solid #e5c07b;
-      font-weight: 700;
-    }
-  }
-
-  /* ── 浅色主题(柔和米白) ─────────────────────────────── */
-  .sql-canvas.light & {
-    :deep(.CodeMirror) {
-      background: #f7f8fa;
-      color: #3a3f45;
-    }
-    :deep(.CodeMirror-gutters) {
-      background: #eceff2;
-      border-right: 1px solid #dde1e5;
-    }
-    :deep(.CodeMirror-linenumber) {
-      color: #8a9199;
-    }
-    :deep(.CodeMirror-cursor) {
-      border-left-color: #3a3f45;
-    }
-    :deep(.CodeMirror-selected) {
-      background: rgba(9, 105, 218, 0.15);
-    }
-    :deep(.CodeMirror-activeline-background) {
-      background: rgba(9, 105, 218, 0.05);
-    }
-    :deep(.cm-keyword) {
-      color: #c2185b;
-      font-weight: 600;
-    }
-    :deep(.cm-string) {
-      color: #0a5f5f;
-    }
-    :deep(.cm-comment) {
-      color: #8a9199;
-      font-style: italic;
-    }
-    :deep(.cm-number) {
-      color: #0b4f8a;
-    }
-    :deep(.cm-builtin) {
-      color: #6f42c1;
-    }
-    :deep(.cm-variable) {
-      color: #953800;
-    }
-    :deep(.cm-operator) {
-      color: #0b4f8a;
-    }
-    :deep(.CodeMirror-matchingbracket) {
-      color: #c2185b !important;
-      background: rgba(194, 24, 91, 0.12);
-      border-bottom: 2px solid #c2185b;
-      font-weight: 700;
-    }
+  :deep(.monaco-editor .find-widget) {
+    border-radius: 0 0 8px 8px;
   }
 }
-
-/* 自动补全提示框:跟随主题配色(CodeMirror-hints 是 body 级,用全局选择器) */
-:global(.CodeMirror-hints) {
-  border-radius: 8px;
-  border: 1px solid rgba(125, 139, 169, 0.25);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
-  font-size: 13px;
-  padding: 4px;
-  max-height: 320px;
-  z-index: 3000; /* 盖过 el-dialog/el-popper 默认层级,画布在抽屉/弹窗里也能浮出 */
-}
-
-:global(.CodeMirror-hint) {
-  padding: 4px 12px;
-  border-radius: 5px;
-  margin: 1px 2px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: #cdd6f4;
-  transition: background 0.05s;
-}
-
-/* 选中项:主题色高亮条 */
-:global(.CodeMirror-hint-active),
-:global(li.CodeMirror-hint-active) {
-  background: rgba(86, 156, 214, 0.28) !important;
-  color: #fff !important;
-  border-radius: 5px;
-}
-
-/* 浅色主题下的提示框配色(html.dark 切换,与画布双主题一致) */
-:global(html:not(.dark) .CodeMirror-hints) {
-  background: #fff;
-  color: #24292f;
-}
-:global(html:not(.dark) .CodeMirror-hint) {
-  color: #24292f;
-}
-:global(html:not(.dark) li.CodeMirror-hint-active) {
-  background: #e8f0fe !important;
-  color: #1a73e8 !important;
-}
-:global(html.dark .CodeMirror-hints) {
-  background: #252b3b;
-  color: #cdd6f4;
-}
-
 /* 拖拽分割条 */
 .sql-dragbar {
   height: 8px;

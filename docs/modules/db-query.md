@@ -2,13 +2,13 @@
 
 ## 1. 职责
 
-统一 SQL 工作台:MySQL / Oracle / Doris / **SparkSQL** / **FlinkSQL** 查询、编辑器(CodeMirror 5)、结果多 tab、脚本文件树、Flink 流任务/PreJob 管理。
+统一 SQL 工作台:MySQL / Oracle / Doris / **SparkSQL** / **FlinkSQL** 查询、编辑器(Monaco Editor)、结果多 tab、脚本文件树、Flink 流任务/PreJob 管理。
 
 ## 2. 涉及文件
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/db/QueryView.vue` | 主工作台:引擎/数据源下拉、CodeMirror 编辑器、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史、日志面板、解锁;支持双击表目录表节点生成预览查询自动执行;结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;工具栏 **EXPLAIN** 打开执行计划树;编辑器 **schema 驱动补全**(Ctrl+Space) |
+| 视图 | `src/views/db/QueryView.vue` | 主工作台:引擎/数据源下拉、Monaco 编辑器画布、快捷键(Ctrl/Cmd+Enter 执行、Ctrl/Cmd+S 保存、Ctrl/Cmd+Shift+F 格式化)、结果多 tab、执行历史、日志面板;支持双击表目录表节点生成预览查询自动执行;结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;工具栏 **EXPLAIN** 打开执行计划树;编辑器 **schema 驱动补全** |
 | 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(库→表→字段,含表/字段注释,双击表预览,复制表名/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
@@ -37,18 +37,18 @@
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
 - **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停;自动滚动到底部跟随最新 200 条(双 rAF 等 DOM 就绪再滚,用户上翻阅读旧日志时暂停跟随,回到底部附近自动恢复)
 - **解锁体系(已移除)**:写权限密码验证(`/api/spark/auth` + `X-Spark-Token`)已移除 —— 写 SQL 直接执行,权限由「数据权限矩阵」管控,数据源 `readOnly` 兑底;spark/flink 网关不再校验解锁 token(db-proxy 侧 `writeToken` 密钥与资源护栏保留)
-- **编辑器**:CodeMirror 5,自实现括号补全/Tab 缩进/Shift+Tab,主题跟随全局
+- **编辑器**:Monaco Editor,内置行号/折叠/查找替换/括号匹配/多光标/拖拽选择;`.py` 或 PySpark 引擎使用 Python 语言模式,其余使用 SQL 模式。主题提供画布内深浅切换,字体 11–24px 持久化。
 - **脚本树**:`data/scripts` 本地存储,文件 = 脚本(不入库);**按用户分桶**(2026-08)——`tree.json` 按用户名分桶(`users.<username>.my` 私有桶 + `users.__shared__` 公共桶);前端固定双根:「我的文件夹」(私有,仅本人可见可写)+「共享文件夹」(**所有人可读可写**,全员协作,右键含完整菜单 + 「复制到我的文件夹」,可拖入拖出);旧版顶层 `{my:[]}` 格式首次加载自动迁移进公共桶
 - **元数据深度**:表目录懒加载已切 detail 模式 —— 表节点显示表注释(悬停完整),字段节点显示类型+注释,双击表节点一键预览(`SELECT * ... LIMIT 100`,Oracle 用 `FETCH FIRST 100 ROWS ONLY` 与双引号标识符),表节点按钮支持复制表名 / 复制建表语句(`/ddl`)
 - **复制建表语句**:`/ddl?db=&table=` —— MySQL 走 `SHOW CREATE TABLE`,Oracle 走 `DBMS_METADATA.GET_DDL`,需账号有对应元数据读取权限,失败友好报错
 - **行内编辑(写场景)**:仅**双击表生成的预览 tab**(单表 `SELECT *` 且带主键)可编辑 —— 双击单元格进入编辑(主键列拒绝),改值后结果工具条「提交修改 (N)」列出全部变更,弹确认框展示生成的 `UPDATE ... SET ... WHERE 主键` 完整 SQL(多条按行分组逐条执行,MySQL 反引号 / Oracle 双引号,字符串/日期转义 `''`、数字/布尔/null 原样),确认后直接执行(写权限验证已移除),成功后清空待提交列表并自动重查刷新;无主键/非预览 tab 不可编辑
 - **写审计**:db-proxy 对 MySQL/Oracle/Doris 的写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines):时间、数据源、sql(截断 500)、影响行数、耗时、来源(sync/async)。只读数据源被拦的写尝试同样记录
 - **数据权限矩阵(P3)**:网关层用户/角色→库白名单(`server/data/db-permissions.json`),带 `db` 参数的 MySQL/Oracle 接口按调用者校验,不在其 dbs → 403;admin 放行、无规则回退全局白名单;**管理入口已集成到「用户管理」页**(用户行内「库权限」编辑弹窗 + 「数据权限」tab 内嵌 DbPermView,原独立菜单/路由 `/db-perms` 已移除);**`GET /api/db/acl` 按当前用户过滤数据源列表**(库下拉/表目录只展示开放的库,admin/无规则全量)。详见 `docs/modules/db-permissions.md`
-- **Schema 补全**:`/schema?db=` 一次性返回该库全部表+字段(MySQL `information_schema` / Oracle `all_tables+all_tab_columns`),按当前数据源缓存;编辑器 Ctrl+Space 触发补全 —— 表名优先,表名下钻字段名,SQL 关键字兜底
+- **Schema 补全**:Monaco completion provider 按 `/schema?db=` 提供关键字、当前文档标识符、schema 表和点语法列;PySpark 提供当前文档词补全。输入字母/数字/下划线/点号自动触发,Ctrl/Cmd+Space 手动触发。schema 首次按库懒加载并缓存。
 - **EXPLAIN 可视化**:工具栏「EXPLAIN」取选中 SQL → `/explain` —— MySQL 走 `EXPLAIN FORMAT=JSON` 解析成树(降级普通 EXPLAIN 表格),Oracle 走 `EXPLAIN PLAN FOR` + `DBMS_XPLAN` 表格按 ID/PARENT_ID 递归成树;结果在弹窗中用 el-tree 展示(访问类型/行数/代价/过滤条件)
 - **SQL 传参(内联参数行)**:自动识别画布 SQL 中全部 `${var}`(字母/下划线开头,有序去重),在分割条下方「SQL 参数」行内联填值(el-input,无变量时不占位;编辑器内容/tab 切换实时同步,同名变量会话内记忆上次取值自动预填);**只替换本次执行段内已填值的变量,未填值的保持 `${var}` 原样交由引擎报错,不阻断其他 SQL 执行**(2026-08 修复:此前按画布全集校验导致缺参卡住所有查询)。原 `${T}/${T-N}` 内置日期变量、`${T-1} 传参` 下拉与 ElMessageBox 弹窗传参已移除;快捷键提示行移至底部状态栏主题项旁
 - **历史与收藏**:QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history:<用户名>`(**按用户隔离**,同一浏览器多账号互不可见;认证关闭落到 `default`;**上限 20 条循环缓存**:新在前、同 sql 去重、超出删最旧);侧栏「历史」tab 星标收藏写入 `db-query-favorites:<用户名>`(上限 50);**点击历史/收藏条目只回填编辑器不自动执行**(历史是缓存,用户按 Cmd+Enter 自行运行);**结果快照随历史缓存**(2026-08)——执行成功时把该 SQL 的列+前 100 行快照写入条目(序列化 >200KB 不缓存),点击带快照的条目除回填编辑器外直接开一个「缓存」标记的结果 tab 免重查展示,历史/收藏列表以「结果」小徽标标识
-- **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档**(2026-08)——每个 tab 一个 CodeMirror Doc(`swapDoc` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;自动保存仅读活跃文档实时内容,非活跃用切换时写回的快照(修复迟到防抖定时器把别 tab 内容覆盖到磁盘原文件的 bug),切走即触发脏 tab 保存
+- **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Ctrl/Cmd+Enter 运行、Ctrl/Cmd+S 保存、Ctrl/Cmd+Space 补全、Ctrl/Cmd+Shift+F 格式化、Ctrl/Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立模型**——每个 tab 一个 Monaco `ITextModel`,保留独立撤销历史与光标状态,关闭时释放;自动保存仅读活跃模型实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
 - **Spark Stage 进度**:spark 查询执行中,日志面板顶部按 3s 节奏轮询 `/spark/stages`(后端 `sparkContext.statusTracker()` 聚合活跃 job/stage:任务数/已完成/失败/状态),每条 stage 一个 el-progress 进度条,RUNNING 蓝 / SUCCEEDED 绿 / FAILED 红;local 模式或 statusTracker 不可用时自动降级为空
 
 ## 5. 数据源
