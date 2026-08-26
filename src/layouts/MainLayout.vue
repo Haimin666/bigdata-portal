@@ -5,6 +5,9 @@ import { menus } from '@/config/menu'
 import SideBar from './components/SideBar.vue'
 import TabStage from './components/TabStage.vue'
 import type { PortalTab } from '@/views/subapp/SubappTabs.vue'
+import dayjs from 'dayjs'
+import { fmtDateTime } from '@/utils/datetime'
+import { useEventListener } from '@vueuse/core'
 
 defineOptions({ name: 'MainLayout' })
 
@@ -85,9 +88,7 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
 const clockText = ref('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 function tickClock() {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  clockText.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  clockText.value = fmtDateTime(dayjs()) // dayjs 统一:本地时区秒级时钟
 }
 onMounted(() => {
   tickClock()
@@ -120,8 +121,7 @@ function onKeydown(e: KeyboardEvent) {
     switchTab(e.shiftKey ? -1 : 1)
   }
 }
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+useEventListener(window, 'keydown', onKeydown) // VueUse: 自动随组件卸载清理
 </script>
 
 <template>

@@ -324,6 +324,7 @@
 </template>
 
 <script setup lang="ts">
+import { useResizeObserver } from '@vueuse/core'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Promotion, Document, Cpu, Setting, Delete, VideoPlay, FolderOpened, Grid, Clock, Search, Position } from '@element-plus/icons-vue'
@@ -938,11 +939,9 @@ function renderGraph() {
     })
   })
   graphInst.on('node:mouseleave', clearHover)
-  const ro = new ResizeObserver(() => {
+  useResizeObserver(g6El, () => {
     if (g6El.value) graphInst?.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
   })
-  ro.observe(g6El.value)
-  ;(graphInst as any).__ro = ro
 }
 
 // 切换选中节点后重渲染高亮

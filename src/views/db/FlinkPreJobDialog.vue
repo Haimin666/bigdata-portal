@@ -8,6 +8,7 @@ import {
   flinkJobs, flinkJobStop,
   type FlinkPreJob, type FlinkPreJobResources, type FlinkJob
 } from '@/api/db'
+import LogViewer from '@/components/LogViewer.vue'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>()
@@ -428,7 +429,10 @@ watch(activeTab, () => loadActive())
         <el-button size="small" :icon="Refresh" :loading="logLoading" @click="refreshLogs">刷新</el-button>
       </div>
       <el-alert v-if="logData.error" :title="logData.error" type="error" :closable="false" class="log-alert" />
-      <pre class="log-pre">{{ logData.logs || '(无日志输出)' }}</pre>
+      <!-- 日志体:通用 LogViewer(Monaco 只读);error 文案走 empty 兜底 -->
+      <div class="log-pre">
+        <LogViewer :text="logData.error ? '' : logData.logs" :empty="logData.error || '(无日志输出)'" height="100%" />
+      </div>
     </el-drawer>
 
     <!-- 编辑弹窗 -->
@@ -522,15 +526,9 @@ watch(activeTab, () => loadActive())
   margin-bottom: 8px;
 }
 .log-pre {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  /* LogViewer(Monaco)自带滚动与配色,容器只定高 */
+  height: calc(100% - 40px);
   border-radius: 4px;
-  padding: 10px;
-  font-size: 12px;
-  line-height: 1.5;
-  max-height: 60vh;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
+  overflow: hidden;
 }
 </style>

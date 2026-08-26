@@ -80,6 +80,7 @@
 </template>
 
 <script setup lang="ts">
+import { useResizeObserver } from '@vueuse/core'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import G6 from '@antv/g6'
@@ -116,7 +117,6 @@ const currentKey = ref('')
 // 依赖状态查询固定在当天(00:00→现在);不做日期范围选择
 const g6El = ref<HTMLDivElement>()
 let graph: any | null = null
-let ro: ResizeObserver | null = null
 
 // 节点对象引用(供双击跳转)
 const nodeRefMap = new Map<string, DepNode>()
@@ -497,8 +497,6 @@ function renderChart() {
 function destroyChart() {
   graph?.destroy()
   graph = null
-  ro?.disconnect()
-  ro = null
 }
 
 async function load() {
@@ -637,14 +635,13 @@ watch(
 onMounted(() => {
   // 初进即有 processId(抽屉/右侧面板场景)时自动加载依赖 DAG,无需手动刷新
   if (props.processId) load()
-  if (g6El.value) {
-    ro = new ResizeObserver(() => {
-      if (g6El.value && graph) {
-        graph.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
-        graph.fitView(30, true, false)
-      }
-    })
-    ro.observe(g6El.value)
+})
+
+// 容器尺寸自适应(VueUse: 卸载自动清理;graph 就绪时才 changeSize)
+useResizeObserver(g6El, () => {
+  if (g6El.value && graph) {
+    graph.changeSize(g6El.value.clientWidth, g6El.value.clientHeight)
+    graph.fitView(30, true, false)
   }
 })
 onBeforeUnmount(destroyChart)

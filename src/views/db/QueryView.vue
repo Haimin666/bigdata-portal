@@ -2,35 +2,18 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
-import { CaretRight, Download, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, CopyDocument, Grid } from '@element-plus/icons-vue'
-import CodeMirror from 'codemirror'
-import 'codemirror/lib/codemirror.css'
-import 'codemirror/mode/sql/sql.js'
-import 'codemirror/mode/python/python.js'
-// 官方 addon(静态 import,Vite 下以 CJS 转换后挂到同一 CodeMirror 实例):
-// 补全 / 折叠 / 括号匹配与自动闭合 / 光标行 / 选中高亮 / 容器自适应刷新
-import 'codemirror/addon/hint/show-hint.js'
-import 'codemirror/addon/hint/sql-hint.js'
-import 'codemirror/addon/hint/anyword-hint.js'
-import 'codemirror/addon/hint/show-hint.css'
-import 'codemirror/addon/fold/foldcode.js'
-import 'codemirror/addon/fold/foldgutter.js'
-import 'codemirror/addon/fold/indent-fold.js'
-import 'codemirror/addon/fold/brace-fold.js'
-import 'codemirror/addon/fold/comment-fold.js'
-import 'codemirror/addon/fold/foldgutter.css'
-import 'codemirror/addon/edit/matchbrackets.js'
-import 'codemirror/addon/edit/closebrackets.js'
-import 'codemirror/addon/selection/active-line.js'
-import 'codemirror/addon/search/match-highlighter.js'
-import 'codemirror/addon/search/searchcursor.js' // match-highlighter 的前置依赖(缺它选中词全画布高亮静默失效)
-import 'codemirror/addon/display/autorefresh.js'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, queryDb, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, VideoPause, Promotion } from '@element-plus/icons-vue'
+import * as monaco from 'monaco-editor'
+import { useMonaco } from '@/editor/useMonaco'
+import { setCompletionDb } from '@/editor/sqlCompletion'
+import type { PendingEdit, QueryResultItem } from './queryTypes'
+import { useDebounceFn } from '@vueuse/core'
+import { listDataSources, saveScriptContent, getScriptContent, createScriptNode, queryDb, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
-import { copyText } from '@/utils/clipboard'
 import SqlTreePanel from './SqlTreePanel.vue'
+import ResultGrid from './components/ResultGrid.vue'
 import { useSparkLogPolling } from './composables/useSparkLogPolling'
-import { sqlSchemaHint as sqlSchemaHintImpl } from './composables/useSqlCompletion'
+import { useRunner, setHistUser } from './composables/useRunner'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
@@ -40,6 +23,8 @@ import ExplainDialog from './components/ExplainDialog.vue'
 const sparkLogPanelRef = ref<InstanceType<typeof SparkLogPanel>>()
 
 defineOptions({ name: 'DbQueryView' })
+
+const authStore = useAuthStore()
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
@@ -51,110 +36,16 @@ const sparkExecutorsLoading = ref(false)
 const loading = ref(false)
 const error = ref('')
 
-// 写权限密码验证已移除(由网关库权限矩阵管控 + 数据源 readOnly 兜底),以下直接执行
-/** 判定 SQL 是否可能为写操作(与后端 server/index.js 的 isSparkWriteSql 保持一致):
- *  只读关键字开头放行;WITH 前缀且无写关键字放行;含分号/其余一律视为写。
- *  引号感知切分(字符串内分号不算多语句),并拦截 SELECT INTO OUTFILE/LOAD_FILE 走私 */
-function isSparkWriteSql(sql: string): boolean {
-  const raw = String(sql)
-  // MySQL/MariaDB 可执行注释 /*! ... */ 与 /*M! ... */ 会被数据库执行,绝不能当普通注释删除 —— 检测到一律视为写
-  if (/\*[Mm]?!/.test(raw)) return true
-  let s = raw
-    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '')
-    .trim()
-  if (!s) return false
-  // 引号感知切分:跳过单引号字符串内的分号
-  const parts: string[] = []
-  let cur = ''
-  let inStr = false
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]
-    if (c === '\\' && i + 1 < s.length) {
-      cur += c + s[i + 1]
-      i++
-      continue
-    }
-    if (c === "'") {
-      inStr = !inStr
-      cur += c
-      continue
-    }
-    if (c === ';' && !inStr) {
-      parts.push(cur)
-      cur = ''
-      continue
-    }
-    cur += c
-  }
-  parts.push(cur)
-  const last = parts[parts.length - 1].trim()
-  if (parts.length > 2 || (parts.length === 2 && last !== '')) return true
-  s = last || parts[0].trim()
-  // SELECT 前缀走私(INTO OUTFILE/DUMPFILE、LOAD_FILE)视为写
-  if (/\bINTO\s+(OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(/i.test(s)) return true
-  if (/^(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|SET|USE)\b/i.test(s)) return false
-  if (/^WITH\b/i.test(s) && !/\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|MSCK|REFRESH|LOAD|OVERWRITE)\b/i.test(s)) return false
-  return true
-}
-
-/** 当前 Spark 异步任务的 jobId(供停止按钮精确取消) */
-const currentSparkJobId = ref('')
-
-/** Spark 执行:异步任务模式 —— 提交即返回 jobId,前端轮询结果。
- *  动机:公司网关固定 60s 读超时,同步长请求(大查询可能跑数十分钟/小时)
- *  必被掐断 504;异步化后提交/查状态都是秒级往返,永不撞超时。
- *  SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行。 */
-async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  const needsAuth = kind === 'pyspark' || (kind === 'sql' && isSparkWriteSql(sql))
-  if (needsAuth) {
-    // 写权限密码验证已移除(网关库权限矩阵管控),直接执行
-  }
-  const { jobId } = await submitSparkJob(sql, undefined, kind, 7200000)
-  currentSparkJobId.value = jobId
-  const deadline = Date.now() + 7200000 // 上限 2 小时
-  while (Date.now() < deadline) {
-    if (batchCancelled) {
-      try {
-        await cancelSparkJob(jobId)
-      } catch {
-        /* 忽略 */
-      }
-      throw new Error('已取消')
-    }
-    const j = await getSparkJob(jobId)
-    if (j.state === 'done') {
-      currentSparkJobId.value = ''
-      return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
-    }
-    if (j.state === 'failed') {
-      currentSparkJobId.value = ''
-      throw new Error(j.error || '任务执行失败')
-    }
-    if (j.state === 'cancelled') {
-      // 后端/他人/网关已取消:清 jobId 退出,避免空转轮询到 2 小时上限
-      currentSparkJobId.value = ''
-      throw new Error('已取消')
-    }
-    await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
-  }
-  try {
-    await cancelSparkJob(jobId)
-  } catch {
-    /* 忽略 */
-  }
-  currentSparkJobId.value = ''
-  throw new Error('任务超时(2 小时),已自动取消')
-}
-
 // ── 多文件 tab(最多 10 个)──────────────────────────────────
 const MAX_TABS = 10
 interface EditorTab {
   id: string
   file: ScriptNode | null // 绑定的文件;null = 未命名查询
   name: string
-  content: string // 内容快照(自动保存/草稿用;编辑实时内容在 doc 里)
+  content: string // 内容快照(自动保存/草稿用;编辑实时内容在 model 里)
   dirty: boolean
-  doc: CodeMirror.Doc // 每文件独立文档:独立撤销历史(Cmd+Z 不串文件)+ 光标位置
+  /** 每文件独立 Monaco 文档模型:独立撤销历史(Cmd+Z 不串文件)+ 光标位置 */
+  model?: monaco.editor.ITextModel
 }
 let tabSeq = 0
 function newTab(name: string, content: string, id?: string): EditorTab {
@@ -163,17 +54,23 @@ function newTab(name: string, content: string, id?: string): EditorTab {
     file: null,
     name,
     content,
-    dirty: false,
-    doc: CodeMirror.Doc(content, 'text/x-sql')
+    dirty: false
   }
 }
+/** 创建/复用 tab 的文档模型(语言按文件后缀;model 生命周期随 tab 关闭统一释放) */
+function ensureTabModel(t: { name: string; content: string; model?: monaco.editor.ITextModel }): monaco.editor.ITextModel {
+  if (!t.model || t.model.isDisposed()) {
+    const lang = t.name.toLowerCase().endsWith('.py') ? 'python' : 'sql'
+    t.model = monaco.editor.createModel(t.content, lang)
+  }
+  return t.model
+}
 
-/** 把 tab 的文档挂到编辑器(已挂则同步快照兜底);替代旧 setValue 整体替换方案 */
+/** 把 tab 的文档挂到编辑器(model 即 tab 文档,独立撤销历史);替代旧 setValue 整体替换方案 */
 function showTabInEditor(t: EditorTab) {
-  if (!cm) return
-  if (!t.doc) t.doc = CodeMirror.Doc(t.content, 'text/x-sql') // 兼容旧路径
-  if (cm.getDoc() !== t.doc) cm.swapDoc(t.doc)
-  syncRunVarBar() // swapDoc 不触发 change 事件,参数行需按新文档内容重建
+  if (!ed) return
+  ensureTabModel(t)
+  setModel(t.model ?? null) // 程序性挂载(不标 dirty);setModel 会触发 change → 参数行自动重建
 }
 
 // ── 临时 query 草稿(未命名 tab 也自动保存到 localStorage)──────
@@ -227,19 +124,15 @@ function initTabs() {
 }
 
 /** 防抖自动保存:停止输入 2s 后落盘(绑定文件)或写草稿(临时 query) */
-let autoSaveTimer: number | undefined
-function scheduleAutoSave(tab: EditorTab) {
-  if (autoSaveTimer) clearTimeout(autoSaveTimer)
-  autoSaveTimer = window.setTimeout(() => {
-    autoSaveTimer = undefined
-    void autoSaveTab(tab)
-  }, 2000)
-}
+// 自动保存:2s 防抖(VueUse useDebounceFn,卸载自动取消挂起调用)
+const scheduleAutoSave = useDebounceFn((tab: EditorTab) => {
+  void autoSaveTab(tab)
+}, 2000)
 async function autoSaveTab(tab: EditorTab) {
   if (!tabs.value.includes(tab)) return // tab 已关闭
   // 仅当该 tab 仍是活跃 tab 时才读编辑器实时内容;否则用切换时已写回的快照。
   // 否则迟到的防抖定时器会把别的 tab 内容存进本 tab,覆盖磁盘上的原文件!
-  if (activeTab.value === tab) tab.content = cm?.getValue() ?? tab.content
+  if (activeTab.value === tab) tab.content = getValue()
   if (tab.file) {
     try {
       await saveScriptContent(tab.file.id, tab.content)
@@ -261,7 +154,7 @@ initTabs()
 /** 把当前编辑器内容写回当前 tab(切换/关闭前调用) */
 function flushActiveContent() {
   const t = activeTab.value
-  if (t) t.content = cm?.getValue() ?? ''
+  if (t) t.content = getValue()
 }
 
 /** 切换 tab:写回当前内容 → 挂载目标文档(独立撤销历史) */
@@ -276,7 +169,7 @@ function switchTab(id: string) {
     showTabInEditor(next)
     if (next.file?.name.toLowerCase().endsWith('.py')) engine.value = 'pyspark'
   }
-  cm?.focus()
+  edRef.value?.focus()
 }
 
 /** 关闭 tab:有未保存修改先确认;关闭后激活相邻 tab,全关则新建一个未命名 tab */
@@ -306,7 +199,7 @@ async function closeTab(id: string) {
       showTabInEditor(next)
     }
   }
-  cm?.focus()
+  edRef.value?.focus()
 }
 
 /** 新建查询:追加一个未命名 tab(最多 MAX_TABS 个) */
@@ -320,7 +213,7 @@ function newQuery() {
   tabs.value.push(nt)
   activeTabId.value = nt.id
   showTabInEditor(nt)
-  cm?.focus()
+  edRef.value?.focus()
 }
 
 /** 保存当前所有临时 tab 草稿(离开页面前兜底,防抖未触发时) */
@@ -351,7 +244,7 @@ async function onOpenFile(node: ScriptNode) {
       name: node.name,
       content,
       dirty: false,
-      doc: CodeMirror.Doc(content || '', 'text/x-sql')
+      model: undefined // model 由 showTabInEditor→ensureTabModel 按需创建
     }
     tabs.value.push(tab)
     activeTabId.value = tab.id
@@ -368,23 +261,18 @@ async function onOpenFile(node: ScriptNode) {
 
 /** 表目录点击 → 在光标处插入表名/字段名 */
 function onInsert(text: string) {
-  const c = cm
-  if (!c) return
-  const cur = c.getCursor()
-  c.replaceRange(text, cur)
-  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
-  c.focus()
+  if (!ed) return
+  insertAtCursor(text) // 光标处插入,光标停文本尾并聚焦(useMonaco 封装)
 }
 
 /** 历史/收藏条目点击(SqlTreePanel runSql 事件):历史是缓存,只回填编辑器不自动执行;
  *  有结果快照时直接开一个「缓存」结果 tab 免重查展示 */
 function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record<string, unknown>[] }) {
-  const c = cm
-  if (!c) return
+  if (!ed) return
   const s = String(sql || '')
   if (!s.trim()) return
-  c.setValue(s)
-  c.focus()
+  setValue(s) // 程序性回填:不标 dirty(历史是缓存)
+  ed.focus()
   if (result && Array.isArray(result.columns) && Array.isArray(result.rows)) {
     results.value.push({
       sql: s,
@@ -439,13 +327,13 @@ async function onOpenTable(payload: { db: string; table: string }) {
       name: `${payload.db}.${payload.table}`,
       content: sql,
       dirty: false,
-      doc: CodeMirror.Doc(sql, 'text/x-sql')
+      model: undefined // model 由 showTabInEditor→ensureTabModel 按需创建
     }
     tabs.value.push(tab)
     activeTabId.value = tab.id
     showTabInEditor(tab)
   }
-  cm?.setValue(sql)
+  setValue(sql) // 预览 SQL 覆盖当前文档(程序性写入:不标 dirty)
   await runQuery()
   // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
   const r = results.value[results.value.length - 1]
@@ -477,7 +365,7 @@ async function saveActive() {
   if (!tab) return
   if (tab.file) {
     try {
-      await saveScriptContent(tab.file.id, cm?.getValue() ?? '')
+      await saveScriptContent(tab.file.id, getValue())
       tab.dirty = false
       ElMessage.success(`已保存 ${tab.name}`)
       treePanelRef.value?.reloadMy()
@@ -495,7 +383,7 @@ async function saveActive() {
     let name = (value || '').trim()
     if (!name.toLowerCase().endsWith('.sql')) name += '.sql'
     const node = await createScriptNode(null, name, 'file')
-    await saveScriptContent(node.id, cm?.getValue() ?? '')
+    await saveScriptContent(node.id, getValue())
     tab.file = node
     tab.name = name
     tab.dirty = false
@@ -544,17 +432,29 @@ const filteredDbs = computed(() => {
 // 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
 const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark' && d.type !== 'flinksql'))
 
-// ── CodeMirror 编辑器 ───────────────────────────────────────
+// ── Monaco 编辑器 ───────────────────────────────────────────
 const cmRef = ref<HTMLElement>()
 const canvasRef = ref<HTMLElement>()
-let cm: CodeMirror.Editor | null = null
-let completionTimer: number | null = null
-
-// 默认 SQL:清空(用户自行编写)
-const DEFAULT_SQL = ''
+// useMonaco 薄层:创建/销毁/主题/字号/读写/快捷键(编辑器层与业务层解耦,见 src/editor/)
+const {
+  editor: edRef,
+  getValue,
+  setValue,
+  setModel,
+  insertAtCursor,
+  getSelectionText,
+  getCursorOffset,
+  setLanguage,
+  setTheme,
+  setFontSize,
+  onContentChange,
+  addCommands
+} = useMonaco(cmRef, { language: 'sql', fontSize: parseInt(localStorage.getItem('db-query-fontsize') || '15', 10) || 15 })
+/** 当前编辑器实例(useMonaco 在 onMounted 创建;模板 ref 同名绑定) */
+let ed: monaco.editor.IStandaloneCodeEditor | null = null
 
 // 编辑器主题:dark(默认)/ light,持久化到 localStorage
-// 只作用于本页 sql-canvas 画布(CodeMirror 区域),与全局主题解耦:
+// 只作用于本页 sql-canvas 画布(Monaco portal-dark/light 主题),与全局主题解耦:
 // 初始跟随全局(getTheme),之后用户按按钮仅切画布,不影响全局
 const THEME_KEY = 'db-query-theme'
 const themeMode = ref<'dark' | 'light'>(
@@ -570,151 +470,59 @@ const MAX_FONT = 24
 function toggleTheme() {
   themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
   localStorage.setItem(THEME_KEY, themeMode.value)
-  // 仅切换画布 class(.sql-canvas.dark / .light),不调 applyTheme,避免污染全局主题
-  nextTick(() => cm?.refresh())
+  // 仅切换画布主题(portal-dark/light),不调 applyTheme,避免污染全局主题
+  setTheme(themeMode.value)
 }
 
 function adjustFont(delta: number) {
   fontSize.value = Math.min(MAX_FONT, Math.max(MIN_FONT, fontSize.value + delta))
   localStorage.setItem(FONT_KEY, String(fontSize.value))
+  setFontSize(fontSize.value) // Monaco 实时生效(替代 CSS 变量+refresh)
 }
 
-async function initEditor() {
-  if (!cmRef.value || cm) return
+/** 初始化编辑器业务侧:内容变化→dirty/自动保存/参数行;快捷键绑定(useMonaco 已创建实例) */
+function initEditor() {
+  if (!edRef.value || ed) return
+  ed = edRef.value
+  // 首次挂载:把初始 tab 的文档挂上(恢复草稿/文件内容),并应用持久化的画布主题/字号
   const initial = activeTab.value
-  cm = CodeMirror(cmRef.value, {
-    value: initial?.doc ?? initial?.content ?? DEFAULT_SQL,
-    mode: 'text/x-sql',
-    lineNumbers: true,
-    indentWithTabs: false,
-    tabSize: 2,
-    indentUnit: 2,
-    lineWrapping: true,
-    theme: 'default',
-    // ── 官方 addon 增强 ──────────────────────────────
-    // 括号匹配与自动闭合(替换自实现)
-    matchBrackets: true,
-    autoCloseBrackets: true,
-    // 光标行高亮 + 选中词高亮
-    styleActiveLine: true,
-    highlightSelectionMatches: true,
-    // 代码折叠(SQL 子查询/CTE、python 函数体)
-    foldGutter: true,
-    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
-    foldOptions: {
-      rangeFinder: CodeMirror.fold.combine(CodeMirror.fold.brace, CodeMirror.fold.indent, CodeMirror.fold.comment)
-    },
-    // 容器尺寸变化自动 refresh(tab 常驻池中非激活创建也能正确布局)
-    autoRefresh: true
-  })
-  // 首次挂载若容器尺寸未稳定(如 tab 常驻池中非激活创建),内容会挤到行号前。
-  // 等 DOM 稳定后强制 refresh 重算布局。
-  await nextTick()
-  cm.refresh()
-  // 文件内容变更 → 未保存标记(仅跟踪当前活跃 tab)+ 防抖自动保存
-  cm.on('change', (_c, change) => {
-    syncRunVarBar() // ${var} 增删 → 同步画布下方参数行(setValue 换 tab 也走这里)
-    if (change.origin === 'setValue') return // 程序性 setValue(切换 tab/打开文件)不触发自动保存
+  if (initial) {
+    ensureTabModel(initial)
+    ed.setModel(initial.model!)
+    monaco.editor.setModelLanguage(initial.model!, initial.name.toLowerCase().endsWith('.py') ? 'python' : 'sql')
+  }
+  setTheme(themeMode.value)
+  setFontSize(fontSize.value)
+  // 文件内容变更 → 未保存标记(仅用户输入)+ 参数行同步(程序性写入也需同步 ${var})
+  onContentChange((programmatic) => {
+    syncRunVarBar()
+    if (programmatic) return // setValue/setModel(切换 tab/打开文件)不触发自动保存
     const t = activeTab.value
     if (t) {
       t.dirty = true
-      t.content = cm?.getValue() ?? t.content // 立即同步快照,防抖触发时即使已切走也不会取错内容
+      t.content = getValue() // 立即同步快照,防抖触发时即使已切走也不会取错内容
       scheduleAutoSave(t)
     }
   })
-  syncRunVarBar() // 初始内容(恢复 tab/草稿)可能已含 ${var},挂载即同步参数行
-  // ── 补全触发:输入字母/下划线后 300ms 防抖弹出(仅候选非空);浮层打开时 Tab 选词 ──
-  cm.on('inputRead', (c: CodeMirror.Editor, change: CodeMirror.EditorChange) => {
-    if (change.origin !== '+input') return
-    const ch = change.text[0] || ''
-    if (!/[\w.]/.test(ch)) return
-    if (completionTimer) clearTimeout(completionTimer)
-    completionTimer = window.setTimeout(() => {
-      // pyspark 用内置单词补全;SQL 用 schema 感知补全(表名/列名/关键字)
-      c.showHint({
-        completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
-      })
-    }, 150)
-  })
-  // Ctrl/Cmd + Enter 执行;Tab 缩进(浮层打开时选词,否则多行逐行缩进);Shift+Tab 反缩进;Ctrl/Cmd + S 保存
-  cm.setOption('extraKeys', {
-    'Ctrl-Enter': () => {      void runQuery()
-    },
-    'Cmd-Enter': () => {
-      void runQuery()
-    },
-    'Ctrl-S': () => {
-      void saveActive()
-    },
-    'Cmd-S': () => {
-      void saveActive()
-    },
-    'Ctrl-Space': (c: CodeMirror.Editor) => {
-      // pyspark 用内置单词补全;SQL 用 schema 感知补全
-      c.showHint({
-        completeSingle: false,
-        hint: engine.value === 'pyspark' ? CodeMirror.hint.anyword : sqlSchemaHint
-      })
-    },
-    'Cmd-Shift-F': () => {
-      formatSql()
-    },
-    'Ctrl-Shift-F': () => {
-      formatSql()
-    },
-    'Cmd-/': (c: CodeMirror.Editor) => commentSelection(c),
-    'Ctrl-/': (c: CodeMirror.Editor) => commentSelection(c),
-    Tab: (c: CodeMirror.Editor) => {
-      // 补全浮层打开时:交给 show-hint 选词(不要缩进)
-      if (c.state.completionActive) return
-      const from = c.getCursor('from')
-      const to = c.getCursor('to')
-      c.operation(() => {
-        if (from.line !== to.line) {
-          // 多行选中:每行行首插入两个空格(不破坏选中内容)
-          for (let l = from.line; l <= to.line; l++) {
-            c.replaceRange('  ', { line: l, ch: 0 }, { line: l, ch: 0 })
-          }
-        } else {
-          // 单行/无选中:在光标处插入两个空格
-          const cur = c.getCursor()
-          c.replaceSelection('  ')
-          c.setCursor({ line: cur.line, ch: cur.ch + 2 })
-        }
-      })
-    },
-    'Shift-Tab': (c: CodeMirror.Editor) => {
-      const from = c.getCursor('from')
-      const to = c.getCursor('to')
-      c.operation(() => {
-        // 每行行首去掉最多两个空格
-        for (let l = from.line; l <= to.line; l++) {
-          const line = c.getLine(l)
-          const lead = line.match(/^ {0,2}/)?.[0].length ?? 0
-          if (lead > 0) c.replaceRange('', { line: l, ch: 0 }, { line: l, ch: lead })
-        }
-      })
-    }
-  })
+  // 快捷键:Ctrl/Cmd+Enter 执行 · Ctrl/Cmd+S 保存 · Cmd/Ctrl+Shift+F 格式化 · Cmd/Ctrl+/ 注释切换
+  addCommands([
+    { key: monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run: () => void runQuery() },
+    { key: monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, run: () => void saveActive() },
+    { key: monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, run: formatSql },
+    { key: monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, run: toggleCommentSelection }
+  ])
 }
 
 onMounted(() => {
-  void initEditor()
+  initEditor()
 })
 
+
 onUnmounted(() => {
-  if (autoSaveTimer) {
-    clearTimeout(autoSaveTimer)
-    autoSaveTimer = undefined
-  }
   flushTempDrafts()
   stopSparkLogPolling()
-  if (cm) {
-    const el = cm.getWrapperElement()
-    el.remove()
-    cm = null
-  }
+  // 编辑器销毁由 useMonaco 的 onBeforeUnmount 负责(dispose);此处释放各 tab 文档模型防泄漏
+  for (const t of tabs.value) t.model?.dispose()
 })
 
 // 画布高度(可拖拽)
@@ -741,136 +549,55 @@ function onDragStart(e: MouseEvent) {
   window.addEventListener('mouseup', onUp)
 }
 
-/** 当前 SQL 文本 */
-function getSql(): string {
-  return cm ? cm.getValue() : ''
-}
-
-import {
-  splitSqlSegments,
-  parseCellValue,
-  sqlLiteral,
-  escapeHtml,
-  findRowKey,
-  maskFormatSql,
-  rowsToTsv
-} from './composables/useSqlParse'
+import { splitSqlSegments, sqlLiteral, findRowKey, maskFormatSql } from './composables/useSqlParse'
 
 /**
  * 待执行内容:优先选中;未选中时 SQL 取光标所在段(分号切分),python 取全文。
  * 找不到段(如全文只有注释)回退全文。
  */
 function getSqlToRun(): string {
-  if (!cm) return getSql()
   // 1. 有选区 → 执行选中
-  const sel = cm.getSelection()
-  if (sel.trim()) return sel
+  const sel = getSelectionText().trim()
+  if (sel) return sel
   // 2. python 编辑器:无选区执行全文(整段提交,不做分号切分)
-  if (engine.value === 'pyspark') return cm.getValue()
-  // 3. 无选区 → 光标所在段
-  const cursorIdx = cm.indexFromPos(cm.getCursor())
-  for (const seg of splitSqlSegments(cm.getValue())) {
+  if (engine.value === 'pyspark') return getValue()
+  // 3. 无选区 → 光标所在段(getCursorOffset 为全文偏移,与 splitSqlSegments 同一坐标系)
+  const cursorIdx = getCursorOffset()
+  for (const seg of splitSqlSegments(getValue())) {
     if (seg.start <= cursorIdx && cursorIdx <= seg.end) {
       const s = seg.sql.trim()
       if (s) return s
     }
   }
-  return cm.getValue()
+  return getValue()
 }
 
 // ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
-/** 注释/取消注释选中 SQL(每行前加 -- ) */
-function commentSelection(c: CodeMirror.Editor) {
-  // 行注释:选区覆盖的每一行行首加/去 "-- "(再按一次取消);无选区时仅当前行
-  const from = c.getCursor('from')
-  const to = c.getCursor('to')
-  // 选区末尾停在行首时不算该行(Shift+Down 常见情况)
-  const endLine = to.ch === 0 && to.line > from.line ? to.line - 1 : to.line
-  const lines = []
-  for (let l = from.line; l <= endLine; l++) lines.push(l)
-  const allCommented = lines.every((l) => /^\s*-- /.test(c.getLine(l)))
-  for (const l of lines) {
-    const text = c.getLine(l)
-    if (allCommented) {
-      c.replaceRange(text.replace(/^(\s*)-- /, '$1'), { line: l, ch: 0 }, { line: l, ch: text.length })
-    } else {
-      const indent = text.match(/^\s*/)![0]
-      c.replaceRange(`${indent}-- ${text.slice(indent.length)}`, { line: l, ch: 0 }, { line: l, ch: text.length })
-    }
-  }
-  c.setSelection({ line: from.line, ch: 0 }, { line: endLine, ch: c.getLine(endLine).length })
+/** 注释/取消注释选中 SQL(Monaco 行级操作:选区覆盖的每行行首加/去 "-- ",再按一次取消;无选区仅当前行) */
+function toggleCommentSelection() {
+  const ed0 = ed
+  if (!ed0) return
+  ed0.getAction('editor.action.commentLine')?.run()
 }
 
 /** 结果表格签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格持久化) */
-function colSig(): string {
-  const r = currentResult.value
-  if (!r) return 'default'
-  const base = `${r.db || ''}.${r.table || ''}`
-  return base !== '.' ? base : (r.sql || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'adhoc'
-}
-/** el-table 初始列宽:优先 localStorage 持久化的宽度 */
-function colInitWidth(c: string): number {
-  const n = parseInt(localStorage.getItem(`db-query-colw.${colSig()}.${encodeURIComponent(c)}`) || '', 10)
-  return n > 60 ? n : 140
-}
-/** el-table 列宽拖拽结束(header-dragend):持久化到 localStorage */
-function onColResize(newWidth: number, column: { property?: string }) {
-  if (!column.property) return
-  localStorage.setItem(`db-query-colw.${colSig()}.${encodeURIComponent(column.property)}`, String(Math.round(newWidth)))
-}
-/** JSON 复合值折叠查看(弹窗展示格式化文本) */
-async function showJson(v: unknown) {
-  const text = JSON.stringify(v, null, 2) ?? String(v)
-  await ElMessageBox.alert(`<pre class="dbq-json">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`, '单元格值 (JSON)', {
-    dangerouslyUseHTMLString: true,
-    customClass: 'dbq-json-dialog'
-  }).catch(() => {})
-}
 const engineLabel = computed(() => {
   const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
   return m[engine.value] || engine.value || '—'
 })
 
 function formatSql() {
-  if (!cm) return
+  if (!ed) return
   if (engine.value === 'pyspark') {
     ElMessage.info('Python 模式暂不支持格式化')
     return
   }
-  const s = cm.getValue().trim()
+  const s = getValue().trim()
   if (!s) return
-  cm.setValue(maskFormatSql(s))
+  setValue(maskFormatSql(s)) // 程序性写入:不标 dirty(格式化可撤销)
 }
 
 // ── 查询执行 ─────────────────────────────────────────────────
-
-/** 单元格待提交修改(row 为结果行在 r.rows 中的索引,由 indexOf(row) 得到) */
-interface PendingEdit {
-  row: number
-  col: string
-  oldVal: unknown
-  newVal: unknown
-}
-
-interface QueryResultItem {
-  sql: string
-  columns: string[]
-  rows: Record<string, unknown>[]
-  costMs: number
-  truncated: boolean
-  error?: string
-  jobId?: string
-  mode?: string
-  cached?: boolean // 来自查询历史的结果快照(未重新执行)
-  // ── 行内编辑(仅表预览结果)────────────────────────
-  editable?: boolean // 是否允许单元格双击编辑
-  db?: string // 目标库(onOpenTable 设置)
-  table?: string // 目标表(onOpenTable 设置)
-  engine?: string // 方言: 'oracle' | 'mysql'(onOpenTable 设置)
-  pkCols?: string[] // 主键列名(异步 listFields(detail) 取 key==='PRI')
-  pendingEdits?: PendingEdit[] // 待提交的单元格修改(同 row+col 去重)
-  running?: boolean // 执行中(结果 tab 状态点/底部状态栏)
-}
 
 const results = ref<QueryResultItem[]>([])
 // 结果最多保留多少条(每次执行追加一个新结果 tab,超出裁掉最旧)
@@ -903,6 +630,28 @@ function startSparkLogPolling() {
   _startSparkPolling()
 }
 
+// ── 执行编排(useRunner;执行器/批次互斥/历史在 composable,展示状态在此注入)──
+// 历史按用户名隔离:登录用户变化时同步给 runner(与 SqlTreePanel 的 histKey 一致)
+watch(() => authStore.username, (u) => setHistUser(u || 'default'), { immediate: true })
+const runner = useRunner({
+  engine,
+  db,
+  loading,
+  error,
+  results,
+  activePane,
+  maxResults: MAX_RESULTS,
+  filteredDbs: () => filteredDbs.value,
+  getSqlToRun,
+  collectRunVars,
+  expandSqlVars,
+  startSparkLogPolling,
+  stopSparkLogPolling,
+  pollSparkLogs: () => pollSparkLogs(),
+  clearSparkLogs
+})
+const { runQuery, stopQuery, flinkMode, execDb, ensureDb } = runner
+
 // 激活日志面板(切回/首次显示)时滚到底:滚动逻辑在 SparkLogPanel 内部,
 // 这里仅触发其贴底方法(避免面板停在上方需手动下拖)。
 // 注意:必须在 activePane 声明之后定义,watch 创建时会立即同步读取源 getter,
@@ -910,114 +659,50 @@ function startSparkLogPolling() {
 watch(() => activePane.value, (pane) => {
   if (pane === 0) nextTick(() => sparkLogPanelRef.value?.updateMaxLogLines())
 })
-// 结果表格翻页(默认 15 条/页)
-const pageSize = ref(15)
-const pageCurrent = ref(1)
-// 切换每页条数时回到第 1 页,避免停留在越界页导致分页区异常
-watch(pageSize, () => { pageCurrent.value = 1 })
-const pagedRows = computed(() => {
-  const r = currentResult.value
-  if (!r) return []
-  const start = (pageCurrent.value - 1) * pageSize.value
-  return r.rows.slice(start, start + pageSize.value)
-})
 function selectPane(pane: number) {
-  activePane.value = pane
-  pageCurrent.value = 1
+  activePane.value = pane // 分页复位在 ResultGrid 内部(watch activePane)
 }
 
-/** 关闭某个结果 tab(从 results 移除;日志 tab 恒为第 0 个不可关) */
+/** 关闭某个结果 tab(从 results 移除;日志 tab 恒为第 0 个不可关;激活态修正在此,分页/编辑态归 ResultGrid) */
 function closeResultTab(idx: number) {
   if (idx < 0 || idx >= results.value.length) return
   results.value.splice(idx, 1)
-  // 修正当前激活 pane:关闭的是当前面板 → 落到相邻(优先前一个)结果;无结果则回日志
   if (activePane.value === idx + 1) {
-    if (results.value.length === 0) activePane.value = 0
-    else activePane.value = Math.min(idx + 1, results.value.length)
+    activePane.value = results.value.length === 0 ? 0 : Math.min(idx + 1, results.value.length)
   } else if (activePane.value > idx + 1) {
     activePane.value -= 1 // 关闭的 tab 在当前面板之前,后面面板整体前移
   }
-  pageCurrent.value = 1
-  // 若在编辑单元格、关闭的是它所在结果,退出编辑态
-  if (editingCell.value) {
-    const r = results.value.find((x) => x.rows.includes(editingCell.value?.row as Record<string, unknown>))
-    if (!r) editingCell.value = null
-  }
 }
 
-// ── 结果单元格行内编辑(仅表预览结果 editable)──────────────────
-// editingCell:当前正在编辑的单元格(row 为 rows 中真实行对象引用,rowIdx 为 indexOf 结果)
-const editingCell = ref<{ row: Record<string, unknown>; rowIdx: number; col: string; val: string } | null>(null)
-
-/** 当前结果 tab 是否可编辑(仅表预览且有主键列),供单元格双击提示 */
-function isEditableCell(_col: string): boolean {
-  const r = currentResult.value
-  return !!r && !!r.editable && !!r.pkCols?.length
-}
-
-/** 双击单元格进入编辑(值非 null 且当前结果可编辑且有主键;主键列本身不允许改) */
-function startCellEdit(row: Record<string, unknown>, col: string) {
-  const r = currentResult.value
-  if (!r || !r.editable || !r.pkCols?.length) return
-  const v = row[col]
-  if (v == null) return
-  // 主键列拒绝编辑(会破坏 UPDATE 定位)
-  if (r.pkCols.some((pk) => pk.toUpperCase() === col.toUpperCase())) {
-    ElMessage.warning('主键列不允许编辑')
+/** ResultGrid 提交行内修改:逐条执行 UPDATE 后清空并重查该结果 tab(编排留在宿主) */
+async function onCommitEdits(r: QueryResultItem) {
+  const stmts = buildUpdateSql(r)
+  if (!stmts.length) {
+    ElMessage.warning('没有可提交的修改(主键列无法定位)')
     return
   }
-  const rowIdx = r.rows.indexOf(row)
-  if (rowIdx < 0) return
-  editingCell.value = { row, rowIdx, col, val: String(v) }
-  void nextTick(() => {
-    const input = cellEditInputRef.value
-    if (input) {
-      input.focus()
-      input.select()
+  loading.value = true // 提交期间互斥,防用户同时执行新查询导致 rerunResult 竞态
+  try {
+    for (const sql of stmts) {
+      await queryDb(r.db || db.value, sql) // 网关/db-proxy 单语句语义,逐条执行
     }
-  })
+    ElMessage.success(`已提交 ${r.pendingEdits?.length ?? 0} 处修改`)
+    r.pendingEdits = []
+    await rerunResult(r) // 自动重查:直接刷新该结果 tab,不打断编辑器
+  } catch (e) {
+    ElMessage.error(`提交失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    loading.value = false
+  }
 }
 
-const cellEditInputRef = ref<HTMLInputElement>()
-
-/** 输入更新编辑值(不落盘,失焦才保存) */
-function onEditInput() {
-  const inp = cellEditInputRef.value
-  if (inp && editingCell.value) editingCell.value.val = inp.value
+/** ResultGrid 挂载日志面板实例后回填 ref(useSparkLogPolling 裁剪/贴底依赖它) */
+function onLogPanelMounted(p: unknown) {
+  sparkLogPanelRef.value = p as InstanceType<typeof SparkLogPanel> | undefined
 }
 
-/** 失焦保存:值变化则记录到该行所属结果 tab 的 pendingEdits(同 row+col 去重覆盖)。
- *  注意不能用 currentResult —— 用户在编辑中输入后切换结果 tab 会触发 blur,
- *  此时 currentResult 已指向别的结果,须按行对象引用定位原结果 */
-function saveCellEdit() {
-  const e = editingCell.value
-  editingCell.value = null
-  if (!e) return
-  const r = results.value.find((x) => x.rows.includes(e.row))
-  if (!r || !r.editable) return
-  const newVal = parseCellValue(e.row[e.col], e.val)
-  const oldVal = e.row[e.col]
-  if (newVal === oldVal) return // 值未变不记录
-  const pending = r.pendingEdits || (r.pendingEdits = [])
-  const idx = pending.findIndex((p) => p.row === e.rowIdx && p.col === e.col)
-  const edit = { row: e.rowIdx, col: e.col, oldVal, newVal }
-  if (idx >= 0) pending[idx] = edit
-  else pending.push(edit)
-  // 本地立即反映新值(供后续再次编辑/提交取主键值)
-  e.row[e.col] = newVal
-}
-
-/** Esc 取消编辑 */
-function cancelCellEdit() {
-  editingCell.value = null
-}
-
-/** 输入文本按原值类型还原(实现在 composables/useSqlParse.ts,此处 re-export 供模板使用) */
-// parseCellValue / sqlLiteral / escapeHtml / findRowKey / rowsToTsv 均已迁出
-
-/** HTML 转义(确认弹窗展示完整 SQL 用) */
-
-/** 按 row 分组生成 UPDATE 语句数组(每条单语句;MySQL 反引号 / Oracle 双引号;主键列取当前行内值) */
+// ── 行内编辑 SQL 生成(MySQL 反引号 / Oracle 双引号;主键取行内值;NULL 主键整行跳过)──
+/** 按 row 分组生成 UPDATE 语句数组(每条单语句) */
 function buildUpdateSql(r: QueryResultItem): string[] {
   if (!r.table || !r.pkCols?.length || !r.pendingEdits?.length) return []
   const isOracle = r.engine === 'oracle'
@@ -1033,19 +718,13 @@ function buildUpdateSql(r: QueryResultItem): string[] {
   }
   const stmts: string[] = []
   for (const [, { row, edits }] of byRow) {
-    const sets = edits.map((p) => {
-      // 列名可能大小写与 rows 键不一致(如 Oracle),按大小写不敏感定位实际键
-      const key = findRowKey(row, p.col)
-      return `${q(key)} = ${sqlLiteral(p.newVal, isOracle)}`
-    }).join(', ')
-    // 主键 WHERE:取该行主键列当前行内值(主键列禁止编辑故不受修改影响);
-    // 主键值为空(NULL)的行无法定位(WHERE pk IS NULL 风险高),跳过整行
+    const sets = edits.map((p) => `${q(findRowKey(row, p.col))} = ${sqlLiteral(p.newVal, isOracle)}`).join(', ')
     const wheres: string[] = []
     for (const pk of r.pkCols) {
       const key = findRowKey(row, pk)
       const v = row[key]
       if (v == null) {
-        wheres.length = 0 // 标记跳过:整行不生成 UPDATE
+        wheres.length = 0 // NULL 主键无法定位,整行跳过(WHERE pk IS NULL 风险高)
         break
       }
       wheres.push(`${q(key)} = ${sqlLiteral(v, isOracle)}`)
@@ -1056,55 +735,13 @@ function buildUpdateSql(r: QueryResultItem): string[] {
   return stmts
 }
 
-/** 在 row 中按大小写不敏感查找列名对应的键(实现迁至 composables/useSqlParse.ts,导入使用) */
-
-/** 提交修改:确认完整 SQL → 确保解锁 → queryDb 逐条执行 → 清空并自动重查 */
-async function commitEdits() {
-  const r = currentResult.value
-  if (!r || !r.editable || !r.pendingEdits?.length) return
-  const stmts = buildUpdateSql(r)
-  if (!stmts.length) {
-    ElMessage.warning('没有可提交的修改(主键列无法定位)')
-    return
-  }
-  // 展示完整 SQL 供确认
-  let confirmed = false
-  try {
-    await ElMessageBox.confirm(
-      `<pre class="edit-sql-preview">${escapeHtml(stmts.join('\n'))}</pre>`,
-      `确认提交 ${r.pendingEdits.length} 处修改?`,
-      { dangerouslyUseHTMLString: true, confirmButtonText: '确认提交', cancelButtonText: '取消', type: 'warning' }
-    )
-    confirmed = true
-  } catch {
-    /* 取消 */
-  }
-  if (!confirmed) return
-  loading.value = true // 提交期间互斥,防用户同时执行新查询导致 rerunResult 竞态
-  try {
-    // 逐条执行(网关/db-proxy 单语句语义,不支持分号拼接多语句)
-    for (const sql of stmts) {
-      await queryDb(r.db || db.value, sql)
-    }
-    ElMessage.success(`已提交 ${r.pendingEdits.length} 处修改`)
-    r.pendingEdits = []
-    // 自动重查:重新执行原预览 SQL(复用 execOne 直接刷新该结果 tab,不打断编辑器)
-    await rerunResult(r)
-  } catch (e) {
-    ElMessage.error(`提交失败:${e instanceof Error ? e.message : e}`)
-  } finally {
-    loading.value = false
-  }
-}
-
 /** 重新执行某结果 tab 对应的原 SQL(提交修改后自动重查)。
  *  直接走 execDb(预览 SQL 必为 mysql/oracle SELECT,无需经过 engine 分支判定;
  *  临时切 db 到结果记录的库,执行后恢复,避免 watch(engine) 干扰) */
 async function rerunResult(r: QueryResultItem) {
   const idx = results.value.indexOf(r)
   if (idx < 0) return
-  const seq = ++runSeq
-  batchCancelled = false
+  const seq = runner.beginBatch() // 开新批次:使旧批在途结果失效(runner 内部状态)
   loading.value = true
   const savedDb = db.value
   if (r.db) db.value = r.db
@@ -1113,7 +750,7 @@ async function rerunResult(r: QueryResultItem) {
     try {
       res = await execDb(r.sql)
     } catch (e) {
-      if (seq === runSeq) {
+      if (seq === runner.seq) {
         results.value[idx] = {
           ...results.value[idx],
           sql: r.sql,
@@ -1129,10 +766,10 @@ async function rerunResult(r: QueryResultItem) {
       }
       return
     }
-    if (seq !== runSeq) return
+    if (seq !== runner.seq) return
     // 保留编辑元数据,清空待提交修改
     results.value[idx] = { ...results.value[idx], sql: r.sql, ...res, pendingEdits: [], running: false }
-    if (seq === runSeq) activePane.value = idx + 1
+    if (seq === runner.seq) activePane.value = idx + 1
   } finally {
     db.value = savedDb
     loading.value = false
@@ -1148,10 +785,9 @@ const explainTable = ref<{ columns: string[]; rows: Record<string, unknown>[] } 
 
 /** 取当前活动 tab 编辑器选中文本;空则取全文第一条语句 */
 function getExplainSql(): string {
-  if (!cm) return ''
-  const sel = cm.getSelection().trim()
+  const sel = getSelectionText().trim()
   if (sel) return sel
-  const segs = splitSqlSegments(cm.getValue()).map((s) => s.sql.trim()).filter(Boolean)
+  const segs = splitSqlSegments(getValue()).map((s) => s.sql.trim()).filter(Boolean)
   return segs[0] || ''
 }
 
@@ -1197,187 +833,18 @@ async function runExplain() {
   }
 }
 
-// Schema 补全(缓存/点语法列提示/关键字+文中词)迁至 composables/useSqlCompletion.ts;
-// 当前 db 经参数传入,保持按库缓存与退化策略不变。
-async function sqlSchemaHint(cm: CodeMirror.Editor): Promise<CodeMirror.Hints | null> {
-  return sqlSchemaHintImpl(cm, db.value)
-}
+// Schema 补全(表名/点语法列/关键字/文中词)已迁 src/editor/sqlCompletion.ts 并注册为
+// Monaco 全局 provider;当前 db 经 setCompletionDb 注入(下方 watch 同步),按库缓存策略不变。
 
-// ── Flink 流批模式与弹窗 ────────────────────────────────────
-const flinkMode = ref<'batch' | 'stream'>('batch')
+// ── Flink 流批模式与弹窗(flinkMode 状态在 useRunner)────────
 const showFlinkConn = ref(false)
 const showFlinkPreJob = ref(false)
 
 /** 连接器弹窗生成 DDL → 插入编辑器(多段用空行分隔) */
 function onInsertFlinkDdl(ddls: string[]) {
-  const c = cm
-  if (!c || !ddls.length) return
-  const text = ddls.join('\n\n')
-  const cur = c.getCursor()
-  c.replaceRange(text, cur)
-  c.setCursor({ line: cur.line, ch: cur.ch + text.length })
-  c.focus()
+  if (!ed || !ddls.length) return
+  insertAtCursor(ddls.join('\n\n'))
   ElMessage.success(`已插入 ${ddls.length} 条 CREATE TABLE`)
-}
-
-/** Flink 执行:流模式(SELECT 无限流/大结果)走异步任务通道(提交即返回 jobId,
- *  前端轮询,避免网关 60s 超时 504);batch 模式同步秒回。 */
-const currentFlinkJobId = ref('')
-async function execFlink(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  // batch:同步执行(秒回)
-  if (flinkMode.value !== 'stream') {
-    return queryFlink(sql, 'batch')
-  }
-  // stream:异步提交 + 轮询(3s 一次,低频)
-  const { jobId } = await flinkAsyncSubmit(sql, 'stream')
-  currentFlinkJobId.value = jobId
-  const deadline = Date.now() + 60 * 60 * 1000 // 上限 1 小时(与 db-proxy timeoutMs 一致)
-  try {
-    for (;;) {
-      const j = await flinkAsyncStatus(jobId)
-      if (j.state === 'done') {
-        if (j.result) return j.result
-        return { columns: [], rows: [], costMs: 0, truncated: true }
-      }
-      if (j.state === 'failed') {
-        throw new Error(j.error || '任务执行失败')
-      }
-      if (Date.now() > deadline) {
-        try { await flinkAsyncCancel(jobId) } catch { /* ignore */ }
-        throw new Error('任务超时(1 小时),已自动取消')
-      }
-      await new Promise((r) => setTimeout(r, 3000))
-    }
-  } finally {
-    currentFlinkJobId.value = ''
-  }
-}
-
-/** MySQL/Oracle 执行:写语句需解锁(与 Spark 共用密码);只读直接执行。
- *  token 过期(网关 403)自动重新解锁后重试一次 */
-/** 执行前确保已选库:下拉有源但 db 未选中(如引擎切换/初始化时序)时自动取该引擎第一个源 */
-function ensureDb(): boolean {
-  if (db.value) return true
-  const candidates = filteredDbs.value
-  db.value = candidates.find((d) => d.type === engine.value)?.name || candidates[0]?.name || ''
-  return !!db.value
-}
-
-/** 当前 mysql/oracle 异步任务的 jobId(供停止按钮取消) */
-const currentDbJobId = ref('')
-
-/** mysql/oracle 执行:异步任务模式 —— 提交即返回 jobId,前端轮询。
- *  前端体验与同步一致:持续 loading 阻塞,直到完成/失败/手动停止。
- *  动机:慢查询/大查询同步挂起会撞公司网关 60s 超时 504。 */
-async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
-  if (!ensureDb()) throw new Error('请先选择数据库')
-  const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
-    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
-    currentDbJobId.value = jid
-    const deadline = Date.now() + 3600000 // 上限 1 小时
-    while (Date.now() < deadline) {
-      if (batchCancelled) {
-        try {
-          await cancelDbJob(jid)
-        } catch {
-          /* 忽略 */
-        }
-        throw new Error('已取消')
-      }
-      const j = await getDbJob(jid)
-      if (j.state === 'done') {
-        currentDbJobId.value = ''
-        return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
-      }
-      if (j.state === 'cancelled') {
-        currentDbJobId.value = ''
-        throw new Error('已取消')
-      }
-      if (j.state === 'failed') {
-        currentDbJobId.value = ''
-        throw new Error(j.error || '任务执行失败')
-      }
-      await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
-    }
-    try {
-      await cancelDbJob(jid)
-    } catch {
-      /* 忽略 */
-    }
-    currentDbJobId.value = ''
-    throw new Error('任务超时(1 小时),已自动取消')
-  }
-  try {
-    return await run()
-  } catch (e) {
-    // 写权限密码验证已移除,不再有解锁重试;错误直接上抛(库未授权/资源护栏等)
-    throw e
-  }
-}
-
-/** 旧批次在途结果失效(用户停止/新批启动使 seq 变化)时,把仍挂在结果列表中的
- *  对象落定为「已停止」:防旧结果 tab 永久 running。新批次对象不受影响(不同引用)。 */
-function finalizeStaleItem(item: QueryResultItem, msg: string) {
-  const idx = results.value.indexOf(item)
-  if (idx >= 0 && results.value[idx]?.running) {
-    results.value[idx] = { ...results.value[idx], running: false, error: msg }
-  }
-}
-
-/** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
-async function execOne(sql: string, item: QueryResultItem, seq: number): Promise<void> {
-  const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
-  const isFlink = engine.value === 'flinksql'
-  const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
-  if (isSpark) {
-    await clearSparkLogs()
-    startSparkLogPolling()
-  }
-  try {
-    let r
-    if (isFlink) r = await execFlink(sql)
-    else if (isSpark) r = await execSpark(sql, kind)
-    else r = await execDb(sql)
-    if (seq !== runSeq) {
-      // 旧批次已失效(用户停止/新执行):落定为「已停止」而非永久 running,防旧结果 tab 卡死
-      finalizeStaleItem(item, '已停止')
-      return
-    }
-    // 执行成功 → 写入历史(含结果快照,前 100 行;任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 20)
-    pushHistory(sql, r)
-    // 追加模式下 item 是新 push 的结果对象,直接用最新结果覆盖它(不保留旧 editable 元数据;
-    // 表预览的可编辑标记由 onOpenTable 在执行成功后对最新结果设置)
-    const idx = results.value.indexOf(item)
-    if (idx < 0) return // 已被裁剪(结果超上限删旧),丢弃
-    results.value[idx] = { sql, ...r, running: false }
-  } catch (e) {
-    if (seq !== runSeq) {
-      finalizeStaleItem(item, '已停止')
-      return
-    }
-    const idx = results.value.indexOf(item)
-    if (idx < 0) return
-    results.value[idx] = {
-      sql,
-      columns: [],
-      rows: [],
-      costMs: 0,
-      truncated: false,
-      running: false,
-      error: e instanceof Error ? e.message : String(e)
-    }
-  } finally {
-    // 仅本批次仍有效时才停日志轮询(否则会停掉新批次的轮询)
-    if (isSpark && seq === runSeq) {
-      // 收尾:补一次最终拉取,读到最后写入的 [stage] 完成行与保留的 stage 快照(完成后可追溯)
-      try {
-        await pollSparkLogs()
-      } catch {
-        /* 日志失败不影响结果 */
-      }
-      stopSparkLogPolling()
-    }
-  }
 }
 
 // ── $ 传参:自动识别 SQL 中全部 ${var},画布下方参数行内联填值,执行时替换 ─────
@@ -1392,7 +859,7 @@ const varMemory = new Map<string, string>()
 
 /** 编辑器内容变化/tab 切换后同步参数行:新增变量预填上次值,消失变量清输入 */
 function syncRunVarBar() {
-  const sql = cm?.getValue() ?? ''
+  const sql = getValue()
   VAR_RE.lastIndex = 0
   const names: string[] = []
   let m: RegExpExecArray | null
@@ -1430,250 +897,6 @@ function expandSqlVars(sql: string, values?: Map<string, string>): string {
   return sql.replace(VAR_RE, (all, name: string) => values?.get(name) ?? all)
 }
 
-/** 拆 SQL 段并过滤空段/纯注释段 */
-function getSegments(text: string): string[] {
-  return splitSqlSegments(text)
-    .map((s) => s.sql.trim())
-    .filter((s) => s && !/^\s*(--|\/\*)/.test(s))
-}
-
-/** 批量执行互斥:同一次「执行」点击为一个批次;批内多条按 FIFO 逐条串行。
- *  每人同时最多提交一批 —— 执行中再次点击执行会被拒绝(loading 互斥)。
- *  batchCancelled:停止按钮置位,中断本批剩余段。
- *  runSeq:批次号,停止/新执行使旧批次在途结果与日志失效。 */
-let batchCancelled = false
-let runSeq = 0
-
-/** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用);key 按用户名隔离(与 SqlTreePanel 读取端一致) */
-const HISTORY_MAX = 20
-const authStore = useAuthStore()
-const histKey = () => `db-query-history:${authStore.username || 'default'}`
-
-/** 历史附带的结果快照:截断到前 100 行,序列化超 200KB 不缓存(防 localStorage 撑爆) */
-const HIST_RESULT_ROWS = 100
-const HIST_RESULT_MAX_BYTES = 200_000
-
-/**
- * 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 20 循环缓存、仅 trim 非空且 ≤2000;
- * 附带结果快照(仅查询类结果,空 rows 不缓存)。
- */
-function pushHistory(sql: string, result?: { columns?: string[]; rows?: Record<string, unknown>[] }) {
-  const s = String(sql ?? '').trim()
-  if (!s || s.length > 2000) return
-  try {
-    let list: Array<{ ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } }> = []
-    try {
-      const raw = localStorage.getItem(histKey())
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) list = parsed.filter((h) => h && typeof h.sql === 'string' && typeof h.ts === 'number')
-      }
-    } catch {
-      /* 历史数据损坏则忽略,重新开始 */
-    }
-    list = list.filter((h) => h.sql !== s)
-    const entry: { ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } } = {
-      ts: Date.now(),
-      sql: s
-    }
-    if (result && Array.isArray(result.columns) && result.columns.length && Array.isArray(result.rows) && result.rows.length) {
-      try {
-        const snapshot = { columns: [...result.columns], rows: result.rows.slice(0, HIST_RESULT_ROWS) }
-        if (JSON.stringify(snapshot).length <= HIST_RESULT_MAX_BYTES) entry.result = snapshot
-      } catch {
-        /* 快照序列化失败(循环引用等)不影响历史本身 */
-      }
-    }
-    list.unshift(entry)
-    if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX)
-    localStorage.setItem(histKey(), JSON.stringify(list))
-  } catch {
-    /* localStorage 不可用(Safari 隐私模式等)或配额已满时静默忽略 */
-  }
-}
-
-/** 执行目标 SQL 段列表(逐条 FIFO 串行执行;每次执行结果追加为新 tab,整体最多保留 MAX_RESULTS 个) */
-async function execSegments(segs: string[], seq: number) {
-  // 追加新结果段:不复用旧 tab,每个查询独立一个新结果(最多 20 个,超出裁掉最旧的)
-  const items = segs.map((sql) => ({
-    sql, columns: [], rows: [], costMs: 0, truncated: false, running: true
-  })) as QueryResultItem[]
-  results.value.push(...items)
-  if (results.value.length > MAX_RESULTS) {
-    results.value.splice(0, results.value.length - MAX_RESULTS)
-  }
-  for (let i = 0; i < segs.length; i++) {
-    if (batchCancelled) {
-      // 中断剩余段:标记为已停止(不保持 running 死转)
-      for (const it of items.slice(i)) {
-        const idx = results.value.indexOf(it)
-        if (idx >= 0) results.value[idx] = { ...results.value[idx], running: false, error: '已停止' }
-      }
-      break
-    }
-    await execOne(segs[i], items[i], seq)
-  }
-  // 默认展示最后一个 tab(最新执行的结果;日志 tab 恒为第一个)
-  if (seq === runSeq && results.value.length) activePane.value = results.value.length
-}
-
-/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
-async function runQuery() {
-  // 每人同时最多提交一批:上一批未结束则拒绝新批(FIFO 排队由批内逐条完成)
-  if (loading.value) {
-    ElMessage.warning('上一批 SQL 仍在执行,请等待完成后再提交')
-    return
-  }
-  batchCancelled = false
-  const seq = ++runSeq // 新批次号:使上一批(如被停止)的在途结果失效
-  if (!ensureDb()) {
-    ElMessage.warning('请先选择数据库')
-    return
-  }
-  const rawSql = getSqlToRun().trim()
-  if (!rawSql) {
-    ElMessage.warning('请输入 SQL')
-    return
-  }
-  // 自定义 ${var} 参数:只替换本次执行段内已填值的变量;未填的原样传给引擎
-  const varVals = collectRunVars(rawSql)
-  const target = expandSqlVars(rawSql, varVals)
-  // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
-  if (engine.value === 'pyspark') {
-    loading.value = true
-    error.value = ''
-    try {
-      const item = { sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true } as QueryResultItem
-      results.value.push(item)
-      if (results.value.length > MAX_RESULTS) {
-        results.value.splice(0, results.value.length - MAX_RESULTS)
-      }
-      await execOne(target, item, seq)
-      if (seq === runSeq) activePane.value = results.value.indexOf(item) + 1
-    } finally {
-      loading.value = false
-    }
-    return
-  }
-  // flinksql 流式模式:整段作为一个整体提交给 pyflink(由后端 execute_script 内部按分号拆分
-  // 逐条执行,使 CREATE TABLE 与 INSERT 在同一 t_env 会话生效),绝不在此拆段
-  if (engine.value === 'flinksql' && flinkMode.value === 'stream') {
-    loading.value = true
-    error.value = ''
-    try {
-      const item = { sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true } as QueryResultItem
-      results.value.push(item)
-      if (results.value.length > MAX_RESULTS) {
-        results.value.splice(0, results.value.length - MAX_RESULTS)
-      }
-      await execOne(target, item, seq)
-      if (seq === runSeq) activePane.value = results.value.indexOf(item) + 1
-    } finally {
-      loading.value = false
-    }
-    return
-  }
-  // 先按分号拆段、再逐段替换 ${var} 变量:防止变量值内含分号(如用户输入 "a;b")
-  // 在替换后被拆成新执行段(注入面);pyspark/flinksql stream 整段分支不受影响
-  const segs = getSegments(rawSql).map((s) => expandSqlVars(s, varVals))
-  if (!segs.length) {
-    ElMessage.warning('没有可执行的 SQL')
-    return
-  }
-  loading.value = true
-  error.value = ''
-  try {
-    await execSegments(segs, seq)
-  } finally {
-    loading.value = false
-  }
-}
-
-/** 停止当前查询:中断本批剩余段(前端不再发后续 SQL),并尝试取消引擎 job */
-async function stopQuery() {
-  batchCancelled = true
-  runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
-  try {
-    if (engine.value === 'flinksql') {
-      // 流式异步任务:精确取消当前 job;batch 同步查询走 cancelFlink
-      if (currentFlinkJobId.value) {
-        try {
-          await flinkAsyncCancel(currentFlinkJobId.value)
-        } catch {
-          /* 忽略 */
-        }
-        currentFlinkJobId.value = ''
-      } else {
-        await cancelFlink()
-      }
-    } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
-      // 异步任务:优先精确取消当前 job,再兜底取消引擎当前 job group
-      if (currentSparkJobId.value) {
-        try {
-          await cancelSparkJob(currentSparkJobId.value)
-        } catch {
-          /* 忽略 */
-        }
-      }
-      await cancelSpark()
-    } else if (currentDbJobId.value) {
-      // mysql/oracle 异步任务:精确取消当前 job(查询可能仍在后台跑,结果丢弃)
-      try {
-        await cancelDbJob(currentDbJobId.value)
-      } catch {
-        /* 忽略 */
-      }
-    }
-    // mysql/oracle(无 job 时)置位后批循环自行停止
-    // 停止日志轮询,立即释放 loading 状态
-    stopSparkLogPolling()
-    loading.value = false
-    ElMessage.info('已请求停止,当前批剩余 SQL 不再执行')
-  } catch (e) {
-    ElMessage.error(`停止失败:${e instanceof Error ? e.message : e}`)
-  }
-}
-
-// ── 数据导出(CSV,含 BOM 防 Excel 乱码)──────────────────────
-function exportCsv(idx?: number) {
-  // 未指定 idx 时导出当前激活的结果 tab(activePane=0 时为日志,无数据可导)
-  let r: typeof currentResult.value & object | null
-  if (idx != null) {
-    r = results.value[idx] ?? null
-  } else {
-    r = currentResult.value
-  }
-  if (!r || r.error || !r.columns.length) {
-    ElMessage.warning('没有可导出的数据')
-    return
-  }
-  const esc = (v: unknown) => {
-    let s = v == null ? '' : String(v)
-    // 防 Excel 公式注入:以 = + - @ 或制表/回车开头的单元格前缀单引号
-    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const header = r.columns.map(esc).join(',')
-  const lines = r.rows.map((row) => r.columns.map((c) => esc(row[c])).join(','))
-  const csv = '\uFEFF' + [header, ...lines].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  // 导出序号:显式 idx 用 idx;隐式(下载当前)用 activePane 对应结果 tab 序号
-  const realIdx = idx != null ? idx : activePane.value > 0 ? activePane.value - 1 : 0
-  const suffix = results.value.length > 1 ? `_${realIdx + 1}` : ''
-  a.download = `${db.value || 'query'}${suffix}_${Date.now()}.csv`
-  a.click()
-  URL.revokeObjectURL(a.href)
-}
-
-// ── 单元格/列名点击复制 ────────────────────────────────────
-// 统一走带降级的 copyText,规避 HTTP 非安全上下文下 navigator.clipboard 不可用导致的复制失败
-async function copyCell(val: unknown) {
-  const ok = await copyText(val)
-  if (ok) ElMessage.success('已复制')
-  else ElMessage.warning('复制失败,请手动选择复制')
-}
 
 // ── 初始化 ───────────────────────────────────────────────────
 onMounted(async () => {
@@ -1708,6 +931,9 @@ onMounted(async () => {
  *  一次性消费,后续手动切引擎仍恢复原行为 */
 let suppressEngineDbSync = false
 
+// 当前库 → Monaco SQL 补全上下文(schema 按库缓存,切库即切换候选集)
+watch(db, (v) => setCompletionDb(v || ''))
+
 watch(engine, async (val) => {
   // 写权限密码验证已移除,切换引擎不再要求解锁
   if (!val) return
@@ -1716,11 +942,8 @@ watch(engine, async (val) => {
     db.value = first?.name || ''
   }
   suppressEngineDbSync = false
-  if (cm) {
-    // python 编辑器切换为 python 模式,其余为 SQL 模式
-    cm.setOption('mode', val === 'pyspark' ? 'text/x-python' : 'text/x-sql')
-    cm.refresh()
-  }
+  // python 编辑器切换为 python 模式,其余为 SQL 模式(Monaco 按当前文档语言高亮)
+  setLanguage(val === 'pyspark' ? 'python' : 'sql')
 })
 
 /** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
@@ -1740,53 +963,6 @@ async function onSparkExecutorsChange(val: number) {
 }
 
 /** 单元格是否数值(右对齐) */
-function isNumeric(val: unknown): boolean {
-  return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
-}
-
-/** 某列是否数值列(按该页首行判定,用于表头/单元格对齐) */
-function colIsNumeric(c: string): boolean {
-  const row = pagedRows.value[0]
-  return !!(row && row[c] != null && isNumeric(row[c]))
-}
-
-// ── 结果表格交互:复制/选择模式 + 复制整表 ───────────────────
-/** 复制模式开=true(点击单元格即复制);关=false 时点击不劫持,可用鼠标选中文本 */
-const cellCopy = ref(true)
-const cellCopyDisabled = computed(() => !cellCopy.value)
-
-/** 单元格/列名点击复制(复制模式关时直接忽略,避免与文本选择冲突) */
-async function copyCellSmart(val: unknown) {
-  if (!cellCopy.value) return
-  await copyCell(val)
-}
-
-/** 行记录转 TSV(实现迁至 composables/useSqlParse.ts,导入使用) */
-
-/** 复制当前分页 */
-async function copyPageTsv() {
-  const r = currentResult.value
-  if (!r) return
-  const ok = await copyText(rowsToTsv(pagedRows.value, r.columns))
-  if (ok) ElMessage.success('已复制当前页(TSV)')
-  else ElMessage.error('复制失败,请手动复制')
-}
-
-/** 复制全量结果(忽略分页;大结果集注意体积) */
-async function copyAllTsv() {
-  const r = currentResult.value
-  if (!r) return
-  if (r.rows.length > 5000) {
-    const confirmed = await ElMessageBox.confirm(
-      '共 ' + r.rows.length + ' 行,复制全部可能较大。仍要继续吗?', '复制整表',
-      { confirmButtonText: '继续复制', cancelButtonText: '取消', type: 'warning' }
-    ).catch(() => false)
-    if (!confirmed) return
-  }
-  const ok = await copyText(rowsToTsv(r.rows, r.columns))
-  if (ok) ElMessage.success('已复制 ' + r.rows.length + ' 行(TSV)')
-  else ElMessage.error('复制失败,请手动复制')
-}
 </script>
 
 <template>
@@ -1882,9 +1058,9 @@ async function copyAllTsv() {
       <span class="file-tabs-spacer" />
     </div>
 
-    <!-- SQL 画布(CodeMirror) -->
-    <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
-      <div ref="cmRef" class="sql-editor" :style="{ '--cm-font-size': fontSize + 'px' }"></div>
+    <!-- SQL 画布(Monaco;主题/字号由编辑器层管理,容器只管高度) -->
+    <div ref="canvasRef" class="sql-canvas" :style="{ height: canvasHeight + 'px' }">
+      <div ref="cmRef" class="sql-editor"></div>
     </div>
 
     <!-- 拖拽分割条 -->
@@ -1904,171 +1080,25 @@ async function copyAllTsv() {
     <!-- 错误提示 -->
     <el-alert v-if="error" type="error" :title="error" show-icon :closable="false" class="err-alert" />
 
-    <!-- 结果区(第一个 tab 固定日志 + 结果 tab 依次;查询中切日志,成功切最新结果) -->
-    <div v-if="results.length" class="results-wrap">
-      <!-- 上方横向 tab 栏 -->
-      <div class="result-tabs">
-        <!-- 第一个 tab 固定:日志(只保留最近一次查询的日志) -->
-        <div class="result-tab log-tab" :class="{ active: activePane === 0 }" @click="selectPane(0)">
-          <el-icon class="tab-log-icon"><DocumentChecked /></el-icon>
-          <span class="tab-name">日志</span>
-          <span v-if="sparkLogText" class="tab-dot" title="有日志输出" />
-        </div>
-        <!-- 结果 tab(每个查询一个,依次折叠) -->
-        <div
-          v-for="(r, idx) in results"
-          :key="idx"
-          class="result-tab"
-          :class="{ active: activePane === idx + 1 }"
-          @click="selectPane(idx + 1)"
-        >
-          <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
-          <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
-          <span class="tab-name" :class="{ err: r.error }">query{{ idx + 1 }}</span>
-          <span v-if="r.cached" class="tab-cached-tag" title="来自查询历史的缓存结果">缓存</span>
-          <el-tooltip content="关闭" placement="top">
-            <span class="tab-close" @click.stop="closeResultTab(idx)">
-              <el-icon><Close /></el-icon>
-            </span>
-          </el-tooltip>
-        </div>
-      </div>
-      <!-- 下方当前面板内容 -->
-      <div class="result-content">
-        <!-- 日志面板(第一个 tab;内容区已拆为 SparkLogPanel 组件) -->
-        <template v-if="activePane === 0">
-          <div class="result-card log-card">
-            <div class="spark-logs-head">
-              <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
-              <span class="spark-logs-actions">
-                <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
-                <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
-              </span>
-            </div>
-            <SparkLogPanel
-              ref="sparkLogPanelRef"
-              :log-text="sparkLogText"
-              :empty-hint="logEmptyHint"
-              :stage-data="sparkStageData"
-              :active="activePane === 0"
-              @refresh="void pollSparkLogs()"
-              @clear="() => void clearSparkLogs()"
-            />
-          </div>
-        </template>
-        <!-- 结果内容 -->
-        <template v-else-if="currentResult">
-          <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
-          <div v-else class="result-card">
-            <div v-loading="loading" class="result-table-wrap">
-              <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''" @header-dragend="onColResize">
-              <el-table-column type="index" label="#" width="56" align="center" fixed="left" />
-              <el-table-column
-                v-for="c in currentResult.columns"
-                :key="c"
-                :prop="c"
-                :label="c"
-                :width="colInitWidth(c)"
-                sortable
-                :align="colIsNumeric(c) ? 'right' : 'left'"
-                show-overflow-tooltip
-              >
-                <!-- 表头:点击列名复制列名(.stop 不触发排序);排序只点最右侧排序箭头触发 -->
-                <template #header>
-                  <span
-                    class="col-header"
-                    :title="`点击复制列名: ${c}`"
-                    @click.stop="copyCellSmart(c)"
-                  >{{ c }}</span>
-                </template>
-                <template #default="{ row }">
-                  <span v-if="editingCell && editingCell.row === row && editingCell.col === c" class="cell-edit">
-                    <input
-                      ref="cellEditInputRef"
-                      :value="editingCell.val"
-                      class="cell-edit-input"
-                      spellcheck="false"
-                      @input="onEditInput"
-                      @blur="saveCellEdit"
-                      @keydown.esc.prevent="cancelCellEdit"
-                      @keydown.enter.prevent="saveCellEdit"
-                    />
-                  </span>
-                  <span
-                    v-else-if="row[c] == null"
-                    class="cell-null"
-                    :title="`NULL${cellCopy ? ' · 点击复制' : ''}`"
-                    @click="copyCellSmart(row[c])"
-                  >NULL</span>
-                  <span
-                    v-else-if="typeof row[c] === 'object'"
-                    class="cell-json"
-                    title="点击查看完整 JSON"
-                    @click.stop="showJson(row[c])"
-                  >JSON</span>
-                  <span
-                    v-else
-                    class="cell-val"
-                    :class="{ 'cell-num': isNumeric(row[c]), 'cell-select': cellCopyDisabled, 'cell-editable': isEditableCell(c) }"
-                    :title="isEditableCell(c) ? `双击编辑: ${row[c]}` : (cellCopy ? `点击复制: ${row[c]}` : row[c])"
-                    @click="copyCellSmart(row[c])"
-                    @dblclick="startCellEdit(row, c)"
-                  >{{ row[c] }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
-          <!-- 翻页(紧贴数据集下方) -->
-          <el-pagination
-            v-if="currentResult.rows.length > 15"
-            v-model:current-page="pageCurrent"
-            v-model:page-size="pageSize"
-            class="result-pagination"
-            :page-sizes="[15, 50, 100, 200]"
-            :total="currentResult.rows.length"
-            layout="total, sizes, prev, pager, next"
-            small
-          />
-          <!-- 底部信息条:统计 + 复制 + 选择模式(最底部) -->
-          <div class="result-toolbar">
-            <span class="stats">
-              <template v-if="currentResult.error">{{ currentResult.error }}</template>
-              <template v-else-if="currentResult.jobId">
-                <span class="footer-job">流式任务已提交</span>
-                <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
-              </template>
-              <template v-else>
-                <span class="stats-num">{{ currentResult.rows.length }} 行</span>
-                <span class="stats-num">{{ currentResult.columns.length }} 列</span>
-                <template v-if="currentResult.truncated"><span class="footer-muted">(已截断)</span></template>
-                <span class="footer-muted">· {{ currentResult.costMs }}ms</span>
-              </template>
-            </span>
-            <span class="tools">
-              <label class="mode-toggle" :class="{ on: cellCopy }" :title="cellCopy ? '点击单元格即复制' : '可自由选中文本(关闭点击复制)'">
-                <el-switch v-model="cellCopy" size="small" />
-                <span>{{ cellCopy ? '复制模式' : '选择模式' }}</span>
-              </label>
-              <el-button
-                v-if="currentResult.editable && (currentResult.pendingEdits?.length ?? 0) > 0"
-                size="small"
-                type="warning"
-                plain
-                @click="commitEdits"
-              >提交修改 ({{ currentResult.pendingEdits?.length ?? 0 }})</el-button>
-              <el-button v-if="currentResult.jobId" size="small" text type="primary" @click="showFlinkPreJob = true">流任务管理</el-button>
-              <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
-              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
-              <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
-              <el-tooltip v-if="currentResult && !currentResult.error && currentResult.columns.length" content="下载当前结果 (CSV)" placement="top">
-                <el-button size="small" text type="primary" @click="exportCsv()"><el-icon><Download /></el-icon>下载</el-button>
-              </el-tooltip>
-            </span>
-          </div>
-            </div>
-        </template>
-      </div>
-    </div>
+    <!-- 结果区(tab 栏+日志+表格+翻页+工具条,整体拆至 components/ResultGrid.vue) -->
+    <ResultGrid
+      v-if="results.length"
+      class="results-wrap"
+      :results="results"
+      :active-pane="activePane"
+      :loading="loading"
+      :spark-log-text="sparkLogText"
+      :log-empty-hint="logEmptyHint"
+      :spark-stage-data="sparkStageData"
+      :spark-log-active="activePane === 0"
+      @select-pane="selectPane"
+      @close-tab="closeResultTab"
+      @commit-edits="onCommitEdits"
+      @open-flink-jobs="showFlinkPreJob = true"
+      @poll-logs="pollSparkLogs()"
+      @clear-logs="clearSparkLogs()"
+      @panel-mounted="onLogPanelMounted"
+    />
 
     <!-- 空状态 -->
     <div v-else-if="!loading && !error" class="empty-state">
@@ -2295,7 +1325,7 @@ async function copyAllTsv() {
   background: rgba(255, 255, 255, 0.15);
 }
 
-/* ── SQL 画布(CodeMirror) ────────────────────────────────── */
+/* ── SQL 画布(Monaco) ───────────────────────────────────── */
 .sql-canvas {
   position: relative;
   display: flex;
@@ -2303,224 +1333,26 @@ async function copyAllTsv() {
   border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
-
-  &.light {
-    background: #f7f8fa;
-  }
 }
 
 .sql-editor {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  overflow: hidden;
-
-  /* CodeMirror 公共(字体由 --cm-font-size 控制) */
-  :deep(.CodeMirror) {
-    flex: 1;
-    width: 100%;
-    height: 100%;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: var(--cm-font-size, 15px);
-    line-height: 1.6;
-  }
-
-  :deep(.CodeMirror-scroll) {
-    width: 100%;
-    height: 100%;
-    overflow: auto;
-  }
-
-  :deep(.CodeMirror-linenumber) {
-    font-size: var(--cm-font-size, 15px);
-    padding: 0 8px 0 4px;
-  }
-
-  :deep(.CodeMirror-cursor) {
-    border-left: 2px solid;
-  }
-
-  :deep(.CodeMirror-selected) {
-    background: rgba(97, 175, 239, 0.25);
-  }
-
-  /* 选中词全画布高亮(match-highlighter overlay;addon 本身不带样式) */
-  :deep(.cm-matchhighlight) {
-    background: rgba(229, 192, 123, 0.28);
-    border-radius: 2px;
-  }
-
-  :deep(.CodeMirror-activeline-background) {
-    background: rgba(97, 175, 239, 0.08);
-  }
-
-  :deep(.CodeMirror-matchingbracket) {
-    font-weight: 700;
-    background: rgba(229, 192, 123, 0.2);
-    border-radius: 2px;
-  }
-
-  :deep(.bracket-match) {
-    background: rgba(229, 192, 123, 0.35);
-    border-radius: 2px;
-  }
-
-  /* 语法 token 公共字体 */
-  :deep(.cm-keyword),
-  :deep(.cm-string),
-  :deep(.cm-comment),
-  :deep(.cm-number),
-  :deep(.cm-builtin),
-  :deep(.cm-variable),
-  :deep(.cm-operator) {
-    font-size: var(--cm-font-size, 15px);
-  }
-
-  /* ── 深色主题(柔和深灰蓝) ───────────────────────────── */
-  .sql-canvas.dark & {
-    :deep(.CodeMirror) {
-      background: #34373c;
-      color: #c8ccd4;
-    }
-    :deep(.CodeMirror-gutters) {
-      background: #2e3135;
-      border-right: 1px solid #26292d;
-    }
-    :deep(.CodeMirror-linenumber) {
-      color: #7a818c;
-    }
-    :deep(.CodeMirror-cursor) {
-      border-left-color: #e6e8ec;
-    }
-    :deep(.cm-keyword) {
-      color: #d19a66;
-      font-weight: 600;
-    }
-    :deep(.cm-string) {
-      color: #98c379;
-    }
-    :deep(.cm-comment) {
-      color: #7a818c;
-      font-style: italic;
-    }
-    :deep(.cm-number) {
-      color: #61afef;
-    }
-    :deep(.cm-builtin) {
-      color: #56b6c2;
-    }
-    :deep(.cm-variable) {
-      color: #e06c75;
-    }
-    :deep(.cm-operator) {
-      color: #56b6c2;
-    }
-    :deep(.CodeMirror-matchingbracket) {
-      color: #e5c07b !important;
-      background: rgba(229, 192, 123, 0.25);
-      border-bottom: 2px solid #e5c07b;
-      font-weight: 700;
-    }
-  }
-
-  /* ── 浅色主题(柔和米白) ─────────────────────────────── */
-  .sql-canvas.light & {
-    :deep(.CodeMirror) {
-      background: #f7f8fa;
-      color: #3a3f45;
-    }
-    :deep(.CodeMirror-gutters) {
-      background: #eceff2;
-      border-right: 1px solid #dde1e5;
-    }
-    :deep(.CodeMirror-linenumber) {
-      color: #8a9199;
-    }
-    :deep(.CodeMirror-cursor) {
-      border-left-color: #3a3f45;
-    }
-    :deep(.CodeMirror-selected) {
-      background: rgba(9, 105, 218, 0.15);
-    }
-    :deep(.CodeMirror-activeline-background) {
-      background: rgba(9, 105, 218, 0.05);
-    }
-    :deep(.cm-keyword) {
-      color: #c2185b;
-      font-weight: 600;
-    }
-    :deep(.cm-string) {
-      color: #0a5f5f;
-    }
-    :deep(.cm-comment) {
-      color: #8a9199;
-      font-style: italic;
-    }
-    :deep(.cm-number) {
-      color: #0b4f8a;
-    }
-    :deep(.cm-builtin) {
-      color: #6f42c1;
-    }
-    :deep(.cm-variable) {
-      color: #953800;
-    }
-    :deep(.cm-operator) {
-      color: #0b4f8a;
-    }
-    :deep(.CodeMirror-matchingbracket) {
-      color: #c2185b !important;
-      background: rgba(194, 24, 91, 0.12);
-      border-bottom: 2px solid #c2185b;
-      font-weight: 700;
-    }
-  }
+  /* Monaco 自带滚动/行号/高亮,字体在 useMonaco 中设置;此处仅保证撑满容器 */
 }
 
-/* 自动补全提示框:跟随主题配色(CodeMirror-hints 是 body 级,用全局选择器) */
-:global(.CodeMirror-hints) {
+/* Monaco 补全建议浮层跟随画布明暗(编辑器 shadow DOM 外的 overlay,按 html.dark 调) */
+:global(html.dark) .sql-editor .suggest-widget,
+:global(html.dark) .sql-editor .monaco-editor-overlaymessage {
   border-radius: 8px;
-  border: 1px solid rgba(125, 139, 169, 0.25);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
-  font-size: 13px;
-  padding: 4px;
-  max-height: 320px;
-  z-index: 3000; /* 盖过 el-dialog/el-popper 默认层级,画布在抽屉/弹窗里也能浮出 */
 }
 
-:global(.CodeMirror-hint) {
-  padding: 4px 12px;
-  border-radius: 5px;
-  margin: 1px 2px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: #cdd6f4;
-  transition: background 0.05s;
-}
-
-/* 选中项:主题色高亮条 */
-:global(.CodeMirror-hint-active),
-:global(li.CodeMirror-hint-active) {
-  background: rgba(86, 156, 214, 0.28) !important;
-  color: #fff !important;
-  border-radius: 5px;
-}
-
-/* 浅色主题下的提示框配色(html.dark 切换,与画布双主题一致) */
-:global(html:not(.dark) .CodeMirror-hints) {
-  background: #fff;
-  color: #24292f;
-}
-:global(html:not(.dark) .CodeMirror-hint) {
-  color: #24292f;
-}
-:global(html:not(.dark) li.CodeMirror-hint-active) {
-  background: #e8f0fe !important;
-  color: #1a73e8 !important;
-}
-:global(html.dark .CodeMirror-hints) {
-  background: #252b3b;
-  color: #cdd6f4;
+/* Monaco 建议浮层(suggest-widget 挂在编辑器 shadow root 外,主题由 Monaco 自管;
+   此处仅调圆角与层级,保证画布在弹窗内也能浮出) */
+.sql-editor .suggest-widget {
+  z-index: 3000;
+  border-radius: 8px;
 }
 
 /* 拖拽分割条 */
@@ -2589,317 +1421,16 @@ async function copyAllTsv() {
   flex-shrink: 0;
 }
 
-/* ── 结果区(左侧竖 tab + 右侧内容) ────────────────────────── */
+/* 结果区容器高度(ResultGrid 根元素由宿主布局控制) */
 .results-wrap {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  flex: 1;
-  min-height: 0; /* 允许收缩,空态/日志/表格都在此高度内滚动 */
-  min-width: 0;
-  overflow: hidden;
-}
-
-.result-tabs {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 0;
-  overflow-x: auto;
-  flex-shrink: 0;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 2px 4px;
-}
-
-.result-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  color: $muted;
-  /* 相邻 tab 分隔线 */
-  border-right: 1px solid $border;
-
-  &:last-child {
-    border-right: none;
-  }
-
-  &:hover {
-    color: $text;
-  }
-
-  &.active {
-    color: $primary;
-    font-weight: 600;
-  }
-}
-
-.tab-name {
-  font-size: 12px;
-
-  &.err {
-    color: #f56c6c;
-  }
-}
-
-/* 结果 tab「缓存」标记(来自查询历史快照) */
-.tab-cached-tag {
-  font-size: 10px;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 3px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9, rgba(64, 158, 255, 0.12));
-}
-
-/* 结果 tab 关闭按钮(与导出同款,略小) */
-.tab-close {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  color: $muted;
-  cursor: pointer;
-  margin-left: 2px;
-
-  &:hover {
-    color: #f56c6c;
-  }
-}
-
-/* 日志 tab(第一个固定 tab) */
-.log-tab {
-  gap: 4px;
-
-  .tab-log-icon {
-    font-size: 13px;
-    color: $muted;
-  }
-
-  &.active .tab-log-icon {
-    color: $primary;
-  }
-}
-
-/* 日志 tab 有内容时的圆点 */
-.tab-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: $primary;
-  flex-shrink: 0;
-}
-
-.result-content {
-  flex: 1;
-  min-width: 0;
-  min-height: 0; /* 关键:允许在 .results-wrap 高度内收缩,否则日志/结果会撑高整页 */
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-/* 结果区整体卡片:表格 + 底部工具条 + 翻页 合成一个整体,消除三张独立卡片的分割感 */
-.result-card {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
-}
-
-.result-table-wrap {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.result-table {
-  width: 100%;
-
-  :deep(th.el-table__cell) {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-  }
-
-  /* 表头:点击列名复制列名(仅占自身文本宽,左侧点击复制、右侧排序箭头仍可点击排序) */
-  :deep(.col-header) {
-    display: inline-flex;
-    align-items: center;
-    cursor: copy;
-    min-width: 0;
-    max-width: calc(100% - 22px); /* 给右侧排序箭头留出可点击区 */
-    padding-right: 8px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-
-    &:hover {
-      color: $primary;
-      text-decoration: underline dotted;
-    }
-  }
-  /* 排序箭头保持在最右侧,作为唯一排序入口 */
-  :deep(.caret-wrapper) {
-    right: 6px;
-  }
-
-  /* NULL 单元格:低饱和胶囊,醒目但不过度突出 */
-  :deep(.cell-null) {
-    display: inline-block;
-    padding: 0 6px;
-    border-radius: 8px;
-    font-size: 11px;
-    line-height: 16px;
-    letter-spacing: 0.4px;
-    color: $muted;
-    background: var(--el-fill-color-light);
-    cursor: pointer;
-    user-select: none;
-  }
-
-  :deep(.cell-val) {
-    cursor: pointer;
-
-    &:hover {
-      color: $primary;
-    }
-  }
-
-  /* 选择模式:取消点击复制光标,允许自由选中文本 */
-  :deep(.cell-select) {
-    cursor: text;
-    user-select: text;
-
-    &:hover {
-      color: $text;
-    }
-  }
-
-  :deep(.cell-num) {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* 可编辑单元格(表预览且有主键):悬停提示可双击编辑 */
-  :deep(.cell-editable) {
-    cursor: cell;
-
-    &:hover {
-      background: var(--el-color-warning-light-9);
-    }
-  }
-
-  /* 编辑态输入框(双击进入) */
-  :deep(.cell-edit) {
-    display: inline-flex;
-    width: 100%;
-  }
-
-  .cell-edit-input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 2px 6px;
-    font: inherit;
-    font-size: 12px;
-    color: $text;
-    border: 1px solid $primary;
-    border-radius: 4px;
-    outline: none;
-    background: #fff;
-  }
-}
-
-/* 选择模式整行:可选中 */
-:deep(.row-selectable .cell) {
-  cursor: text;
-  user-select: text;
-}
-
-/* 结果工具条:统计(左)+ 复制/模式开关(右) */
-.result-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  background: $panel;
-  border-top: 1px solid $border;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: $muted;
-  flex-shrink: 0;
-}
-
-.stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.stats-num {
-  color: $text;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.tools {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
-.mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-
-  span:last-child {
-    font-size: 12px;
-    color: $muted;
-  }
-
-  &.on span:last-child {
-    color: $primary;
-  }
-}
-
-.footer-muted {
-  color: $muted;
-}
-
-.footer-job {
-  font-weight: 600;
-  color: $primary;
-}
-
-.flink-mode {
-  margin-right: 4px;
-}
-
-.result-pagination {
-  display: flex;
-  justify-content: flex-end;
-  background: $panel;
-  border-top: 1px solid $border;
-  padding: 6px 12px;
-  flex-shrink: 0;
+  background: $bg;
 }
 
 .empty-state {
@@ -2909,40 +1440,10 @@ async function copyAllTsv() {
   justify-content: center;
 }
 
-/* ── 结果 tab 运行状态点 ─────────────────────────────────── */
-.tab-state {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.err-alert {
   flex-shrink: 0;
-
-  &.tab-ok {
-    background: #67c23a;
-  }
-
-  &.tab-err {
-    background: #f56c6c;
-  }
-
-  &.tab-trunc {
-    background: #e6a23c;
-  }
 }
 
-.tab-spin {
-  animation: dbq-spin 1s linear infinite;
-  color: $primary;
-}
-
-@keyframes dbq-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
-}
 
 /* ── 底部全局状态栏(DataGrip 式) ─────────────────────────── */
 .statusbar {
