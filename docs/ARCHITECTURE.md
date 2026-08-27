@@ -81,7 +81,7 @@ src/
 | `routes/ws-proxy.js` | WebSocket 代理(stingray/jupyter)+ upgrade 登录鉴权 |
 | `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
 | `users.js` | 用户存储:`data/users.json`(scrypt 加盐)、角色(admin/dev/viewer)、CRUD |
-| `config.js` | 配置统一来源:`server/config.local.json`(gitignore),缺省回退环境变量/默认 |
+| `config.js` | 配置统一来源:`server/config.local.json`(gitignore),缺省回退环境变量/默认;配置 JSON 非法则启动即报错(fail-fast) |
 | `db-permissions.js` | 数据权限矩阵读写与校验(loadPerms/savePerms/checkDbAccess/checkSparkAccess/checkFlinkAccess/allowedDbsFor) |
 | `ds-deps.js` | 海豚调度依赖:项目/工作流/实例列表、依赖树缓存(`data/ds-deps.json`) |
 | `db-scripts.js` | 本地 SQL 脚本存储(`data/scripts`) |
@@ -136,7 +136,7 @@ QueryView.vue
 
 ## 6. 配置体系
 
-唯一来源 `server/config.local.json`(不入 git,样例 `config.local.example.json`),`config.js` 缺省回退环境变量。关键字段:
+唯一来源 `server/config.local.json`(不入 git,样例 `config.local.example.json`),`config.js` 缺省回退环境变量。**配置文件 JSON 非法(如布尔误写 `True`/`False`)时启动即报错退出**,避免配置静默失效。
 
 - 服务:`port`(默认 3000)、`enabledModules`(空=全量)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`

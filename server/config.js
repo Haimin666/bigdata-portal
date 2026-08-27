@@ -11,7 +11,9 @@ if (existsSync(cfgFile)) {
   try {
     fileCfg = JSON.parse(readFileSync(cfgFile, 'utf8'))
   } catch (e) {
-    console.error(`[config] 解析 ${cfgFile} 失败:${e.message},回退到环境变量`)
+    // 配置解析失败必须启动即报错,不能静默回退(否则 dbProxyUrl/dsToken 等全丢,
+    // 功能悄悄失效且 auth 会被意外打开)。常见原因:JSON 布尔写成 True/False(应为小写 true/false)。
+    throw new Error(`[config] 解析 ${cfgFile} 失败:${e.message} —— 请修正该文件后再启动(注意 JSON 布尔必须小写 true/false,不能写 True/False)`)
   }
 }
 
