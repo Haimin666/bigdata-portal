@@ -32,5 +32,5 @@
 
 ## 6. 配置
 
-- `config.local.json`: `auth.enabled`(默认 true)、`auth.sessionHours`(12)
+- `config.local.json`: `auth.enabled`(默认 true)、`auth.sessionHours`(12);env 可用 `AUTH_ENABLED`(按布尔解析,`false` 即关闭登录门禁)
 - `data/users.json` 不入 git

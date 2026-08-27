@@ -96,7 +96,7 @@ export default {
   // 缺省(空/未配置)表示全部模块展示;配置后仅展示名单内模块。
   enabledModules: Array.isArray(fileCfg.enabledModules) ? fileCfg.enabledModules.map(String) : [],
   // 认证(用户管理):默认开启;首次启动无用户时引导创建管理员
-  authEnabled: pick(fileCfg.auth?.enabled, 'AUTH_ENABLED', true),
+  authEnabled: pickBool(fileCfg.auth?.enabled, 'AUTH_ENABLED', true),
   authSessionHours: pickInt(fileCfg.auth?.sessionHours, 'AUTH_SESSION_HOURS', 12),
   // 反代层数:0 = 不信任(本地直连);生产 nginx 反代时设 1,登录/解锁限速按真实客户端 IP 计
   trustProxy: pickInt(fileCfg.trustProxy, 'TRUST_PROXY', 0),
