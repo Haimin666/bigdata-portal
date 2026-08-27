@@ -63,6 +63,11 @@ docs/
 
 ## 5. 当前已知技术债(开发时注意)
 
+> **范围豁免(2026-08,用户决策)**:`dataleap`(/api/dataleap,DataLeap 编排)与
+> `assistant`(/api/assistant,开发助手)两模块**不做新开发**——含 bug 修复、拆分优化、
+> 功能增强,仅保持现状可用。除非网关级改动(配置/中间件/公共工具)波及到它们必须
+> 同步,否则一律不碰。开发任务默认排除这两模块。
+
 - YARN iframe 代理对复杂 JS 路由页(Spark UI 时间线等)重写脆弱,自建 UI 弹窗优先
 - Flink 1.13(StreamX 旧作业)与 1.17(本地)并存,`/jobs/:jid` 结构有差异,前端已兼容
 - Spark UI 的 SQL/时间线/日志无 REST,只能跳原生页或 iframe

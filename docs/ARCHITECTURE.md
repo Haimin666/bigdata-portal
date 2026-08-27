@@ -66,6 +66,7 @@ src/
 | `index.js` | **Express 装配器**:中间件顺序、各路由模块挂载、SPA fallback、listen(业务逻辑已按模块拆出) |
 | `middleware/auth-gate.js` | 登录门禁:PROTECTED_PREFIXES 内未登录一律 401(未初始化 503) |
 | `middleware/exec-gate.js` | 执行类操作门禁(EXEC_GATES):viewer 禁执行 + 角色/模块白名单 |
+| `middleware/error-handler.js` | 统一错误出口(jsonNotFound + errorHandler):未匹配路由 JSON 404、body 解析失败 400、next(err) 兜底 500,维持全站 `{code,msg}` 契约 |
 | `utils/proxy-utils.js` | 子应用代理工具:cookie/Location 重写、onProxyRes、iframeProxy 工厂 |
 | `utils/sql-write-detect.js` | SQL 写检测三件套:isSparkWriteSql / splitSqlStatements / extractTables(Spark/Flink/dbquery/权限矩阵共用) |
 | `engine-map.js` | 库→引擎映射共享状态(`/api/db/acl` 刷新,dbquery/权限矩阵校验引擎级规则用) |

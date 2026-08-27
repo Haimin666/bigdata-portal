@@ -13,6 +13,7 @@ import config from './config.js'
 import { setupAuth } from './auth.js'
 import { createAuthGate } from './middleware/auth-gate.js'
 import { createExecGate } from './middleware/exec-gate.js'
+import { jsonNotFound, errorHandler } from './middleware/error-handler.js'
 import { setupAssistant } from './routes/assistant.js'
 import { setupYarnProxy } from './routes/yarn-proxy.js'
 import { setupSubappsProxy } from './routes/subapps-proxy.js'
@@ -84,6 +85,12 @@ app.get('*', (req, res, next) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate')
   res.sendFile(path.join(DIST_DIR, 'index.html'))
 })
+
+// ── 统一 404 与全局错误出口(最后防线,须位于所有路由/fallback 之后) ──
+// SPA fallback 只 cover 非 API 的 GET;其余未匹配(未知 /api/*、POST/PUT 等)与
+// body 解析失败、next(err) 在此统一 JSON 响应,维持全站 {code, msg} 契约。
+app.use(jsonNotFound)
+app.use(errorHandler)
 
 // ── WebSocket 代理(stingray/jupyter)+ upgrade 登录鉴权 ─────────
 const server = app.listen(config.port, () => {
