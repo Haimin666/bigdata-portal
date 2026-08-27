@@ -11,7 +11,7 @@ HDFS 集群容量/节点磁盘监控、目录占比、节点明细(默认折叠)
 | 视图 | `src/views/hdfs/HdfsView.vue` | 主视图:总容量卡片(小尺寸,不干扰主功能)+ 节点表格 + 目录占比 |
 | 视图 | `src/views/hdfs/HdfsDiskOverview.vue` | 磁盘总览(卡片/进度条/节点明细,30s 刷新,节点常折叠) |
 | API | `src/api/hdfs.ts` | 容量/节点/目录统计 |
-| 网关 | `server/index.js` | `/api/hdfs/*` 转发(WebHDFS REST:fs/df、jmx datanode 信息、目录列表) |
+| 网关 | `server/routes/subapps-proxy.js`:`/apps/hdfs`、`/static`、`/webhdfs` 代理(WebHDFS REST 经 /webhdfs 透传) |
 
 ## 3. 数据流
 

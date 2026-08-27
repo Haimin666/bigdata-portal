@@ -12,7 +12,7 @@
 |---|---|---|
 | 视图 | `src/views/subapp/SubAppView.vue` / `src/layouts/components/SubappTabs.vue` | iframe 池(v-show 保状态,关闭才销毁) |
 | 配置 | `src/config/menu.ts` | `kind: 'subapp'` 菜单项(url/iframe 配置)驱动路由与 iframe |
-| 网关 | `server/index.js` | 各子应用代理:DS Web、Jupyter、StreamX、OMD、Stingray、`/dolphinscheduler`(纯代理,无登录注入) |
+| 网关 | `server/routes/subapps-proxy.js` 各子应用代理:DS Web、Jupyter、DolphinScheduler、Stingray、`/dolphinscheduler`(纯代理,无登录注入);`server/routes/ws-proxy.js` WebSocket 代理 |
 
 ## 3. 子应用代理清单
 

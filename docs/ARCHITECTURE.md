@@ -7,7 +7,7 @@
 ```
 ┌────────────┐   HTTP/HTTPS    ┌──────────────────────────────┐
 │  浏览器     │ ──────────────▶ │  Node 网关(Express, :3000)   │
-│  Vue3 SPA  │                 │  server/index.js 单一入口     │
+│  Vue3 SPA  │                 │  server/ 装配器+中间件+路由模块  │
 └────────────┘                 └──────┬─────────────┬─────────┘
                                       │ API 转发     │ 反向代理
                      ┌────────────────▼───┐   ┌─────▼──────────────┐
@@ -58,16 +58,35 @@ src/
 
 ### 3.1 模块清单
 
+> 2026-08 重构:网关从单文件 `index.js` 拆分为「装配器 + 中间件 + 工具 + 路由模块」,
+> 各路由模块内部保持与拆分前相同的注册顺序与路径(行为等价)。`index.js` 只负责顺序装配。
+
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Express 入口:静态托管、API 路由、代理体系、写操作防线、SPA fallback |
+| `index.js` | **Express 装配器**:中间件顺序、各路由模块挂载、SPA fallback、listen(业务逻辑已按模块拆出) |
+| `middleware/auth-gate.js` | 登录门禁:PROTECTED_PREFIXES 内未登录一律 401(未初始化 503) |
+| `middleware/exec-gate.js` | 执行类操作门禁(EXEC_GATES):viewer 禁执行 + 角色/模块白名单 |
+| `utils/proxy-utils.js` | 子应用代理工具:cookie/Location 重写、onProxyRes、iframeProxy 工厂 |
+| `utils/sql-write-detect.js` | SQL 写检测三件套:isSparkWriteSql / splitSqlStatements / extractTables(Spark/Flink/dbquery/权限矩阵共用) |
+| `engine-map.js` | 库→引擎映射共享状态(`/api/db/acl` 刷新,dbquery/权限矩阵校验引擎级规则用) |
+| `routes/yarn-proxy.js` | YARN 三套代理:hadoopapi(按 X-Resource-Manager 动态)、yarniframe(HTML 重写)、iframe-proxy(NM 日志等白名单主机) |
+| `routes/subapps-proxy.js` | 子应用 iframe 代理:HDFS(/apps/hdfs、/static、/webhdfs)、DS Web、Jupyter、DolphinScheduler、Stingray(HTML 注入) |
+| `routes/db.js` | DB 访问:/api/db 权限校验 + acl + jobs + explain + 透传,以及 /api/db-perms 管理 API(admin) |
+| `routes/spark.js` | Spark SQL:X-Spark-Token 签发/校验/绑定用户、暴力破解限速、query/jobs/logs/status/config/stages/cancel |
+| `routes/flink.js` | Flink SQL:交互查询/async/连接器/DDL 生成/jobs/PreJob 全套路由 |
+| `routes/dbquery.js` | MySQL/Oracle 同步查询 `/api/dbquery/query`(写检测 + 权限矩阵) |
+| `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 代理 |
+| `routes/portal.js` | 门户配置下发:`/api/config/modules` + `/api/config`(白名单字段,不泄露敏感配置) |
+| `routes/ws-proxy.js` | WebSocket 代理(stingray/jupyter)+ upgrade 登录鉴权 |
 | `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
 | `users.js` | 用户存储:`data/users.json`(scrypt 加盐)、角色(admin/dev/viewer)、CRUD |
 | `config.js` | 配置统一来源:`server/config.local.json`(gitignore),缺省回退环境变量/默认 |
+| `db-permissions.js` | 数据权限矩阵读写与校验(loadPerms/savePerms/checkDbAccess/checkSparkAccess/checkFlinkAccess/allowedDbsFor) |
 | `ds-deps.js` | 海豚调度依赖:项目/工作流/实例列表、依赖树缓存(`data/ds-deps.json`) |
 | `db-scripts.js` | 本地 SQL 脚本存储(`data/scripts`) |
-| `spark-gateway.js` | Spark 网关:`/api/spark/*` → db-proxy,注入 X-DB-Token |
-| `flink-gateway.js` | Flink 网关:`/api/flink/*` → db-proxy(交互 + prejob) |
+| `assistant-projects.js` | 开发助手项目元数据 + workspace 目录操作(被 routes/assistant.js 调用) |
+| `spark-gateway.js` | Spark 网关纯转发:`/api/spark/*` → db-proxy,注入 X-DB-Token(安全逻辑在 routes/spark.js) |
+| `flink-gateway.js` | Flink 网关纯转发:`/api/flink/*` → db-proxy(交互 + prejob) |
 
 ### 3.2 代理体系
 

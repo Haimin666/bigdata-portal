@@ -120,7 +120,7 @@ npm run dev:vite     # 前端
 - **同源 iframe**:url 为代理路径(/apps/... 等),iframe 同源读取门户域 cookie;不再自动登录
 - **跨源 iframe**:url 为绝对 https 地址,用户在 iframe 内登录;跨源 iframe **无法被门户注入任何脚本**(同源策略)
 
-## 7. 网关代理清单(server/index.js)
+## 7. 网关代理清单(server/routes/)
 
 | 前缀 | 目标 | 要点 |
 |---|---|---|

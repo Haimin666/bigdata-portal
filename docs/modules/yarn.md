@@ -15,7 +15,7 @@ YARN 应用列表/概览/队列、应用详情、以及 Flink/Spark 自建 UI �
 | 视图 | `src/views/yarn/AppInfoLine.vue` | 单元格渲染(状态色/进度条) |
 | API | `src/api/yarn.ts` | fetchApps 等,带 `X-Resource-Manager` 头 |
 | Store | `src/store/yarn.ts` | 应用列表/筛选/RM 选择(`rm` 为完整 URL) |
-| 网关 | `server/index.js` | `/yarniframe`(同构代理 → RM,支持 `/proxy/{appId}/` 与 `/cluster/app/{appId}`)、`/api/iframe-proxy`(动态 HTML 代理)、`/hadoopapi`(动态 RM 转发) |
+| 网关 | `server/routes/yarn-proxy.js` `/yarniframe`(同构代理 → RM,支持 `/proxy/{appId}/` 与 `/cluster/app/{appId}`)、`/api/iframe-proxy`(动态 HTML 代理)、`/hadoopapi`(动态 RM 转发) |
 
 ## 3. 数据流
 

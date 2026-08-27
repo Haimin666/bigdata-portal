@@ -15,7 +15,7 @@ DolphinScheduler 工作流实例监控:搜索/筛选、状态色、**单页分�
 | 视图 | `src/views/ds/DsMonitorToday.vue` | **任务监控·当日页**:统计概览 + 表头排序 + 任务实例「依赖」入口(打开 DAG 弹窗) |
 | 视图 | `src/views/ds/DepBranch.vue` | 追踪 UI:依赖树渲染(ECharts tree/链式,节点可拖拽/折叠;支持深链 DS 编辑) |
 | API | `src/api/ds.ts` / `src/api/dsDeps.ts` | 实例列表/操作/依赖树 |
-| 网关 | `server/index.js` | `/api/ds-*` 转发海豚(dsToken)、`/api/ds-deps`(缓存) |
+| 网关 | `server/ds-deps.js` `/api/ds-deps`(缓存、依赖树)、`/api/ds-*` 转发海豚(dsToken;在 ds-deps.js 内)、`server/index.js` 仅挂载 |
 | 服务 | `server/ds-deps.js` | 依赖树聚合:项目/工作流/最近实例(缓存 `data/ds-deps.json`,默认每天刷新) |
 
 ## 3. 数据流

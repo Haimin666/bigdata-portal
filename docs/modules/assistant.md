@@ -1,7 +1,7 @@
 # 开发助手(DevAssistant)模块
 
 > 位置:`src/views/assistant/DevAssistantView.vue` + `src/api/assistant.ts`
-> 网关:`server/index.js`(项目/文件路由 + 8787 转发代理)+ `server/assistant-projects.js`(项目存储)
+> 网关:`server/routes/assistant.js`(项目/文件路由 + 8787 转发代理)+ `server/assistant-projects.js`(项目存储)
 > 后端:`Reasonix serve`(8787,`assistantUrl` 配置)
 
 ## 架构
@@ -12,7 +12,7 @@
   └─ 会话/对话/SSE ──────▶ 代理转发(剥离 /api/assistant 前缀 → 8787,注入 Cookie: reasonix_token=<assistantToken>)
 ```
 
-- 代理配置:服务器 `server/index.js` `app.use('/api/assistant', createProxyMiddleware(...))`
+- 代理配置:服务器 `server/routes/assistant.js` `app.use('/api/assistant', createProxyMiddleware(...))`
   - `pathRewrite: { '^/api/assistant': '' }` —— `/api/assistant/submit` → 8787 `/submit`
   - `assistantToken` 非空时注入 `Cookie: reasonix_token=<token>`(8787 token 鉴权模式)
   - 代理**不**覆盖 `/api/assistant/projects*`(项目路由先挂载,精确前缀命中后不再进代理)

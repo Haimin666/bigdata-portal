@@ -6,7 +6,7 @@
 
 | 既有能力 | 粒度 | 说明 |
 |---|---|---|
-| EXEC_GATES（`server/index.js`） | 模块级 | admin/dev/viewer + modules 白名单，拦「执行类操作」 |
+| EXEC_GATES（`server/middleware/exec-gate.js`） | 模块级 | admin/dev/viewer + modules 白名单，拦「执行类操作」 |
 | db-proxy `allowedDbs`（全局白名单） | 库级（人人相同） | `datasources.json` 启动加载，`check_db_allowed` 校验 |
 | 数据源 `readOnly` | 数据源级 | db-proxy 拒绝非查询 SQL，写尝试记审计 |
 | ~~写解锁 `X-Spark-Token`~~ | 已移除 | 写权限密码验证移除,由库权限矩阵 + 数据源 readOnly 管控 |
@@ -32,7 +32,7 @@
 - **规则文件损坏（JSON 解析失败）→ fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。
 - **admin 角色一律放行**（管理特权，规则只约束 dev/viewer）。
 
-## 校验点（网关 `server/index.js` / `db-permissions.js`）
+## 校验点（网关 `server/middleware/exec-gate.js` + 各 `server/routes/*.js` / `db-permissions.js`）
 
 带 `db` 参数的 MySQL/Oracle 访问接口，执行前校验：
 
