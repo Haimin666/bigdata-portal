@@ -1,127 +1,126 @@
-# db-proxy:数据库只读 HTTP 代理(客户机侧)
+# db-proxy:数据库多引擎执行代理(客户机侧)
 
-在**可直连数据库的客户机**上运行,把数据库查询能力以 HTTP API 暴露给平台。
-平台服务器无需直连数据库,也永远不接触数据库密码。
-**支持 MySQL 与 Oracle 多数据源**(一个服务连多套库,按 `db` 参数路由)。
+> **定位(2026-08 权限策略调整后):零读写限制的"多引擎数据执行器"。**
+> db-proxy 自身不做任何读写权限判断(已移除库白名单/表白名单/只读保护/多语句拦截/
+> Spark-Flink 写门禁),所有权限统一由**门户网关**管控。db-proxy 只做:
+> **X-DB-Token 鉴权 → 连库执行 → 资源护栏 → 审计**。
 
-**所有配置集中在一个文件 `datasources.json`**,代码写死路径,无需其他配置。
-
-## 架构
+## 架构与信任链
 
 ```
-[平台服务器] --HTTP--> [客户机(本服务)] --MySQL/Oracle--> [数据库们]
-  /api/db/*            :8756                     (客户机可直连)
+浏览器/前端 → 门户网关(唯一权限点)
+              ├─ 登录/角色 + data/db-permissions.json 权限矩阵
+              ├─ /api/db、/api/dbquery、/api/spark、/api/flink 路由写检测(SQL 走私/写语句)
+              └─ exec-gate(写操作需密码解锁,权限校验)
+                    ↓  dbProxyUrl(如 http://10.25.15.106:8756) + X-DB-Token
+              db-proxy(本服务)
+              ├─ require_auth(X-DB-Token 匹配 authToken)     ← 服务入口鉴权
+              ├─ 资源护栏: 行数上限 / maxSqlLen / maxConcurrent / maxQps / 超时
+              ├─ 执行: MySQL(Doris)/Oracle / Spark / Flink / prejob
+              └─ 审计日志(时间/库/SQL/行数/耗时)
 ```
 
-## 环境要求
+> ⚠️ **安全边界**:db-proxy 对 `8756` 端口零读写限制——谁能持 `X-DB-Token`
+> 谁就能任意读写/执行 pyspark。防护依赖两点:
+> 1. **防火墙只放行门户服务器 IP** 访问 8756(禁止内网其他机器直连);
+> 2. `authToken` 保密(与门户 `config.local.json` 的 `dbProxyToken` 一致)。
 
-- Python 3.7+(老旧机器可用 3.7.6)
-- 客户机能直连目标数据库
+## 配置唯一来源 `datasources.json`
 
-## 安装
-
-```bash
-cd services/db-proxy
-python3.7 -m pip install -r requirements.txt
-```
-
-## 配置(只需 datasources.json)
-
-复制 `datasources.json.example` 为 `datasources.json`,填写真实配置:
+> 代码写死 `CONFIG_FILE = "datasources.json"`(当前工作目录),文件缺失/非法直接启动报错。
 
 ```json
 {
-  "authToken": "你的访问token",                    // 请求鉴权(X-DB-Token),留空=不鉴权
+  "authToken": "你的访问token",                    // X-DB-Token 鉴权,留空=不鉴权
   "listenHost": "0.0.0.0",
   "listenPort": 8756,
   "defaultLimit": 100,                            // 无限制子句时默认行数
   "maxLimit": 10000,                              // 行数硬上限
   "queryTimeout": 60,
   "connectTimeout": 5,
-  "allowedDbs": ["credzy", "credzx", "finance_order_trade"],  // 库白名单
-  "allowedTables": [],                            // 表白名单(可选)
-  "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",  // Oracle 客户端库目录(连 11g 必配)
+  "allowedDbs": [],                               // 已废弃(不再拦截,仅 /acl 回显)
+  "allowedTables": [],                            // 已废弃(同上)
+  "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",  // Oracle 11g 必配(thick 模式)
   "datasources": [
     { "name": "credzy", "type": "oracle", "host": "...", "port": 1521,
       "user": "...", "password": "...", "service": "credzy", "rowLimit": "rownum" },
     { "name": "finance_order_trade", "type": "mysql", "host": "...", "port": 3343,
-      "user": "...", "password": "...", "schema": "finance_order_trade" }
-  ]
+      "user": "...", "password": "...", "schema": "finance_order_trade" },
+    { "name": "doris_cluster1", "type": "mysql", "host": "...", "port": 19030,
+      "user": "...", "password": "...", "schema": "default" }
+  ],
+  "spark": { "enabled": false },                  // 见「Spark 引擎」
+  "flink": { "enabled": false }                   // 见「Flink 引擎」
 }
 ```
 
-数据源字段:
-- `name` = 前端请求的 `db` 参数
-- `type`: `mysql` / `oracle`
-- Oracle 用 `service`(服务名);MySQL 用 `schema`(库名)
-- `rowLimit`(可选,Oracle 用):`fetch`(默认,12c+)/ `rownum`(11g);MySQL 无需配
-- 数据库密码**只存在客户机**,平台不接触
+- `type` 仅支持 `mysql`(含 Doris,走 mysql 协议)与 `oracle`
+- oracle 连 11g 必须 `rowLimit: "rownum"` + `oracleClientLib`
+- `maxConcurrent/maxQps`、`maxSqlLen`(默认 32KB)在顶层配置
+- `allowWrite`/`writeToken`(spark/flink 段)已废弃,不再生效
 
 ## 启动
 
 ```bash
-python3.7 main.py
+python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyflink
 ```
 
-## 接口
+## 请求执行生命周期(MySQL/Doris/Oracle)
+
+```
+请求 → require_auth(X-DB-Token) → 路由 → get_datasource(db)
+  → _prepare_query: strip 注释/结尾分号 → is_select 判定(SELECT/SHOW/DESC/EXPLAIN/WITH)
+  → 护栏: maxSqlLen / maxQps / maxConcurrent / 行数上限(maxLimit 超限 400)
+  → SELECT/WITH 查询 → 追加行数限制 → 执行 → 行数截断 → 返回
+  → 写语句(INSERT/UPDATE/DELETE/DDL...) → 原样执行 → _write_audit 审计
+```
+
+**行数限制追加规则(各引擎统一,仅查询类)**
+- 仅 `SELECT` / `WITH` 前缀追加:
+  - MySQL/Doris: `... LIMIT n`
+  - Oracle 12c+: `... FETCH FIRST n ROWS ONLY`
+  - Oracle 11g(`rowLimit:"rownum"`): `SELECT * FROM (sql) WHERE ROWNUM <= n`
+- `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 与写语句**不追加**(Doris 等对非 SELECT 不接受 LIMIT 后缀)
+- 用户 SQL 自带 `LIMIT n`/`FETCH FIRST`/`ROWNUM` 时沿用;超过 `maxLimit` 直接 400
+
+## 保留的资源护栏(非权限)
+
+| 护栏 | 行为 |
+|---|---|
+| `X-DB-Token` 鉴权 | 与 `authToken` 不符 → 401(配置空 = 不鉴权,不推荐) |
+| 行数上限 | 无限制子句 SELECT 自动追加;硬上限 `maxLimit`(默认 10000) |
+| `maxSqlLen` | SQL 超 32768 字节(默认)拒绝 |
+| `maxConcurrent` / `maxQps` | 并发信号量 + QPS 限流 → 429 |
+| 超时 | 连接/查询超时可配,防远端卡死 |
+| 审计 | 每次查询/写操作落日志(时间/库/SQL/行数/耗时) |
+| `/explain` 只读检查 | EXPLAIN 仅允许只读 SQL(防 MySQL 5.x EXPLAIN DML 真执行) |
+
+## 接口总表
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET  | `/health` | 探活 |
-| GET  | `/dbs`    | 列出可用数据源(白名单过滤) |
-| POST | `/query`  | 执行只读查询,body `{db, sql}`(db=数据源 name) |
-| GET  | `/acl`    | 回显配置(脱敏,排查) |
-| GET  | `/scripts/tree` | ~~我的目录~~(已迁移到平台 `/api/scripts`,此处保留兼容) |
-| POST | `/scripts/new`  | ~~新建目录/文件~~(已迁移平台,保留兼容) |
-| POST | `/scripts/rename`| ~~重命名~~(已迁移平台,保留兼容) |
-| POST | `/scripts/delete`| ~~删除~~(已迁移平台,保留兼容) |
-| POST | `/scripts/save`  | ~~保存 SQL~~(已迁移平台,保留兼容) |
-| GET  | `/scripts/get`  | ~~读取 SQL~~(已迁移平台,保留兼容) |
-| GET  | `/tables` | 表目录:某库的表列表,`?db=`(MySQL `SHOW TABLES`/Oracle `user_tables`) |
-| GET  | `/fields` | 表目录:某表的字段列表,`?db=&table=`(MySQL `DESC`/Oracle `user_tab_columns`) |
-
-鉴权:配置了 `authToken` 后,请求需带请求头 `X-DB-Token: <token>`。
-
-> 脚本存储已迁移到**平台网关** `/api/scripts`(存平台 `data/scripts/`,docker 挂载 `./data:/app/data` 持久化);
-> db-proxy 的 `/scripts/*` 接口保留仅为兼容旧版,前端不再调用。
-
-## 安全约束
-
-1. **鉴权**:配置了 `authToken` 后,请求需带请求头 `X-DB-Token: <token>`(网关自动注入);未配 = 无鉴权(仅内网可信环境)
-2. **权限收口到门户**:读写权限已移除(db-proxy 不再有 writableTables/只读判定/过程白名单),由**门户网关统一管控**——mysql/oracle/spark/flink 写操作需门户密码解锁(`X-Spark-Token`,与 Spark 同一密码);db-proxy 仅保留资源护栏
-3. **库白名单**:请求的 `db` 必须在 `allowedDbs`(且是已配置数据源)
-4. **表白名单(可选)**:`allowedTables` 开启后从 SQL 提取表名校验
-5. **多语句防护**:拒绝分号分隔的多语句(`SELECT 1; DELETE ...` 403),末尾结尾分号允许(过程 BEGIN...END 块除外)
-6. **强制行数上限**:无限制子句自动加(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / Oracle 11g `ROWNUM`),硬上限 `maxLimit`
-7. **SQL 长度上限**:超过 `maxSqlLen`(默认 32768 字节)拒绝,防超大 SQL
-8. **超时**:连接/查询超时可配,防远端卡死
-9. **审计**:每次查询打日志(时间/库/SQL/行数/耗时)
-
-> ⚠️ 权限收口后,`8756` 端口的写能力依赖门户网关保护。**务必配置 `authToken`**,避免网络内其他人直连绕过门户执行任意 SQL。
-
-## Oracle 11g 说明
-
-- **必须配 `oracleClientLib`** 指向客户端库目录(含 `libclntsh.so`),走 thick 模式
-  (thin 模式不支持 11g)
-- **必须配 `rowLimit: "rownum"`**(11g 无 `FETCH FIRST` 语法,用 ROWNUM 包装)
-
-## 平台接入
-
-平台网关 `server/config.js` 配置 `dbProxyUrl`(如 `http://10.25.15.106:8756`),
-网关 `/api/db/*` 会代理到该地址。平台服务器 `server/config.local.json` 加:
-
-```json
-"dbProxyUrl": "http://10.25.15.106:8756",
-"dbProxyToken": "与客户机 datasources.json 的 authToken 一致"
-```
-
-> 提示:客户机防火墙需放行 8756 端口,并确认平台服务器能访问
-> `10.25.15.106:8756`(可用 `curl http://10.25.15.106:8756/health` 验证)。
+| GET  | `/dbs` | 全部数据源 name(无白名单过滤) |
+| GET  | `/acl` | 配置回显(脱敏,含引擎状态) |
+| POST | `/query` | 同步执行,body `{db, sql, timeoutMs?}` |
+| POST | `/jobs` | 异步提交,body 同上 → `{jobId}` |
+| GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
+| GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
+| POST | `/explain` | 执行计划树(只读 SQL) |
+| POST | `/spark/query` | Spark SQL/pyspark 执行 |
+| GET  | `/spark/status` `/spark/logs` `/spark/stages` | session 状态/日志/阶段 |
+| POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步 |
+| POST | `/flink/query` `/flink/async` (+`/{id}[/cancel]`) | Flink 交互式(批/流) |
+| GET  | `/flink/status` `/flink/connectors` `/flink/jobs` | 状态/连接器/流式任务 |
+| POST | `/flink/ddl/generate` | 按连接器模板生成建表 DDL |
+| POST | `/flink/prejob/jobs` (+`GET /{id}` `/logs` `/cancel` `/disable` `/enable` `PUT /{id}`) | PreJob 独立作业 |
+| GET  | `/flink/prejob/config` | PreJob 配置快照 |
+| GET/POST | `/scripts/*` | 已迁移平台的旧脚本接口,保留兼容 |
 
 ## Spark 引擎(自建网关,替代 Livy)
 
-db-proxy 内集成一个**常驻 client 模式 SparkSession**(自建 Spark 网关,放弃 Livy),
-SQL 与 PySpark 代码共用同一 session,支持临时视图跨请求保留。
+db-proxy 内集成**常驻 client 模式 SparkSession**(懒加载,首次 `/spark/query` 才创建),
+SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock` 串行执行。
 
 ### 配置(datasources.json 顶层 `spark` 段,缺省 = 引擎禁用)
 
@@ -141,45 +140,25 @@ SQL 与 PySpark 代码共用同一 session,支持临时视图跨请求保留。
   "defaultLimit": 1000,
   "maxLimit": 10000,
   "maxSqlLen": 65536,
-  "allowWrite": false,
-  "logDir": "spark-logs",
-  "sparkConf": {}
+  "logDir": "spark-logs"
 }
 ```
 
-### 特性
+**特性**
+- SQL 写语句(**INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等**):引擎不再校验
+  `allowWrite`/`writeUnlocked`,直接放行——写权限由门户网关 `/api/spark` 管控
+- PySpark 代码:信任模式(执行于 `{spark, sc}` 命名空间),结果赋给 `result`
+  变量(DataFrame/dict 列表)即返回表格;完整审计日志
+- 日志透传:log4j 重定向 `spark-logs/spark-jvm.log`,审计 `spark-logs/spark-audit.log`;
+  `GET /spark/logs?offset=N` 增量读取
 
-- **懒加载**:首次 `/spark/query` 才创建 SparkSession;未配 spark 或未装 pyspark 不影响
-  MySQL/Oracle 查询(db-proxy 启动即用)。
-- **串行执行**:同一时刻只跑一个请求(threading.Lock),避免 SparkSession 并发串扰。
-- **SQL 写限制**:只读关键字(`SELECT/SHOW/DESC/EXPLAIN/SET/USE`)放行;写语句
-  (INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等)需 `allowWrite: true` 且请求带
-  `writeUnlocked: true`(由门户网关在 X-Spark-Token 校验通过后置位)。
-- **PySpark 代码**:信任模式(执行于 `{spark, sc}` 命名空间),完整审计日志;
-  代码里把结果赋给 `result` 变量(DataFrame 或 dict 列表)即返回表格,
-  否则返回 `print()` 捕获的 stdout。
-- **日志透传**:log4j 重定向到 `spark-logs/spark-jvm.log`(driver JVM 日志),
-  Python 侧审计写 `spark-logs/spark-audit.log`;`GET /spark/logs?offset=N` 增量读取,
-  门户前端查询页自动轮询展示。
-
-### 依赖
-
-- Python 3.8+ 且安装 `pyspark`(版本与目标集群 Spark 匹配,如 `pyspark==3.4.2`)。
-- 运行机器需可提交 YARN(spark-submit 客户端、HADOOP_CONF_DIR)并直连 Hive Metastore
-  (thrift://hadoop-nn-1:9083)。
-- SparkSession 创建耗时较长(30~90s),首个请求会等待;之后复用常驻 session。
-
-### 接口
-
-| 端点 | 说明 |
-|---|---|
-| `POST /spark/query` | body `{kind: "sql"\|"pyspark", sql/code, writeUnlocked, timeoutMs}` |
-| `GET /spark/logs?offset=N` | 增量读取 driver 日志 |
-| `GET /spark/status` | session 状态 / appId / 配置快照 |
+**依赖**:Python 3.8+ `pyspark`(版本与集群匹配,如 `pyspark==3.4.2`);
+运行机器可提交 YARN(client 模式,需 HADOOP_CONF_DIR)并直连 Hive Metastore。
+Session 创建 30~90s,首个请求等待,之后复用。
 
 ## Flink 引擎(双通道:交互式 + PreJob)
 
-db-proxy 内嵌 PyFlink 1.17.2,**双通道架构**:
+内嵌 PyFlink 1.17.2:
 
 | 通道 | 模式 | 特点 |
 |---|---|---|
@@ -199,7 +178,6 @@ db-proxy 内嵌 PyFlink 1.17.2,**双通道架构**:
   "defaultLimit": 1000,
   "maxLimit": 10000,
   "queryTimeout": 300,
-  "allowWrite": true,
   "catalogs": ["CREATE CATALOG paimon_hive_store WITH (...)"],
   "defaultCatalog": "paimon_hive_store",
   "pipelineJars": ["file:///opt/streamx/flink/flink-1.17.2/lib/xxx.jar"],
@@ -218,29 +196,30 @@ db-proxy 内嵌 PyFlink 1.17.2,**双通道架构**:
 }
 ```
 
-### 交互式通道接口
+**特性**
+- SQL 脚本 `;` 分隔逐条执行,最后一条查询返回结果;流式 `INSERT INTO` 提交常驻任务返回 jobId
+- DDL/CREATE CATALOG 等写操作:引擎不再校验 `allowWrite`/`writeUnlocked`,直接放行——
+  写权限由门户网关 `/api/flink` 管控
+- 交互通道接口:query/async/cancel/status/connectors(+probe)/ddl/generate/jobs(+stop)
+- PreJob 通道:yarn-per-job 独立提交,状态存 `flink-prejobs/prejobs.json`,
+  经 YARN REST 刷新;支持 cancel/disable/enable/update/logs
 
-| 端点 | 说明 |
-|---|---|
-| `POST /flink/query` | body `{sql, limit?, mode: batch\|stream, timeoutMs}`;脚本式多语句,最后一条查询结果返回 |
-| `POST /flink/cancel` | 取消当前正在执行的查询(超时/手动) |
-| `GET /flink/status` | session 状态 / yarnAppId / allowWrite |
-| `GET /flink/connectors` | 连接器注册表(前端 DDL 生成用) |
-| `POST /flink/ddl/generate` | 按连接器模板生成建表 DDL |
-| `GET /flink/jobs` | 交互引擎内提交的流式任务列表(内存态) |
-| `POST /flink/jobs/{id}/stop` | 停止交互引擎的流式任务 |
+## 平台接入
 
-### PreJob 通道接口(独立作业)
+平台网关 `server/config.js` 配置 `dbProxyUrl`(如 `http://10.25.15.106:8756`),
+网关 `/api/db/*`、`/api/dbquery/*`、`/api/spark/*`、`/api/flink/*` 代理到该服务。
+平台服务器 `server/config.local.json` 加:
 
-| 端点 | 说明 |
-|---|---|
-| `POST /flink/prejob/jobs` | body `{name, sql, queue?}`;SQL 包装成 pyflink 脚本,`yarn-per-job` 提交,返回 `{jobId, appId}` |
-| `GET /flink/prejob/jobs` | 作业列表(状态经 YARN REST 刷新,持久化到 `flink-prejobs/prejobs.json`) |
-| `GET /flink/prejob/jobs/{id}` | 作业详情(状态/队列/trackingUrl/错误诊断) |
-| `GET /flink/prejob/jobs/{id}/logs` | 尾部日志(`yarn logs -applicationId`) |
-| `POST /flink/prejob/jobs/{id}/cancel` | 停止作业(`yarn application -kill`) |
-| `GET /flink/prejob/config` | prejob 配置快照(无敏感信息) |
+```json
+"dbProxyUrl": "http://10.25.15.106:8756",
+"dbProxyToken": "与客户机 datasources.json 的 authToken 一致"
+```
 
-> PreJob 生成脚本是纯 SQL(无 Python UDF)时 executor 不需要 python 环境,
-> yarn-per-job 的 JobGraph 全 Java;提交脚本落在 `flink-prejobs/main_<jobId>.py`,
-> 本地持久化,不对外暴露。
+> **推荐防火墙策略**:db-proxy 机器 8756 端口**只放行门户服务器 IP**,
+> 其余来源一律拒绝——门户是唯一合法入口,直连被网络层堵死。
+
+## 已废弃项(配置仍在/死代码,运行无影响)
+
+- 配置字段:`allowedDbs`/`allowedTables`/`allowWrite`/`writeToken`/`readOnly`(仅 /acl 回显)
+- 代码:`is_write_sql`/`WRITE_KW`(spark_engine)、`_is_write_sql`(main.py)、
+  `check_read_only_sql` 残留判定——已无调用,保留待清

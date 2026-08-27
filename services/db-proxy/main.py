@@ -156,20 +156,7 @@ except ImportError:  # pragma: no cover
     oracledb = None  # type: ignore
     _HAS_ORACLE = False
 
-# 提取 SQL 中出现的表名(粗略:FROM/JOIN/INTO/UPDATE/TABLE 后跟的表)。
-# 支持 MySQL 反引号完整标识符 `db`.`tbl` 与单段 `tbl`;普通名可带 "库.表"
-# (点号后必须跟名字段,避免 `db.` 尾点误提取)。
-TABLE_RE = re.compile(
-    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"
-    r"(?:`([^`]+)`\.`([^`]+)`|`([^`]+)`|[\"\[(]?([A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+)*)[\"\]]?)",
-    re.IGNORECASE,
-)
-# 反引号混合形态补充:`db`.tbl、db.`tbl`(限定表关键字后,避免命中字符串字面量)
-BACKTICK_TABLE_RE = re.compile(
-    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"
-    r"(?:`([^`]+)`\s*\.\s*([A-Za-z0-9_$]+)|([A-Za-z0-9_$]+)\s*\.\s*(`[^`]+`))",
-    re.IGNORECASE,
-)
+
 # 行数上限检测(MySQL/Oracle 通用):LIMIT n 或 FETCH FIRST n ROWS
 LIMIT_RE = re.compile(
     r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
@@ -306,15 +293,14 @@ def require_auth(x_db_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-def check_db_allowed(db: str) -> None:
-    if ALLOWED_DBS and db not in ALLOWED_DBS:
-        raise HTTPException(
-            status_code=403, detail=f"database '{db}' not in ALLOWED_DBS"
-        )
-
-
 READ_ONLY_SQL_RE = re.compile(
     r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+# 仅查询类(SELECT/WITH 前缀)才追加行数上限;SHOW/DESC/EXPLAIN 等只读语句不追加。
+# Doris 等 mysql 协议引擎对 SHOW/DESC/EXPLAIN 不接受 LIMIT 后缀,追加即语法错。
+SELECT_ONLY_RE = re.compile(
+    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(?:SELECT|WITH)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -375,70 +361,6 @@ def _write_audit(
                 pass
     except Exception as e:  # 审计失败不影响查询结果
         log.warning("audit write failed: %s", e)
-
-
-def _strip_sql_literals(sql: str) -> str:
-    """剥离注释与字符串字面量,用于语句/表名检查(避免字符串里的 FROM/JOIN/分号被误判)。"""
-    s = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql)
-    s = re.sub(r"'[^']*'", "''", s)
-    s = re.sub(r'"[^"]*"', '""', s)
-    return s
-
-
-def check_single_statement(sql: str) -> None:
-    """多语句注入防护:拒绝包含多个分号分隔语句的 SQL。
-    允许末尾一个结尾分号(如 'SELECT 1;'),其余分号视为多语句。
-    先剥离字符串/注释,避免 'SELECT \'a;b\'' 被误判。"""
-    s = _strip_sql_literals(sql).strip()
-    # 去掉末尾分号后,若仍含分号 → 多语句
-    body = s.rstrip(";").rstrip()
-    if ";" in body:
-        raise HTTPException(
-            status_code=403,
-            detail="multiple statements not allowed",
-        )
-
-
-def check_tables_allowed(sql: str) -> None:
-    """表级白名单:从 SQL 提取表名,不在白名单拒绝。"""
-    if not ALLOWED_TABLES:
-        return
-    # 提取用剥离字符串/注释后的 SQL,避免 'from xxx' 字符串被误提取
-    clean = _strip_sql_literals(sql)
-    names: List[str] = []
-    seen = set()
-
-    def _add(n: Optional[str]) -> None:
-        n = (n or "").replace("`", "").strip()
-        if not n or n in seen:
-            return
-        seen.add(n)
-        names.append(n)
-
-    for m in TABLE_RE.finditer(clean):
-        # 反引号双段 `db`.`tbl` → 拼完整名;单段/普通名取对应组
-        if m.group(1) and m.group(2):
-            _add(f"{m.group(1)}.{m.group(2)}")
-        else:
-            _add(m.group(3) or m.group(4))
-    for m in BACKTICK_TABLE_RE.finditer(clean):
-        if m.group(1) and m.group(2):
-            _add(f"{m.group(1)}.{m.group(2)}")
-        elif m.group(3) and m.group(4):
-            _add(f"{m.group(3)}.{m.group(4)}")
-    # 完整名(含 .)优先判定;裸名中若是某个完整名的库前缀,不单独判定(避免误拒)
-    full_names = [t for t in names if "." in t]
-    db_prefixes = {f.split(".", 1)[0] for f in full_names}
-    bare_extra = [t for t in names if "." not in t and t not in db_prefixes]
-    for table in full_names + bare_extra:
-        bare = table.split(".", 1)[-1]
-        # 支持 "库.表" 完整名或裸表名,任一匹配即通过
-        if table in ALLOWED_TABLES or bare in ALLOWED_TABLES:
-            continue
-        raise HTTPException(
-            status_code=403,
-            detail=f"table '{table}' not in ALLOWED_TABLES",
-        )
 
 
 def enforce_limit(sql: str) -> int:
@@ -554,21 +476,7 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: 
             re.IGNORECASE,
         ):
             is_select = False
-    # 数据源级只读:显式 readOnly:true 的库拒绝一切非查询 SQL(纵深保护)
-    if ds.read_only and not is_select:
-        # 写尝试即使未执行也要审计(affected=null, blocked=true)
-        _write_audit(db, ds.type, clean_sql, None, 0.0, source, blocked=True)
-        raise HTTPException(
-            status_code=403,
-            detail=f"datasource '{ds.name}' is read-only (readOnly:true), write SQL not allowed",
-        )
-    # 与同步 /query 对齐:异步任务路径(/jobs)此前缺失多语句走私防护与表级白名单,
-    # 必须在此补齐(网关 /api/db/jobs 已做写解锁校验,此处为第二道防线)
-    if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", clean_sql, re.IGNORECASE):
-        pass  # 过程块内多分号属正常语法,放行
-    else:
-        check_single_statement(clean_sql)
-    check_tables_allowed(clean_sql)
+    # 读写限制已全部收口到门户网关侧(db-proxy 不做库表白名单/只读/多语句拦截)
     limit = enforce_limit(clean_sql)
     q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
     return ds, clean_sql, is_select, limit, q_timeout, time.time()
@@ -577,9 +485,11 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: 
 def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: int, start: float) -> Dict[str, Any]:
     """在已建立的连接上执行(连接由调用方管理,以便异步 job 取消时 close 中断)。"""
     if is_select:
-        # 查询类:追加行数限制并取结果集
+        # 查询类:仅 SELECT/WITH 查询追加行数限制(SHOW/DESC/EXPLAIN 不追加,
+        # 避免 Doris 等引擎对非 SELECT 语句不接受 LIMIT 后缀);
+        # 各引擎(limit/fetch/rownum)统一按此规则。
         row_mode = ds.effective_row_limit(conn)
-        if not LIMIT_RE.search(clean_sql):
+        if SELECT_ONLY_RE.match(clean_sql) and not LIMIT_RE.search(clean_sql):
             clean_sql = append_row_limit(clean_sql, limit, row_mode)
         cur = conn.cursor()
         cur.execute(clean_sql)
@@ -669,8 +579,7 @@ def health() -> Dict[str, Any]:
 def dbs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_auth(x_db_token)
     names = sorted(DATASOURCES.keys())
-    if ALLOWED_DBS:
-        names = [n for n in names if n in ALLOWED_DBS]
+    # 不做库白名单过滤:读写限制统一在门户网关侧
     return {"code": 0, "data": names}
 
 
@@ -835,15 +744,8 @@ def query(
                 status_code=400,
                 detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
             )
-        check_db_allowed(req.db)
         ds = get_datasource(req.db)
-        # 权限管控已收口到门户网关(密码解锁);此处仅保留资源护栏:
-        # 1) 多语句防护(防注入走私) 2) 表级白名单(如配置) 3) 行数/长度/超时
-        if re.match(r"^\s*(?:CALL|EXEC|BEGIN)\b", req.sql, re.IGNORECASE):
-            pass  # 过程块内多分号属正常语法,放行
-        else:
-            check_single_statement(req.sql)
-        check_tables_allowed(req.sql)
+        # 读写限制已收口到门户网关侧,此处仅保留资源护栏(行数/长度/超时/限流)
         result = fetch(req.sql, req.db)
         # 审计日志:时间/库/SQL/行数/耗时
         log.info(
@@ -957,24 +859,6 @@ class SparkQueryReq(BaseModel):
     timeoutMs: int = 120000  # 与门户/前端默认 120s 对齐;超时自动 cancelJobGroup 释放锁
 
 
-def _check_spark_write_creds(write_unlocked: bool, req_token: Optional[str]) -> None:
-    """写解锁凭证服务端校验(S1):
-    writeUnlocked=true 时必须携带与配置一致的 X-Spark-Write 头(共享密钥)。
-    **未配置 spark.writeToken 时放行(默认不拦截)** —— 门户权限矩阵仍是第一道
-    防线;配置了 token 则强校验,堵死直连 db-proxy 伪造 writeUnlocked。
-    """
-    if not write_unlocked:
-        return
-    cfg_token = str(SPARK_CFG.get("writeToken", "") or "")
-    if not cfg_token:
-        # 未配置共享密钥:门户侧已做权限管控,不额外拦截(用户无需解锁)
-        return
-    if not req_token or not secrets.compare_digest(cfg_token, req_token):
-        raise HTTPException(
-            status_code=403, detail="spark write token mismatch (无法自行解锁写权限)"
-        )
-
-
 class SparkJobSubmitReq(BaseModel):
     sql: str = ""
     code: str = ""  # kind=pyspark 用
@@ -1020,8 +904,6 @@ def spark_query(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
     try:
-        # 写解锁凭证校验:writeUnlocked=true 必须经门户携带共享密钥,防直连伪造
-        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
         if req.kind == "pyspark":
             if not req.code:
                 raise HTTPException(status_code=400, detail="code required for pyspark")
@@ -1088,7 +970,6 @@ def spark_job_submit(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
     kind = "pyspark" if req.kind == "pyspark" else "sql"
-    _check_spark_write_creds(req.writeUnlocked, x_spark_write)
     sql = req.code if kind == "pyspark" else req.sql
     if not sql or not str(sql).strip():
         raise HTTPException(status_code=400, detail="sql is required")
@@ -1155,8 +1036,6 @@ def flink_query(
         )
     mode = req.mode if req.mode in ("batch", "stream") else "batch"
     try:
-        # 写解锁凭证校验:与 spark 同密钥体系,防直连伪造 writeUnlocked 绕过
-        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
         result = FLINK_ENGINE.execute_script(
             req.sql, req.limit or 0, mode=mode, write_unlocked=req.writeUnlocked
         )
@@ -1190,7 +1069,6 @@ def flink_job_submit(
             status_code=503, detail="flink engine not enabled (datasources.json flink.enabled=false)"
         )
     mode = req.mode if req.mode in ("batch", "stream") else "batch"
-    _check_spark_write_creds(req.writeUnlocked, x_spark_write)
     if not req.sql or not str(req.sql).strip():
         raise HTTPException(status_code=400, detail="sql is required")
     job_id = FLINK_JOBS.submit(
@@ -1406,8 +1284,6 @@ def flink_prejob_submit(
     require_auth(x_db_token)
     _prejob_guard()
     try:
-        # 写凭证校验:与 spark/flink 交互同密钥体系,防直连伪造 writeUnlocked 向 YARN 提交写作业
-        _check_spark_write_creds(req.writeUnlocked, x_spark_write)
         return {"code": 0, "data": FLINK_PREJOB.submit(
             req.name, req.sql, queue=req.queue, write_unlocked=req.writeUnlocked,
             resources=req.resources,
@@ -1697,7 +1573,6 @@ def tables(
 ) -> Dict[str, Any]:
     """表列表。detail=1 时返回 [{name, comment}](含表注释),否则保持 string[] 兼容旧调用。"""
     require_auth(x_db_token)
-    check_db_allowed(db)
     ds = get_datasource(db)
     q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
     try:
@@ -1745,7 +1620,6 @@ def fields(
     否则保持 [{name,type}] 兼容旧调用。
     注意:Oracle 列默认值 data_default 是 LONG 类型,驱动读取有风险,P0 不取。"""
     require_auth(x_db_token)
-    check_db_allowed(db)
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
@@ -1824,7 +1698,6 @@ def ddl(
     """生成建表 DDL:MySQL SHOW CREATE TABLE / Oracle DBMS_METADATA.GET_DDL。
     需数据源账号具备读取 DDL 的权限(SHOW VIEW / EXECUTE_CATALOG_ROLE),失败返回友好错误。"""
     require_auth(x_db_token)
-    check_db_allowed(db)
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
@@ -1880,7 +1753,6 @@ def schema(
     - Oracle:all_tables(OWNER=当前用户)+ all_tab_comments + all_tab_columns
     表数 > 800 只返回前 800 张并在 data.truncated=true。"""
     require_auth(x_db_token)
-    check_db_allowed(db)
     ds = get_datasource(db)
     q_timeout = max(1, int(timeoutMs / 1000)) if timeoutMs else QUERY_TIMEOUT
     try:
@@ -2160,12 +2032,11 @@ def explain(
     - Oracle:EXPLAIN PLAN FOR 后查 PLAN_TABLE(按 parent_id 建树);不可用则
       DBMS_XPLAN.DISPLAY 文本解析;再失败 → {kind:'table', rows: 原始行}"""
     require_auth(x_db_token)
-    check_db_allowed(req.db)
     raw = (req.sql or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="sql is required")
-    # 复用 /query 同一套校验:走私检测(INTO OUTFILE/DUMPFILE、LOAD_FILE、可执行注释)、
-    # CTE-DML、单语句、表白名单、read_only 拦截;EXPLAIN 只读,非 SELECT 一律 400
+    # _prepare_query 仅保留资源护栏(行数/长度/超时),不做读写限制拦截(已收口网关侧);
+    # EXPLAIN 只读,非 SELECT 一律 400
     # (MySQL 5.x 的 EXPLAIN 对 DML 会实际执行,必须在此挡住)。
     ds, clean, is_select, _limit, q_timeout, _start = _prepare_query(raw, req.db)
     if not is_select:

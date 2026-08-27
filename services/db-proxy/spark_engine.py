@@ -4,9 +4,8 @@
   - 常驻一个 client 模式 SparkSession(懒加载,首次 /spark/query 才 getOrCreate),
     SQL 与 PySpark 代码共用同一 session,临时视图跨请求保留。
   - 串行执行:同一时刻只跑一个请求(threading.Lock),避免 SparkSession 并发串扰。
-  - SQL 写限制:白名单只读(SELECT/SHOW/DESC/EXPLAIN/SET/USE)放行;
-    写语句(INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等)需要 allowWrite 且请求带
-    writeUnlocked=true(由门户网关在 X-Spark-Token 校验通过后置位)。
+  - SQL 写限制:读写权限已收口门户网关侧,引擎不再校验 allowWrite/writeUnlocked,
+    写语句直接放行(网关 /api/spark 已做写检测+token 校验)。
   - PySpark 代码:信任模式(用户拍板),执行于 {spark, sc} 命名空间,完整审计日志。
   - 日志透传:log4j 重定向到 spark-jvm.log(独立 JVM 的 driver 日志),
     Python 侧审计写入 spark-audit.log;GET /spark/logs 增量读取两个文件。
@@ -506,10 +505,6 @@ class SparkEngine:
             raise ValueError("empty sql")
         if len(clean) > int(self.cfg.get("maxSqlLen", 65536)):
             raise ValueError("sql too long")
-        # 写限制:白名单只读放行;写语句需 allowWrite + writeUnlocked
-        if is_write_sql(clean):
-            if not (bool(self.cfg.get("allowWrite", False)) and write_unlocked):
-                raise PermissionError("write operation not allowed (read-only)")
         limit = int(self.cfg.get("defaultLimit", 1000))
         max_limit = int(self.cfg.get("maxLimit", 10000))
         m = re.search(r"\bLIMIT\s+(\d+)\b", clean, re.IGNORECASE)
@@ -597,9 +592,6 @@ class SparkEngine:
         self._ensure_initialized()
         if len(code) > int(self.cfg.get("maxSqlLen", 65536)):
             raise ValueError("code too long")
-        # 信任模式:任意 Python 等价于全量写权限,必须 allowWrite + writeUnlocked
-        if not (bool(self.cfg.get("allowWrite", False)) and write_unlocked):
-            raise PermissionError("pyspark execution not allowed (read-only)")
         start = time.time()
         self._audit("pycode >>>\n%s" % code[:2000])
         # 信任模式:执行于受限命名空间,提供 spark/sc;约定 result 变量承载结果

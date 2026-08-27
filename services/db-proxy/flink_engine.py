@@ -39,7 +39,7 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
   "defaultLimit": 1000,
   "maxLimit": 10000,
   "queryTimeout": 300,                      # 查询结果收集超时(秒),防流式源阻塞
-  "allowWrite": false,                      # true 才允许 DDL/DML,默认只读
+  "allowWrite": false,                      # 已废弃(读写限制已收口网关侧,不再生效)
   "pipelineJars": [                         # connector jar,file:// 或绝对路径
     "file:///opt/streamx/flink/flink-1.17.2/lib/paimon-flink-1.17-0.8.2.jar",
     "file:///opt/streamx/flink/flink-1.17.2/lib/flink-sql-connector-mysql-cdc-2.4.2.jar"
@@ -360,7 +360,7 @@ class FlinkEngine:
 
         - SET 'k' = 'v'            → 会话配置
         - USE [CATALOG] `x`        → 切换 catalog / database
-        - CREATE CATALOG / TABLE   → DDL(受 allowWrite 且需门户解锁 write_unlocked)
+        - CREATE CATALOG / TABLE   → DDL(写权限由门户网关统一管控,引擎不再校验)
         - SELECT / SHOW / DESC     → 查询,最后一条的结果返回
 
         mode=batch:即席查询,结果返回;mode=stream:流式执行,
@@ -371,14 +371,7 @@ class FlinkEngine:
             statements = split_flink_sql(script)
             if not statements:
                 raise ValueError("empty sql")
-            # 写语句白名单检查(逐条):allowWrite 且门户已解锁(write_unlocked)才放行
-            for stmt in statements:
-                clean = _clean_sql(stmt)
-                if is_write_sql(clean) and not (self._allow_write and write_unlocked):
-                    raise PermissionError(
-                        "flink write is disabled (datasources.json flink.allowWrite=false 或未解锁), "
-                        "only SELECT/SHOW/DESC/EXPLAIN allowed"
-                    )
+            # 写权限已收口门户网关侧,引擎不再校验 allowWrite/writeUnlocked,直接放行
             if limit <= 0:
                 limit = self._default_limit
             limit = min(limit, self._max_limit)
