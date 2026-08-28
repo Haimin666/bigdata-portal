@@ -111,9 +111,15 @@ export function setupSubappsProxy(app) {
                   const full = config.mailProxyUrl + p   // p 是 /creditreference/...viewfile?...
                   return `/api/mail/download?url=${Buffer.from(full).toString('base64')}`
                 })
-                res.removeHeader('content-length')
-                res.end(html)
+                const buf = Buffer.from(html)
+                res.statusCode = proxyRes.statusCode
+                res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'text/html; charset=utf-8')
+                res.setHeader('Content-Length', buf.length)
+                res.end(buf)
               })
+            } else {
+              // 非 HTML(图片/JS/CSS/二进制):原样透传,不劫持
+              proxyRes.pipe(res)
             }
           },
         },
