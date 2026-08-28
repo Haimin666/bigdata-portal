@@ -3,7 +3,7 @@ export interface MenuItem {
   title: string
   name: string
   icon: string
-  kind: 'native' | 'subapp' | 'external'
+  kind: 'native' | 'subapp'
   url?: string
   // 多用户体系上线后已移除子应用自动登录字段(原 login?: 'ds' | 'omd' | 'stingray')
   /** 原生 iframe 直连(同源代理或跨源直连) */
@@ -115,16 +115,6 @@ export const menus: MenuItem[] = [
     // cookie 种在门户域(跨源 iframe 第三方 cookie 会被 Chrome 拒),首次打开手动登录
     url: '/apps/mail/creditreference/mail/tmw/75/login.jsp',
     iframe: true
-  },
-  {
-    path: '/credit',
-    title: '征信上报',
-    name: 'creditBank',
-    icon: 'DocumentChecked',
-    kind: 'external',
-    // 征信上报系统(9.32.47.24):密码框/证书/东方通文件上传均 ActiveX,必须 IE 内核,
-    // 门户不做代理/iframe,仅快捷入口 —— 点击新窗口打开登录页(在能访问该站+跑 ActiveX 的机器上使用)
-    url: 'http://9.32.47.24/creditreference/ch/index.html'
   },
   {
     path: '/assistant',

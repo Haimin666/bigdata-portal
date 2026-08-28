@@ -48,12 +48,6 @@ watch(
 )
 
 function handleSelect(path: string) {
-  const m = menus.find((x) => x.path === path)
-  // 外部快捷入口(ActiveX 系统如征信上报):不进 tab 池,新窗口直开
-  if (m?.kind === 'external') {
-    if (m.url) window.open(m.url, '_blank', 'noopener')
-    return
-  }
   openTab(path)
   router.push(path)
 }
