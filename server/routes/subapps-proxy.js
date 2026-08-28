@@ -44,7 +44,24 @@ export function setupSubappsProxy(app) {
   // 邮件 Web(/apps/mail):经 Windows 节点 portproxy 中转的反代地址(mailProxyUrl),
   // iframeProxy 剥 X-Frame-Options 并改写相对链接,登录态 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被拒)
   if (config.mailProxyUrl) {
-    app.use('/apps/mail', iframeProxy(config.mailProxyUrl, '/apps/mail'))
+    app.use(
+      '/apps/mail',
+      createProxyMiddleware({
+        target: config.mailProxyUrl,
+        changeOrigin: true,
+        on: {
+          proxyReq: (proxyReq, req) => {
+            // 邮件站防盗链:附件下载(viewfile)校验 Referer 必须为邮件站自身域;
+            // 门户代理后 Referer 是 bigdata-portal 域 → 被拒 502。转发前重写为邮件站域。
+            if (proxyReq.getHeader('referer')) {
+              proxyReq.setHeader('referer', proxyReq.getHeader('referer').replace(/^https?:\/\/[^/]+/i, new URL(config.mailProxyUrl).origin))
+            }
+          },
+          proxyRes: onProxyRes(config.mailProxyUrl, '/apps/mail')
+        },
+        logLevel: 'warn'
+      })
+    )
   }
   // ── JupyterLab 子应用 ──────────────────────────────────────────
   // jupyter 容器 host 网络监听宿主机 8888,start.sh 注入 --ServerApp.base_url=/apps/jupyter,
