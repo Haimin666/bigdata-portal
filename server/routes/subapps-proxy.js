@@ -41,6 +41,11 @@ export function setupSubappsProxy(app) {
 
   // ── DS Web 子应用 ──────────────────────────────────────────────
   app.use('/apps/dsweb', iframeProxy(config.dsWebUrl, '/apps/dsweb'))
+  // 邮件 Web(/apps/mail):经 Windows 节点 portproxy 中转的反代地址(mailProxyUrl),
+  // iframeProxy 剥 X-Frame-Options 并改写相对链接,登录态 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被拒)
+  if (config.mailProxyUrl) {
+    app.use('/apps/mail', iframeProxy(config.mailProxyUrl, '/apps/mail'))
+  }
   // ── JupyterLab 子应用 ──────────────────────────────────────────
   // jupyter 容器 host 网络监听宿主机 8888,start.sh 注入 --ServerApp.base_url=/apps/jupyter,
   // 因此其页面/API/ws 路径自带 /apps/jupyter 前缀;express 挂载会剥掉前缀,

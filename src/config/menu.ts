@@ -69,7 +69,7 @@ export const menus: MenuItem[] = [
     icon: 'Odometer',
     kind: 'subapp',
     url: '/apps/dsweb/ui/#/home',
-    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe;
+    // 原生 iframe 同源代理:海豚前端依赖 JS 读 cookie,沙箱不兼容 → 直接 iframe
     // 不再自动登录,由用户在页面内自行登录
     iframe: true
   },
@@ -103,6 +103,17 @@ export const menus: MenuItem[] = [
     kind: 'subapp',
     // 跨源 iframe 直连(OpenMetadata 无 X-Frame-Options 限制,认证为 localStorage token 非 cookie)
     url: 'https://omd.corp.shiqiao.com/',
+    iframe: true
+  },
+  {
+    path: '/mail',
+    title: '邮件系统',
+    name: 'mail',
+    icon: 'Message',
+    kind: 'subapp',
+    // 同源代理 iframe:门户 /apps/mail 反代 → Windows 节点 portproxy → 内网邮件 Web(9.32.47.24)
+    // cookie 种在门户域(跨源 iframe 第三方 cookie 会被 Chrome 拒),首次打开手动登录
+    url: '/apps/mail/creditreference/mail/tmw/75/login.jsp',
     iframe: true
   },
   {
