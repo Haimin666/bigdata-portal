@@ -44,46 +44,6 @@ export function setupSubappsProxy(app) {
   // 邮件 Web(/apps/mail):经 Windows 节点 portproxy 中转的反代地址(mailProxyUrl),
   // iframeProxy 剥 X-Frame-Options 并改写相对链接,登录态 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被拒)
   if (config.mailProxyUrl) {
-    // ── 附件下载接口:绕开 corp 网关对 /apps/mail/*viewfile* 的 502 拦截 ──
-    // 原理:浏览器请求同域 /api/mail/download?url=<base64附件地址>,门户在服务端经 Windows
-    // 反代拉取附件流再回传(不经 corp 网关的 viewfile 路径);附件地址白名单只放 viewfile。
-    app.get('/api/mail/download', async (req, res) => {
-      const encoded = String(req.query.url || '')
-      let target = ''
-      try {
-        target = Buffer.from(encoded, 'base64').toString('utf8')
-      } catch {
-        return res.status(400).json({ code: 400, msg: 'url 参数非法' })
-      }
-      // 白名单:仅允许邮件站附件下载路径(viewfile),防开放代理
-      const up = new URL(target)
-      if (!up.pathname.includes('/viewfile/') || !/^https?:$/.test(up.protocol)) {
-        return res.status(400).json({ code: 400, msg: '仅允许邮件站附件下载(viewfile)' })
-      }
-      // 转成 Windows 反代地址(把邮件站 origin 替换为 mailProxyUrl origin,路径不变)
-      const winUrl = config.mailProxyUrl + up.pathname + up.search
-      try {
-        // 转发用户的邮件站 cookie(门户域下存的 tm*/JSESSIONID 等,原样带给 Windows/邮件站)
-        const headers = {}
-        const cookie = req.headers.cookie
-        if (cookie) headers['Cookie'] = cookie
-        headers['Referer'] = new URL(config.mailProxyUrl).origin + '/'
-        const r = await fetch(winUrl, { headers, redirect: 'follow', signal: AbortSignal.timeout(60000) })
-        const buf = Buffer.from(await r.arrayBuffer())
-        // 透传 Content-Type;附件下载头(文件名可能已在 query 的 filename 里,由浏览器用 URL 兜底)
-        res.setHeader('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
-        res.setHeader('Content-Length', buf.length)
-        // 尽量透传上游 Content-Disposition(附件原名)
-        const cd = r.headers.get('content-disposition')
-        if (cd) res.setHeader('Content-Disposition', cd)
-        res.status(r.status)
-        res.end(buf)
-      } catch (e) {
-        console.error('[mail/download]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: '附件下载失败' })
-      }
-    })
-
     app.use(
       '/apps/mail',
       createProxyMiddleware({
@@ -97,31 +57,7 @@ export function setupSubappsProxy(app) {
               proxyReq.setHeader('referer', proxyReq.getHeader('referer').replace(/^https?:\/\/[^/]+/i, new URL(config.mailProxyUrl).origin))
             }
           },
-          proxyRes: (proxyRes, req, res) => {
-            onProxyRes(config.mailProxyUrl, '/apps/mail')(proxyRes, req, res)
-            // 附件链接改写:HTML 里的 viewfile 链接 → /api/mail/download?url=<base64 完整附件地址>
-            // (绕开 corp 网关对 /apps/mail/*viewfile* 的 502;仅 HTML 响应做,二进制原样透传)
-            const ct = proxyRes.headers['content-type'] || ''
-            if (ct.includes('text/html') || ct.includes('application/xhtml')) {
-              let chunks = []
-              proxyRes.on('data', (c) => chunks.push(c))
-              proxyRes.on('end', () => {
-                let html = Buffer.concat(chunks).toString('utf8')
-                html = html.replace(/\/apps\/mail([^"'\s>]*viewfile[^"'\s>]*)/g, (_, p) => {
-                  const full = config.mailProxyUrl + p   // p 是 /creditreference/...viewfile?...
-                  return `/api/mail/download?url=${Buffer.from(full).toString('base64')}`
-                })
-                const buf = Buffer.from(html)
-                res.statusCode = proxyRes.statusCode
-                res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'text/html; charset=utf-8')
-                res.setHeader('Content-Length', buf.length)
-                res.end(buf)
-              })
-            } else {
-              // 非 HTML(图片/JS/CSS/二进制):原样透传,不劫持
-              proxyRes.pipe(res)
-            }
-          },
+          proxyRes: onProxyRes(config.mailProxyUrl, '/apps/mail')
         },
         logLevel: 'warn'
       })
