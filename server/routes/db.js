@@ -61,6 +61,29 @@ export function setupDb(app, auth) {
     }
   })
 
+  // 跨库表搜索(mysql information_schema / oracle all_tables;db-proxy 按实例去重查询 + 30s TTL 缓存)
+  app.get('/api/db/search/tables', async (req, res) => {
+    if (!config.dbProxyUrl) {
+      return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+    }
+    const keyword = String(req.query.keyword || '').trim()
+    if (!keyword) {
+      return res.status(400).json({ code: 400, msg: 'keyword is required' })
+    }
+    try {
+      const r = await fetch(config.dbProxyUrl + `/search/tables?keyword=${encodeURIComponent(keyword)}`, {
+        headers: { 'X-DB-Token': config.dbProxyToken || '' },
+        signal: AbortSignal.timeout(15000)
+      })
+      const body = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      res.json({ code: 0, data: body.data || [] })
+    } catch (e) {
+      console.error('[db/search/tables]', e instanceof Error ? e.message : e)
+      res.status(502).json({ code: 502, msg: `表搜索失败: ${e instanceof Error ? e.message : String(e)}` })
+    }
+  })
+
   // ── 数据权限矩阵:管理 API(admin only,读写 data/db-permissions.json)────────────
   app.get('/api/db-perms', auth.requireAdmin, (req, res) => {
     res.json({ code: 0, data: loadPerms() })

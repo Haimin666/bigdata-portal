@@ -11,7 +11,8 @@ import { checkSparkAccess } from '../db-permissions.js'
 import {
   query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus,
   stagesStatus as sparkStages, cancel as sparkCancel, submitJob as sparkSubmitJob,
-  jobStatus as sparkJobStatus, cancelJob as sparkCancelJob, setExecutors as sparkSetExecutors
+  jobStatus as sparkJobStatus, cancelJob as sparkCancelJob, setExecutors as sparkSetExecutors,
+  schemaDatabases as sparkSchemaDatabases, schemaTables as sparkSchemaTables, schemaFields as sparkSchemaFields
 } from '../spark-gateway.js'
 
 const SPARK_WRITE_TOKEN_TTL = 12 * 60 * 60 * 1000 // 12h
@@ -110,6 +111,26 @@ export function setupSpark(app) {
         res.status(502).json({ code: 502, msg: `spark 查询失败: ${msg.slice(0, 300)}` })
       }
     })
+
+    // ── Spark 元数据(表结构树/补全;只读 SHOW/DESC,db-proxy 侧 TTL 缓存)──
+    const sparkSchemaHandler =
+      (fn) =>
+      async (req, res) => {
+        try {
+          const data = await fn(req)
+          res.json({ code: 0, data })
+        } catch (e) {
+          if (e?.statusCode === 503) {
+            return res.status(503).json({ code: 503, msg: e.message })
+          }
+          const msg = e instanceof Error ? e.message : String(e)
+          console.error('[spark/schema]', msg)
+          res.status(502).json({ code: 502, msg: `spark 元数据获取失败: ${msg.slice(0, 300)}` })
+        }
+      }
+    app.get('/api/spark/schema/databases', sparkSchemaHandler(() => sparkSchemaDatabases()))
+    app.get('/api/spark/schema/tables', sparkSchemaHandler((req) => sparkSchemaTables(String(req.query.db || ''))))
+    app.get('/api/spark/schema/fields', sparkSchemaHandler((req) => sparkSchemaFields(String(req.query.db || ''), String(req.query.table || ''))))
 
     // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
     // 写拦截与 /api/spark/query 一致:写语句必须解锁(X-Spark-Token)

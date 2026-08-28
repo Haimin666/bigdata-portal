@@ -108,6 +108,9 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
 | POST | `/spark/query` | Spark SQL/pyspark 执行 |
+| GET | `/spark/schema/databases` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟) |
+| GET | `/spark/schema/tables?db=` | Spark 库下表列表(SHOW TABLES IN) |
+| GET | `/spark/schema/fields?db=&table=` | Spark 表字段列表(DESC,含类型/注释) |
 | GET  | `/spark/status` `/spark/logs` `/spark/stages` | session 状态/日志/阶段 |
 | POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步 |
 | POST | `/flink/query` `/flink/async` (+`/{id}[/cancel]`) | Flink 交互式(批/流) |

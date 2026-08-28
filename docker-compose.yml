@@ -41,12 +41,13 @@ services:
       # 此处默认值指向同一路径;config.local.json 的 assistantWorkspace 填 /app/assistant-workspace。
       - ${ASSISTANT_WORKSPACE:-/root/whm/DeepSeek-Reasonix/deploy/workspace}:/app/assistant-workspace
     healthcheck:
-      # 网关 /api/config 返回 200 视为健康
+      # 网关存活检查:打 SPA 首页(/ 不受登录门禁)。
+      # 注意:不要用 /api/config —— 它在 auth 开启后属于受保护路径,未登录得 401,容器会一直 unhealthy。
       test:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1:9910/api/config').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+        - fetch('http://127.0.0.1:9910/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
       interval: 30s
       timeout: 5s
       retries: 3

@@ -937,6 +937,161 @@ def spark_logs(
     return {"code": 0, "data": SPARK_ENGINE.read_logs({"jvm": jvm, "audit": audit})}
 
 
+# ── Spark 元数据(表结构树/补全:库→表→字段;只读 SHOW/DESC,TTL 缓存防重复打集群)──
+_SPARK_SCHEMA_CACHE: Dict[str, Tuple[float, list]] = {}
+_SPARK_SCHEMA_TTL = 300.0  # 5 分钟
+
+
+def _spark_schema_cached(key: str, loader) -> list:
+    now = time.time()
+    hit = _SPARK_SCHEMA_CACHE.get(key)
+    if hit and now - hit[0] < _SPARK_SCHEMA_TTL:
+        return hit[1]
+    val = loader()
+    _SPARK_SCHEMA_CACHE[key] = (now, val)
+    return val
+
+
+def _spark_meta_one_col(sql: str) -> list:
+    """执行只读元数据 SQL,取每行首个非空字段值(SHOW DATABASES 列名随版本:result/databaseName)"""
+    r = SPARK_ENGINE.execute_sql(sql, False, 60000)
+    out = []
+    for x in r.get("rows") or []:
+        v = x.get("result") or x.get("databaseName")
+        if v is None:
+            v = next((cand for cand in x.values() if cand is not None and cand != ""), None)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _spark_table_names(sql: str) -> list:
+    """SHOW TABLES IN:列名随版本(tableName/tab_name/name),显式取表名列"""
+    r = SPARK_ENGINE.execute_sql(sql, False, 60000)
+    out = []
+    for x in r.get("rows") or []:
+        v = x.get("tableName") or x.get("tab_name") or x.get("name")
+        if v:
+            out.append(v)
+    return out
+
+
+def _spark_ident(name: str) -> str:
+    """标识符清洗:剥掉反引号,防注入(SHOW/DESC 拼接前的最后防线)"""
+    cleaned = (name or "").replace("`", "")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="参数缺失")
+    return cleaned
+
+
+@app.get("/spark/schema/databases")
+def spark_schema_databases(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    return {"code": 0, "data": _spark_schema_cached("sp:databases", lambda: _spark_meta_one_col("SHOW DATABASES"))}
+
+
+@app.get("/spark/schema/tables")
+def spark_schema_tables(
+    db: str = "", x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    name = _spark_ident(db)
+    key = f"sp:tables:{name}"
+    return {"code": 0, "data": _spark_schema_cached(key, lambda: _spark_table_names(f"SHOW TABLES IN `{name}`"))}
+
+
+@app.get("/spark/schema/fields")
+def spark_schema_fields(
+    db: str = "", table: str = "", x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    dbn, tbl = _spark_ident(db), _spark_ident(table)
+    key = f"sp:fields:{dbn}:{tbl}"
+
+    def load() -> list:
+        r = SPARK_ENGINE.execute_sql(f"DESC `{dbn}`.`{tbl}`", False, 60000)
+        out = []
+        for x in r.get("rows") or []:
+            n = x.get("col_name") or x.get("name")
+            if not n or n.startswith("#"):
+                continue  # "# Partition Information" 小节行跳过
+            out.append({"name": n, "type": x.get("data_type") or "", "comment": x.get("comment") or ""})
+        return out
+
+    return {"code": 0, "data": _spark_schema_cached(key, load)}
+
+
+# ── 跨库表搜索(库表搜索:mysql 走 information_schema、oracle 走 all_tables;按 (type,host,port) 去重,
+#    每实例一条查询;结果 TTL 30s 缓存;Spark 表不做跨库搜索(逐库 SHOW TABLES 集群负载重,展开树即可) ──
+_SEARCH_CACHE: Dict[str, Tuple[float, list]] = {}
+_SEARCH_TTL = 30.0
+_SEARCH_LIMIT = 200  # 每实例返回上限
+_SEARCH_TOTAL = 300  # 整体截断
+
+
+@app.get("/search/tables")
+def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    kw = (keyword or "").strip()
+    if not kw:
+        raise HTTPException(status_code=400, detail="keyword required")
+    if len(kw) > 64:
+        raise HTTPException(status_code=400, detail="keyword too long")
+    key = f"st:{kw}"
+    hit = _SEARCH_CACHE.get(key)
+    if hit and time.time() - hit[0] < _SEARCH_TTL:
+        return {"code": 0, "data": hit[1]}
+    out: list = []
+    seen: set = set()
+    for ds in DATASOURCES.values():
+        ent = (ds.type, ds.host, ds.port)
+        if ent in seen:
+            continue
+        seen.add(ent)
+        try:
+            conn = ds.connect(connect_timeout=8, query_timeout=20)
+            try:
+                cur = conn.cursor()
+                if ds.type == "mysql":
+                    cur.execute(
+                        "SELECT table_schema, table_name FROM information_schema.tables "
+                        "WHERE table_name LIKE %s AND table_schema NOT IN "
+                        "('information_schema','mysql','performance_schema','sys') "
+                        "ORDER BY table_schema, table_name LIMIT %s",
+                        (f"%{kw}%", _SEARCH_LIMIT),
+                    )
+                    for schema, tbl in cur.fetchall():
+                        out.append({"engine": "mysql", "db": schema, "table": tbl})
+                else:  # oracle
+                    cur.execute(
+                        "SELECT owner, table_name FROM all_tables "
+                        "WHERE LOWER(table_name) LIKE :1 AND ROWNUM <= :2 ORDER BY owner, table_name",
+                        (f"%{kw.lower()}%", _SEARCH_LIMIT),
+                    )
+                    for owner, tbl in cur.fetchall():
+                        out.append({"engine": "oracle", "db": owner, "table": tbl})
+            finally:
+                conn.close()
+        except Exception:
+            # 单实例失败(连接失败/无 information_schema 权限等)静默,不影响其他实例
+            log.warning("search tables failed for %s(%s:%s)", ds.type, ds.host, ds.port)
+    out = out[:_SEARCH_TOTAL]
+    _SEARCH_CACHE[key] = (time.time(), out)
+    return {"code": 0, "data": out}
+
+
 @app.get("/spark/status")
 def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_auth(x_db_token)

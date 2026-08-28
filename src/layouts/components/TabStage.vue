@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, defineAsyncComponent } from 'vue'
 import { useRoute } from 'vue-router'
 import type { Component } from 'vue'
 import SubAppView from '@/views/subapp/SubAppView.vue'
@@ -7,10 +7,11 @@ import SubappTabs, { type PortalTab } from '@/views/subapp/SubappTabs.vue'
 import YarnView from '@/views/yarn/YarnView.vue'
 import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
 import HdfsView from '@/views/hdfs/HdfsView.vue'
-import DbQueryView from '@/views/db/QueryView.vue'
 import UserManageView from '@/views/admin/UserManageView.vue'
 import DataLeapView from '@/views/dataleap/DataLeapView.vue'
 import DevAssistantView from '@/views/assistant/DevAssistantView.vue'
+// SQL 画布含 Monaco(~1.5MB gzip),必须异步:避免拖慢首屏(全量打包进主 chunk 曾致 index 4.9MB)
+const DbQueryView = defineAsyncComponent(() => import('@/views/db/QueryView.vue'))
 
 defineOptions({ name: 'TabStage' })
 

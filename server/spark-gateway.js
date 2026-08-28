@@ -26,6 +26,24 @@ async function proxy(path, opts = {}) {
 }
 
 /**
+ * Spark 元数据(表结构树/补全):只读 SHOW/DESC,db-proxy 侧 TTL 缓存,不重复打集群
+ */
+export async function schemaDatabases() {
+  const body = await proxy('/spark/schema/databases', { method: 'GET', timeoutMs: 60000 })
+  return body.data
+}
+
+export async function schemaTables(db) {
+  const body = await proxy(`/spark/schema/tables?db=${encodeURIComponent(db)}`, { method: 'GET', timeoutMs: 60000 })
+  return body.data
+}
+
+export async function schemaFields(db, table) {
+  const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`
+  const body = await proxy(`/spark/schema/fields?${q}`, { method: 'GET', timeoutMs: 60000 })
+  return body.data
+}
+  /**
  * 执行 SQL 或 PySpark 代码,返回 { columns, rows, costMs, truncated }
  * @param {string} sql  SQL 文本(kind=sql)或 PySpark 代码(kind=pyspark)
  * @param {{ kind?: 'sql'|'pyspark', writeUnlocked?: boolean, timeoutMs?: number }} [opts]

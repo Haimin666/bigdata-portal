@@ -59,19 +59,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.data as T
 }
 
+/** 跨库表搜索(mysql information_schema / oracle all_tables;db-proxy 按实例去重 + 30s 缓存) */
+export async function searchTables(keyword: string): Promise<TableSearchHit[]> {
+  return request<TableSearchHit[]>(`/search/tables?keyword=${encodeURIComponent(keyword)}`)
+}
+
+export interface TableSearchHit {
+  engine: 'mysql' | 'oracle'
+  db: string
+  table: string
+}
+
 /** 拉取数据源列表(带类型,来自 /acl) */
 export async function listDataSources(): Promise<DbDataSource[]> {
   const data = await request<{ datasources?: DbDataSource[] }>('/acl')
   return data.datasources || []
 }
 
-/** 执行查询(mysql/oracle;经网关 /api/dbquery/query,写操作需 X-Spark-Token 解锁) */
-export async function queryDb(db: string, sql: string, writeToken?: string): Promise<DbQueryResult> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (writeToken) headers['X-Spark-Token'] = writeToken
+/** 执行查询(mysql/oracle 同步通道;经网关 /api/dbquery/query,写权限由网关数据权限矩阵管控) */
+export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
   const res = await fetch('/api/dbquery/query', {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ db, sql })
   })
   if (!res.ok) {
@@ -632,6 +641,40 @@ export async function sparkStatus(): Promise<Record<string, unknown>> {
   const body = (await res.json()) as ApiResponse<Record<string, unknown>>
   if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
   return body.data as Record<string, unknown>
+}
+
+/** Spark 元数据(SHOW/DESC 只读;db-proxy 侧 TTL 缓存,不重复打集群) */
+async function sparkSchemaRequest<T>(path: string): Promise<T> {
+  const res = await fetch(`/api/spark/schema/${path}`)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略非 JSON */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<T>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
+  return body.data as T
+}
+
+/** Spark 库列表(SHOW DATABASES) */
+export async function listSparkDatabases(): Promise<string[]> {
+  return sparkSchemaRequest<string[]>('databases')
+}
+
+/** Spark 库下表列表(SHOW TABLES IN) */
+export async function listSparkTables(db: string): Promise<string[]> {
+  return sparkSchemaRequest<string[]>(`tables?db=${encodeURIComponent(db)}`)
+}
+
+/** Spark 表字段列表(DESC,含类型/注释) */
+export async function listSparkFields(db: string, table: string): Promise<TableField[]> {
+  const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`
+  return sparkSchemaRequest<TableField[]>(`fields?${q}`)
 }
 
 /** 前端设置 Spark executor 数量(0=动态分配;5/10/15/20=固定常驻,下次查询生效) */

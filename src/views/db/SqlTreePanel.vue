@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search, CopyDocument, Star, StarFilled, Delete } from '@element-plus/icons-vue'
+import { Folder, Document, Plus, Refresh, CaretRight, Coin, Grid, Search, CopyDocument, Star, StarFilled, Delete, DataAnalysis } from '@element-plus/icons-vue'
 import {
   listScriptTree,
   createScriptNode,
@@ -11,6 +11,12 @@ import {
   listTables,
   listFields,
   getTableDDL,
+  listSparkDatabases,
+  listSparkTables,
+  listSparkFields,
+  sparkStatus,
+  searchTables,
+  type TableSearchHit,
   type ScriptNode,
   type DbDataSource,
   type TableMeta,
@@ -44,7 +50,45 @@ function filterNode(value: string, data: { name?: string }): boolean {
 }
 
 watch(mySearch, (v) => myTreeRef.value?.filter(v))
-watch(catSearch, (v) => catTreeRef.value?.filter(v))
+watch(catSearch, (v) => {
+  catTreeRef.value?.filter(v) // 树内已加载节点本地过滤
+  // 跨库搜索:输入 ≥2 字符防抖 500ms 查询(mysql/oracle 信息 schema),<2 立即还原树
+  if (searchTimer) clearTimeout(searchTimer)
+  if (v.trim().length < 2) {
+    searchResults.value = []
+    searching.value = false
+    return
+  }
+  searchTimer = window.setTimeout(() => void doTableSearch(), 500)
+})
+
+// ── 跨库表搜索(表目录 tab):输入即查,mysql/oracle;spark 表不做跨库(集群负载) ──
+const searchResults = ref<TableSearchHit[]>([])
+const searching = ref(false)
+const searchMode = computed(() => catSearch.value.trim().length >= 2 || searchResults.value.length > 0)
+let searchTimer: number | null = null
+async function doTableSearch() {
+  const kw = catSearch.value.trim()
+  if (kw.length < 2) return
+  searching.value = true
+  try {
+    searchResults.value = await searchTables(kw)
+  } catch (e) {
+    ElMessage.error(`表搜索失败:${e instanceof Error ? e.message : e}`)
+    searchResults.value = []
+  } finally {
+    searching.value = false
+  }
+}
+/** 点击搜索命中:插入 库.表 到画布 */
+function onSearchInsert(h: TableSearchHit) {
+  emit('insert', `${h.db}.${h.table}`)
+  ElMessage.success(`已插入 ${h.db}.${h.table}`)
+}
+/** 双击搜索命中:预览表数据(与树双击表一致) */
+function onSearchDblClick(h: TableSearchHit) {
+  emit('openTable', { db: h.db, table: h.table })
+}
 
 // ── 我的目录(双根:我的文件夹私有 + 共享文件夹公共)───────────────
 const SHARED_ROOT_ID = '__shared_root'
@@ -128,56 +172,113 @@ async function onDelete(node: ScriptNode) {
   }
 }
 
-// ── 表目录(库→表→字段,懒加载树,库来自数据源列表)────────────
+// ── 表目录(引擎 → 库 → 表 → 字段,懒加载树)────────────────
+// 引擎分组:props.dbs 里的 mysql/oracle 数据源 + Spark(经 SHOW/DESC 元数据,db-proxy 侧 TTL 缓存)
 interface CatNode extends Record<string, unknown> {
   id: string
   name: string
-  kind: 'db' | 'table' | 'field'
+  kind: 'engine' | 'db' | 'table' | 'field'
   isLeaf: boolean
   db?: string
   table?: string
-  typeName?: string
+  /** 节点所属引擎(mysql|oracle|spark,贯穿懒加载决定走哪套元数据 API) */
+  engine?: string
   /** 表/字段注释(detail=1 时后端返回) */
   comment?: string
+  typeName?: string
 }
 
-/** 树懒加载:根=库 → 表 → 字段 */
+/** Spark 引擎可用性:挂载时探测一次(spark/status),不可用则树里不显示 Spark 组 */
+const showSpark = ref(false)
+onMounted(async () => {
+  try {
+    const st = await sparkStatus()
+    showSpark.value = !!st?.enabled
+  } catch {
+    showSpark.value = false
+  }
+})
+
+const ENGINE_LABEL: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', spark: 'Spark' }
+
+/** 树懒加载:引擎组 → 库 → 表 → 字段(mysql/oracle 走 db-proxy,spark 走 /spark/schema) */
 async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
   try {
     if (node.level === 0) {
-      // 根节点:库列表(来自数据源)
-      resolve(
-        props.dbs.map((d) => ({
-          id: `db:${d.name}`,
-          name: d.label || d.name,
-          kind: 'db' as const,
-          isLeaf: false,
-          db: d.name
-        }))
-      )
+      // 根:引擎分组(mysql/oracle 按数据源 type 分组 + Spark 组)
+      const groups: CatNode[] = []
+      for (const d of props.dbs) {
+        const t = d.type
+        if (t !== 'mysql' && t !== 'oracle') continue
+        if (!groups.some((g) => g.engine === t)) {
+          groups.push({ id: `eng:${t}`, name: ENGINE_LABEL[t] || t, kind: 'engine', engine: t, isLeaf: false })
+        }
+      }
+      if (showSpark.value) groups.push({ id: 'eng:spark', name: 'Spark', kind: 'engine', engine: 'spark', isLeaf: false })
+      resolve(groups)
       return
     }
     const data = node.data as CatNode
+    if (data.kind === 'engine') {
+      // 引擎组 → 库列表
+      if (data.engine === 'spark') {
+        const dbs = await listSparkDatabases()
+        resolve(dbs.map((n) => ({ id: `spark-db:${n}`, name: n, kind: 'db', isLeaf: false, db: n, engine: 'spark' })))
+      } else {
+        resolve(
+          props.dbs
+            .filter((d) => d.type === data.engine)
+            .map((d) => ({ id: `db:${d.name}`, name: d.label || d.name, kind: 'db', isLeaf: false, db: d.name, engine: data.engine }))
+        )
+      }
+      return
+    }
     if (data.kind === 'db') {
+      // 库 → 表
+      if (data.engine === 'spark') {
+        const tables = await listSparkTables(data.db || '')
+        resolve(tables.map((t) => ({ id: `spark-t:${t}`, name: t, kind: 'table', isLeaf: false, db: data.db, table: t, engine: 'spark' })))
+        return
+      }
       const tables = await listTables(data.db || '', true)
       resolve(
         (tables as TableMeta[]).map((t) => ({
           id: `t:${t.name}`,
           name: t.name,
-          kind: 'table' as const,
+          kind: 'table',
           isLeaf: false,
           db: data.db,
           table: t.name,
+          engine: data.engine,
           comment: t.comment
         }))
       )
-    } else if (data.kind === 'table') {
+      return
+    }
+    if (data.kind === 'table') {
+      // 表 → 字段
+      if (data.engine === 'spark') {
+        const fields = await listSparkFields(data.db || '', data.table || data.name)
+        resolve(
+          fields.map((f) => ({
+            id: `spark-f:${data.table}:${f.name}`,
+            name: f.name,
+            kind: 'field',
+            isLeaf: true,
+            db: data.db,
+            table: data.table,
+            typeName: (f as { type?: string }).type || '',
+            comment: (f as { comment?: string }).comment || ''
+          }))
+        )
+        return
+      }
       const fields = (await listFields(data.db || '', data.table || data.name, true)) as TableFieldDetail[]
       resolve(
         fields.map((f) => ({
           id: `f:${data.table}:${f.name}`,
           name: f.name,
-          kind: 'field' as const,
+          kind: 'field',
           isLeaf: true,
           db: data.db,
           table: data.table,
@@ -206,10 +307,11 @@ function onTableDblClick(data: CatNode) {
   emit('openTable', { db: data.db || '', table: data.table || data.name })
 }
 
-/** 复制表名到画布(点 + 按钮) */
+/** 复制表名到画布(点 + 按钮);Spark 表带库前缀(db.table,避免同名歧义) */
 function onCopyTable(data: CatNode) {
-  emit('insert', data.table || data.name)
-  ElMessage.success(`已插入 ${data.table || data.name}`)
+  const text = data.engine === 'spark' ? `${data.db}.${data.table || data.name}` : data.table || data.name
+  emit('insert', text)
+  ElMessage.success(`已插入 ${text}`)
 }
 
 /** 复制建表语句(点复制 DDL 按钮) */
@@ -336,7 +438,9 @@ watch(activeTab, (v) => {
 })
 
 // datasources 异步到达后重建表目录树(重新加载根库列表)
-const dbsKey = computed(() => props.dbs.map((d) => d.name).join(','))
+// 树 key:数据源 + Spark 可用性探测结果(showSpark 异步完成时强制重建根节点,
+// 否则先渲染的树可能没有 Spark 组且永不刷新 —— 竞态修复 2026-09)
+const dbsKey = computed(() => props.dbs.map((d) => d.name).join(',') + `|spark:${showSpark.value}`)
 
 // ── 右键菜单(我的目录节点)──────────────────────────────────
 const ctx = ref<{ show: boolean; x: number; y: number; node: ScriptNode | null }>({
@@ -518,7 +622,26 @@ onUnmounted(() => {
       >
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
-      <div class="tree-wrap">
+      <!-- 搜索模式:跨库结果列表;否则渲染引擎分组树 -->
+      <template v-if="searchMode">
+        <div v-loading="searching" class="tree-wrap search-results-list">
+          <template v-if="searchResults.length">
+            <div
+              v-for="(h, i) in searchResults"
+              :key="i"
+              class="search-hit"
+              :title="`点击插入 ${h.db}.${h.table} · 双击预览表数据`"
+              @click="onSearchInsert(h)"
+              @dblclick="onSearchDblClick(h)"
+            >
+              <span class="search-hit-engine" :class="h.engine">{{ h.engine }}</span>
+              <span class="search-hit-name">{{ h.db }}.{{ h.table }}</span>
+            </div>
+          </template>
+          <div v-else-if="!searching" class="search-empty">无匹配表(mysql/oracle)<br />Spark 表请展开「Spark」组查看</div>
+        </div>
+      </template>
+      <div v-else class="tree-wrap">
         <el-tree
           ref="catTreeRef"
           :key="dbsKey"
@@ -533,7 +656,8 @@ onUnmounted(() => {
           <template #default="{ data }">
             <div class="tree-node" @dblclick="(e: MouseEvent) => { e.stopPropagation(); onTableDblClick(data as CatNode) }">
               <el-icon class="node-icon cat" :class="{ field: (data as CatNode).kind === 'field' }">
-                <Coin v-if="(data as CatNode).kind === 'db'" />
+                <DataAnalysis v-if="(data as CatNode).kind === 'engine'" />
+                <Coin v-else-if="(data as CatNode).kind === 'db'" />
                 <Grid v-else-if="(data as CatNode).kind === 'table'" />
                 <CaretRight v-else />
               </el-icon>
@@ -703,6 +827,51 @@ onUnmounted(() => {
   padding: 16px 8px;
   font-size: 14px;
   color: $muted;
+  text-align: center;
+}
+
+/* ── 跨库表搜索结果(表目录 tab 搜索模式) ─────────────────── */
+.search-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.search-hit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: $text;
+}
+.search-hit:hover {
+  background: rgba(120, 140, 180, 0.12);
+}
+.search-hit-engine {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 3px;
+  &.mysql {
+    color: #2f6bd8;
+  }
+  &.oracle {
+    color: #d97706;
+  }
+}
+.search-hit-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+}
+.search-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  color: $muted;
+  line-height: 1.8;
   text-align: center;
 }
 
