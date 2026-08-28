@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { menus, type MenuItem } from '@/config/menu'
 import { getEnabledModules } from '@/api/db'
-import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick, Lock } from '@element-plus/icons-vue'
+import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick, Lock, Message, DocumentChecked } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 import RobotIcon from '@/components/RobotIcon.vue'
 
@@ -35,6 +35,8 @@ const icons: Record<string, Component> = {
   User: UserFilled,
   Lock,
   MagicStick,
+  Message,
+  DocumentChecked,
   Robot: RobotIcon
 }
 
