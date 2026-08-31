@@ -72,6 +72,8 @@ export default {
     .filter(Boolean),
   hdfsUrl: pick(fileCfg.hdfsUrl, 'HDFS_URL', 'http://hadoop-nn-1.bigdata.shiqiao.com:9870'),
   dsWebUrl: pick(fileCfg.dsWebUrl, 'DS_WEB_URL', 'http://olds.bigdata.shiqiao.com/dolphinscheduler'),
+  // 数据同步 DBA 服务(生成 db2hive SQL/JSON);配置后挂 /api/sync/db2hive
+  dbaSyncUrl: pick(fileCfg.dbaSyncUrl, 'DBA_SYNC_URL', ''),
   // 邮件 Web 反代(经 Windows 节点 portproxy 中转):配置后注册 /apps/mail/* 子应用
   mailProxyUrl: pick(fileCfg.mailProxyUrl, 'MAIL_PROXY_URL', ''),
   omdUrl: pick(fileCfg.omdUrl, 'OMD_URL', 'https://omd.corp.shiqiao.com'),

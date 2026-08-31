@@ -64,6 +64,11 @@ const router = createRouter({
           name: 'devAssistant',
           component: () => import('@/views/assistant/DevAssistantView.vue')
         },
+        {
+          path: 'sync',
+          name: 'sync',
+          component: () => import('@/views/sync/SyncCodeView.vue')
+        },
         ...subappRoutes
       ]
     },

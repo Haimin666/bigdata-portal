@@ -22,6 +22,7 @@ import { setupDb } from './routes/db.js'
 import { setupSpark } from './routes/spark.js'
 import { setupFlink } from './routes/flink.js'
 import { setupDbQuery } from './routes/dbquery.js'
+import { setupSyncProxy } from './routes/sync-proxy.js'
 import { setupWsProxies } from './routes/ws-proxy.js'
 import { initDsDeps, dsDepsRouter } from './ds-deps.js'
 import { dbScriptsRouter } from './db-scripts.js'
@@ -69,6 +70,7 @@ setupDb(app, auth) // DB 访问:/api/db(权限+acl+jobs+explain+透传)+ /api/db
 setupSpark(app) // Spark SQL:token 体系 + 限速 + query/jobs/logs/status/config/stages/cancel
 setupFlink(app) // Flink SQL:交互/async/连接器/DDL/jobs/PreJob
 setupDbQuery(app) // MySQL/Oracle 同步查询:/api/dbquery/query
+setupSyncProxy(app) // 数据同步:/api/sync/db2hive(代理内部 DBA 服务)
 
 // ── 工作流依赖采集与级联重跑(/api/ds-deps)───────────────────
 initDsDeps() // 启动加载缓存 + 初始化采集 + 定时刷新

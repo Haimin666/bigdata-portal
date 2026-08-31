@@ -122,5 +122,12 @@ export const menus: MenuItem[] = [
     name: 'devAssistant',
     icon: 'Robot',
     kind: 'native'
+  },
+  {
+    path: '/sync',
+    title: '数据同步',
+    name: 'sync',
+    icon: 'Refresh',
+    kind: 'native'
   }
 ]
