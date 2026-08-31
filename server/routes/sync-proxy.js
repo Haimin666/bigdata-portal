@@ -7,14 +7,15 @@ import config from '../config.js'
 const DBA_BASE = config.dbaSyncUrl // 如 http://10.25.100.51:8000
 
 // API Token 守卫:支持 X-API-Token header 鉴权,绕过 cookie 认证
+// 优先级:1. token 匹配直接放行;2. 无 token 时回退到 cookie 认证(auth-gate 处理)
 function requireApiToken(req, res, next) {
-  // 未配置 token 时,走原有 cookie 认证
+  // 未配置 token 时,完全走 cookie 认证
   if (!config.syncApiToken) return next()
   // 检查 header token
   const token = req.headers['x-api-token']
   if (token === config.syncApiToken) return next()
-  // token 不匹配,拒绝访问
-  res.status(401).json({ code: 401, msg: '无效的 API Token' })
+  // 没有 token 或 token 不匹配,回退到 cookie 认证(让 auth-gate 处理)
+  return next()
 }
 
 export function setupSyncProxy(app) {
