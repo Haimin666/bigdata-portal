@@ -6,11 +6,22 @@ import config from '../config.js'
 
 const DBA_BASE = config.dbaSyncUrl // 如 http://10.25.100.51:8000
 
+// API Token 守卫:支持 X-API-Token header 鉴权,绕过 cookie 认证
+function requireApiToken(req, res, next) {
+  // 未配置 token 时,走原有 cookie 认证
+  if (!config.syncApiToken) return next()
+  // 检查 header token
+  const token = req.headers['x-api-token']
+  if (token === config.syncApiToken) return next()
+  // token 不匹配,拒绝访问
+  res.status(401).json({ code: 401, msg: '无效的 API Token' })
+}
+
 export function setupSyncProxy(app) {
   if (!DBA_BASE) return
 
   // 生成 db2hive 同步代码(SQL + JSON)
-  app.post('/api/sync/db2hive', async (req, res) => {
+  app.post('/api/sync/db2hive', requireApiToken, async (req, res) => {
     const dbName = String(req.body?.db_name || '').trim()
     const tableName = String(req.body?.table_name || '').trim()
     if (!dbName || !tableName) {

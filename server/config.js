@@ -74,6 +74,8 @@ export default {
   dsWebUrl: pick(fileCfg.dsWebUrl, 'DS_WEB_URL', 'http://olds.bigdata.shiqiao.com/dolphinscheduler'),
   // 数据同步 DBA 服务(生成 db2hive SQL/JSON);配置后挂 /api/sync/db2hive
   dbaSyncUrl: pick(fileCfg.dbaSyncUrl, 'DBA_SYNC_URL', ''),
+  // 数据同步 API token:配置后 /api/sync/* 接口支持 X-API-Token header 鉴权(绕过 cookie 认证)
+  syncApiToken: pick(fileCfg.syncApiToken, 'SYNC_API_TOKEN', ''),
   // 邮件 Web 反代(经 Windows 节点 portproxy 中转):配置后注册 /apps/mail/* 子应用
   mailProxyUrl: pick(fileCfg.mailProxyUrl, 'MAIL_PROXY_URL', ''),
   omdUrl: pick(fileCfg.omdUrl, 'OMD_URL', 'https://omd.corp.shiqiao.com'),
