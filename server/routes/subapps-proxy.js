@@ -56,15 +56,20 @@ export function setupSubappsProxy(app) {
       } catch {
         return res.status(400).json({ code: 400, msg: 'url 参数非法' })
       }
-      // 白名单:仅允许邮件站附件下载路径(viewfile),防开放代理
+      // 白名单:仅允许邮件站附件下载(路径在 /creditreference/mail/ 下,且带附件参数 type/msgid/mbid),
+      // 防开放代理(不代理任意 URL)
       let up
       try {
         up = new URL(target)
       } catch {
         return res.status(400).json({ code: 400, msg: 'url 非法' })
       }
-      if (!up.pathname.includes('/viewfile/') || !/^https?:$/.test(up.protocol)) {
-        return res.status(400).json({ code: 400, msg: '仅允许邮件站附件下载(viewfile)' })
+      if (!/^https?:$/.test(up.protocol) || !up.pathname.includes('/creditreference/mail/')) {
+        return res.status(400).json({ code: 400, msg: '仅允许邮件站附件下载' })
+      }
+      const q = up.search
+      if (!/type=/.test(q) && !up.pathname.includes('/viewfile/')) {
+        return res.status(400).json({ code: 400, msg: '仅允许邮件站附件下载' })
       }
       // 转成 Windows 反代地址(把邮件站 origin 替换为 mailProxyUrl origin,路径不变)
       const winUrl = config.mailProxyUrl + up.pathname + up.search
@@ -117,12 +122,12 @@ export function setupSubappsProxy(app) {
         proxyRes.pipe(res)
         return
       }
-      // HTML:缓冲后把 viewfile 链接改写为 /api/mail/download?url=<base64 完整地址>
+      // HTML:缓冲后把附件下载链接(带 viewfile 或 ?type=/msgid= 参数)改写为 /api/mail/download?url=<base64>
       const chunks = []
       proxyRes.on('data', (c) => chunks.push(c))
       proxyRes.on('end', () => {
         let html = Buffer.concat(chunks).toString('utf8')
-        html = html.replace(/\/apps\/mail([^"'\s>]*viewfile[^"'\s>]*)/g, (_, p) => {
+        html = html.replace(/\/apps\/mail([^"'\s>]*(?:viewfile|[?&](?:type|msgid|mbid)=)[^"'\s>]*)/g, (_, p) => {
           const full = config.mailProxyUrl + p
           return `/api/mail/download?url=${Buffer.from(full).toString('base64')}`
         })
