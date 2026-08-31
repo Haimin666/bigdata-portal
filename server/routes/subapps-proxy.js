@@ -5,7 +5,7 @@ import http from 'node:http'
 import httpProxy from 'http-proxy'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import config from '../config.js'
-import { onProxyRes, iframeProxy, rewriteCookie, rewriteLocation } from '../utils/proxy-utils.js'
+import { onProxyRes, iframeProxy, rewriteLocation } from '../utils/proxy-utils.js'
 
 export function setupSubappsProxy(app) {
   // ── HDFS 子应用(/apps/hdfs + 绝对路径 /static + WebHDFS API) ─
@@ -111,7 +111,11 @@ export function setupSubappsProxy(app) {
       // cookie/location 重写(与 onProxyRes 一致)
       delete proxyRes.headers['x-frame-options']
       const cookies = proxyRes.headers['set-cookie']
-      if (cookies) proxyRes.headers['set-cookie'] = cookies.map(rewriteCookie)
+      if (cookies) proxyRes.headers['set-cookie'] = cookies.map((c) => {
+        // 邮件站 cookie:去 HttpOnly + 去 Domain(种到门户域,供 /api/mail/download 服务端转发)
+        let cc = c.replace(/;\s*HttpOnly/i, '').replace(/;\s*Domain=[^;]*/i, '')
+        return cc
+      })
       if (proxyRes.headers.location) {
         proxyRes.headers.location = rewriteLocation(proxyRes.headers.location, config.mailProxyUrl, '/apps/mail')
       }

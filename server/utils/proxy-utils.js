@@ -8,6 +8,8 @@ import { createProxyMiddleware } from 'http-proxy-middleware'
 // 注意:不要设置 SameSite=None 又去掉 Secure——该组合会被浏览器拒绝整个 cookie,
 // 导致自动登录的会话 cookie 永远种不上(白屏根因)。同源 iframe 下保持默认 SameSite 即可。
 export function rewriteCookie(cookie) {
+  // 只去 HttpOnly(海豚前端需通过 JS 读取 sessionId)。Domain 处理只对邮件代理单独做(见 subapps-proxy),
+  // 全局保持原语义,避免影响 HDFS/DS/Jupyter/Stingray 的 cookie 种域。
   return cookie.replace(/;\s*HttpOnly/i, '')
 }
 
