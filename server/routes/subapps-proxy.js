@@ -2,9 +2,10 @@
 // HDFS(/apps/hdfs + /static + /webhdfs)、DS Web、Jupyter、DolphinScheduler、
 // Stingray(HTML 重写 + /stingray-static + /__/stingray API)。
 import http from 'node:http'
+import httpProxy from 'http-proxy'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import config from '../config.js'
-import { onProxyRes, iframeProxy } from '../utils/proxy-utils.js'
+import { onProxyRes, iframeProxy, rewriteCookie, rewriteLocation } from '../utils/proxy-utils.js'
 
 export function setupSubappsProxy(app) {
   // ── HDFS 子应用(/apps/hdfs + 绝对路径 /static + WebHDFS API) ─
@@ -44,24 +45,93 @@ export function setupSubappsProxy(app) {
   // 邮件 Web(/apps/mail):经 Windows 节点 portproxy 中转的反代地址(mailProxyUrl),
   // iframeProxy 剥 X-Frame-Options 并改写相对链接,登录态 cookie 种在门户域(避免跨源 iframe 第三方 cookie 被拒)
   if (config.mailProxyUrl) {
-    app.use(
-      '/apps/mail',
-      createProxyMiddleware({
-        target: config.mailProxyUrl,
-        changeOrigin: true,
-        on: {
-          proxyReq: (proxyReq, req) => {
-            // 邮件站防盗链:附件下载(viewfile)校验 Referer 必须为邮件站自身域;
-            // 门户代理后 Referer 是 bigdata-portal 域 → 被拒 502。转发前重写为邮件站域。
-            if (proxyReq.getHeader('referer')) {
-              proxyReq.setHeader('referer', proxyReq.getHeader('referer').replace(/^https?:\/\/[^/]+/i, new URL(config.mailProxyUrl).origin))
-            }
-          },
-          proxyRes: onProxyRes(config.mailProxyUrl, '/apps/mail')
-        },
-        logLevel: 'warn'
+    // ── 附件下载接口:绕开 corp 网关对 /apps/mail/*viewfile* 的 502 拦截 ──
+    // 原理:浏览器请求同域 /api/mail/download?url=<base64附件地址>,门户在服务端经 Windows
+    // 反代拉取附件流再回传(不经 corp 网关的 viewfile 路径);附件地址白名单只放 viewfile。
+    app.get('/api/mail/download', async (req, res) => {
+      const encoded = String(req.query.url || '')
+      let target = ''
+      try {
+        target = Buffer.from(encoded, 'base64').toString('utf8')
+      } catch {
+        return res.status(400).json({ code: 400, msg: 'url 参数非法' })
+      }
+      // 白名单:仅允许邮件站附件下载路径(viewfile),防开放代理
+      let up
+      try {
+        up = new URL(target)
+      } catch {
+        return res.status(400).json({ code: 400, msg: 'url 非法' })
+      }
+      if (!up.pathname.includes('/viewfile/') || !/^https?:$/.test(up.protocol)) {
+        return res.status(400).json({ code: 400, msg: '仅允许邮件站附件下载(viewfile)' })
+      }
+      // 转成 Windows 反代地址(把邮件站 origin 替换为 mailProxyUrl origin,路径不变)
+      const winUrl = config.mailProxyUrl + up.pathname + up.search
+      try {
+        const headers = {}
+        const cookie = req.headers.cookie
+        if (cookie) headers['Cookie'] = cookie
+        headers['Referer'] = new URL(config.mailProxyUrl).origin + '/'
+        const r = await fetch(winUrl, { headers, redirect: 'follow', signal: AbortSignal.timeout(60000) })
+        const buf = Buffer.from(await r.arrayBuffer())
+        res.setHeader('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
+        res.setHeader('Content-Length', buf.length)
+        const cd = r.headers.get('content-disposition')
+        if (cd) res.setHeader('Content-Disposition', cd)
+        res.status(r.status)
+        res.end(buf)
+      } catch (e) {
+        console.error('[mail/download]', e instanceof Error ? e.message : e)
+        res.status(502).json({ code: 502, msg: '附件下载失败' })
+      }
+    })
+
+    // ── /apps/mail 代理(selfHandleResponse + HTML 改写)──
+    // 用 http-proxy 原生 selfHandleResponse:true,与 yarn-proxy 同款写法 ——
+    // 非 HTML 写响应头后 pipe 原样透传(不破坏图片/JS/CSS/附件),HTML 缓冲后改写 viewfile 链接。
+    const mailProxy = httpProxy.createProxyServer({
+      target: config.mailProxyUrl,
+      changeOrigin: true,
+      secure: false,
+      selfHandleResponse: true // 库不自动 pipe,全部由 proxyRes 手动转发,避免流双写
+    })
+    mailProxy.on('proxyReq', (proxyReq, req) => {
+      // 邮件站防盗链:附件下载校验 Referer 必须为邮件站自身域;门户代理后是门户域 → 被拒。
+      if (proxyReq.getHeader('referer')) {
+        proxyReq.setHeader('referer', proxyReq.getHeader('referer').replace(/^https?:\/\/[^/]+/i, new URL(config.mailProxyUrl).origin))
+      }
+    })
+    mailProxy.on('proxyRes', (proxyRes, req, res) => {
+      // cookie/location 重写(与 onProxyRes 一致)
+      delete proxyRes.headers['x-frame-options']
+      const cookies = proxyRes.headers['set-cookie']
+      if (cookies) proxyRes.headers['set-cookie'] = cookies.map(rewriteCookie)
+      if (proxyRes.headers.location) {
+        proxyRes.headers.location = rewriteLocation(proxyRes.headers.location, config.mailProxyUrl, '/apps/mail')
+      }
+      const type = proxyRes.headers['content-type'] || ''
+      if (!type.includes('text/html')) {
+        // 非 HTML:写响应头 + 原样 pipe(不劫持流,避免上次的 502)
+        res.writeHead(proxyRes.statusCode, proxyRes.headers)
+        proxyRes.pipe(res)
+        return
+      }
+      // HTML:缓冲后把 viewfile 链接改写为 /api/mail/download?url=<base64 完整地址>
+      const chunks = []
+      proxyRes.on('data', (c) => chunks.push(c))
+      proxyRes.on('end', () => {
+        let html = Buffer.concat(chunks).toString('utf8')
+        html = html.replace(/\/apps\/mail([^"'\s>]*viewfile[^"'\s>]*)/g, (_, p) => {
+          const full = config.mailProxyUrl + p
+          return `/api/mail/download?url=${Buffer.from(full).toString('base64')}`
+        })
+        const buf = Buffer.from(html)
+        res.writeHead(proxyRes.statusCode, { ...proxyRes.headers, 'content-length': buf.length })
+        res.end(buf)
       })
-    )
+    })
+    app.use('/apps/mail', (req, res) => mailProxy.web(req, res))
   }
   // ── JupyterLab 子应用 ──────────────────────────────────────────
   // jupyter 容器 host 网络监听宿主机 8888,start.sh 注入 --ServerApp.base_url=/apps/jupyter,
