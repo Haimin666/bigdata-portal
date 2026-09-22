@@ -159,3 +159,14 @@ QueryView.vue
      DS Web olds.bigdata.shiqiao.com/dolphinscheduler
      Flink 1.17.2(StreamX)/ Spark 3.4.2(hadoop-task-1)
 ```
+
+## 8. Android 移动端
+
+仓库新增独立 `mobile/` 子工程（Vue 3 + Ionic Vue + Capacitor）。移动端复用 Express 网关的认证、模块权限和 YARN/DolphinScheduler API，不直连集群，也不持有 `dsToken`、`dbProxyToken` 等服务凭证。
+
+- YARN 与任务监控使用专门的移动页面，避免复用桌面大表格、G6 和 Monaco。
+- 完整“离线开发”继续通过网关的 `/apps/dsweb/ui/#/home` 代理入口访问，在 Android 全屏 WebView 容器中运行。
+- 本地开发由移动 Vite 服务代理到网关并沿用 `portal_session` Cookie。生产 Android 在企业 VPN/零信任网络内加载 `https://bigdata-portal.corp.shiqiao.com/mobile/`；网关从独立 `mobile/dist/` 托管该路径，桌面 Web 仍使用根路径 `/` 和 `dist/`。两端共享 HTTPS 域名、`portal_session` Cookie、API 与权限体系。
+- 移动端危险操作继续由网关角色/模块门禁兜底，前端必须增加目标确认与重复提交保护。
+
+详细边界见 `docs/modules/mobile.md`。

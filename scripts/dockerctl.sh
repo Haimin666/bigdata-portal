@@ -17,7 +17,7 @@
 # 前置:已安装 Docker(含 docker compose v2,或旧版 docker-compose)。
 # 配置唯一来源:server/config.local.json(挂载进容器,不入库)。
 # 内网构建(无法访问 docker.io)时,用环境变量指定基础镜像与 npm 源,如:
-#   BASE_IMAGE=harbor.example.com/library/node:20-alpine NPM_REGISTRY=http://npm.example.com/repository/npm-public/ ./scripts/dockerctl.sh up
+#   BASE_IMAGE=harbor.example.com/library/node:22-alpine NPM_REGISTRY=http://npm.example.com/repository/npm-public/ ./scripts/dockerctl.sh up
 # ============================================================================
 set -euo pipefail
 

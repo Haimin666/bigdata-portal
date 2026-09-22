@@ -43,10 +43,12 @@ DsTaskMonitor → GET /api/ds/process-instances(海豚 API, dsToken;默认当天
 - **当日页表头排序**:`DsMonitorToday` 列(项目/名称/状态/开始/结束/时长)加 `sortable`,`@sort-change` 在前端对当前结果集升/降排序(切换视图/查询会重新 load 覆盖排序)
 - **当日页项目列**:任务实例按当前筛选项目注入 `projectName`,工作流实例(单项目/全项目)注入 `_projectName`+`projectName`,独立「项目」列展示且可排序
 - **当日页工作流依赖侧边栏**:任务实例行「依赖级联」按钮 → `openDeps()` 右侧滑出 `el-drawer`(72%) 画布;工作流实例视图用 `processDefinitionId` 调 `/workflow-tree/:processId`,任务实例视图用 `projectName + processInstanceId` 调新增的 `/workflow-tree-by-instance/:projectName/:processInstanceId`(后端先 `instance/query-by-id` 反查 `processDefinitionCode` 再聚合);画布内 G6 有向图(dagre)渲染**当前工作流完整上下游**,节点展示工作流名称/项目/执行状态/最近实例时间,颜色标记最新实例状态(成功绿/失败红/运行中蓝/未执行灰,含 RUNNING_EXECUTION/SUBMITTED_SUCCESS 等运行态)
+- **移动端实例日志**:`mobile/src/pages/OfflinePage.vue` 从工作流实例加载任务节点列表,再按任务实例 ID 调 `/dolphinscheduler/log/detail`;每次 500 行,支持节点切换、刷新、加载更多和复制,关闭弹层即释放日志内容。
 
 ## 5. 安全红线
 
 - 重跑/停止/暂停等真实操作接口:**禁止在测试中传真实 id**,一律假 id 验证参数构造
+- `/dolphinscheduler/projects/:project/executors/execute` 由网关执行门禁保护：viewer 一律禁止，dev/admin 还需 `dsTask` 模块权限；桌面端和移动端不得绕过网关直连海豚。
 - 依赖树遍历必须限并发、低频(遵守 api-request-discipline)
 
 ## 6. 配置

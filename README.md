@@ -135,10 +135,10 @@ scripts/dockerctl.sh logs      # 跟随日志
 scripts/dockerctl.sh ps        # 查看状态
 ```
 
-**内网构建**:服务器无法访问 docker.io 时,构建会卡在拉 `node:20-alpine`(connect timeout)。用环境变量指定内部镜像源与 npm 源后重试:
+**内网构建**:服务器无法访问 docker.io 时,构建会卡在拉 `node:22-alpine`(connect timeout)。移动端使用的Capacitor CLI 8要求Node 22+。用环境变量指定内部镜像源与npm源后重试:
 
 ```bash
-BASE_IMAGE=<harbor-addr>/library/node:20-alpine \
+BASE_IMAGE=<harbor-addr>/library/node:22-alpine \
 NPM_REGISTRY=<内网 npm 源,可选> \
 scripts/dockerctl.sh up
 ```
@@ -153,6 +153,8 @@ scripts/dockerctl.sh up
 server {
   listen 80;
   root /app/dist;
+  # Android 移动页面由 Node 从 mobile/dist 独立托管；必须放在根 location 前。
+  location /mobile/ { proxy_pass http://127.0.0.1:3000; }
   location / { try_files $uri /index.html; }
   location /api/  { proxy_pass http://127.0.0.1:3000; }
   location /apps/ { proxy_pass http://127.0.0.1:3000; }

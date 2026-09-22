@@ -33,6 +33,7 @@ import { dataleapRouter, initDataleap } from './dataleap.js'
 EventEmitter.defaultMaxListeners = 20
 
 const DIST_DIR = path.join(import.meta.dirname, '../dist')
+const MOBILE_DIST_DIR = path.join(import.meta.dirname, '../mobile/dist')
 const app = express()
 
 // 反代部署(nginx 等)下取真实客户端 IP(登录/解锁限速按真实 IP 计)。
@@ -40,6 +41,7 @@ const app = express()
 if (config.trustProxy) app.set('trust proxy', config.trustProxy)
 
 app.use(cookieParser())
+app.use('/mobile', express.static(MOBILE_DIST_DIR))
 app.use(express.static(DIST_DIR))
 
 // 代理路径不解析请求体:express.json() 会消费 stream 导致 http-proxy-middleware
@@ -80,6 +82,11 @@ app.use('/api/scripts', dbScriptsRouter())
 app.use('/api/dataleap', dataleapRouter())
 
 // ── SPA fallback(仅非 API 的 GET 路由) ────────────────────────
+app.get('/mobile/*', (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate')
+  res.sendFile(path.join(MOBILE_DIST_DIR, 'index.html'))
+})
+
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next()
   // index.html 必须 no-cache:dist 每次构建后 chunk 文件名带新 hash,
