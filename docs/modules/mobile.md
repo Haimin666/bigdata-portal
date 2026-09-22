@@ -80,3 +80,9 @@ npx cap sync android
 涉及危险操作时，只校验请求构造与确认流程，不使用真实应用或实例 ID。
 
 生产 Docker 构建同时生成桌面 `dist/` 与移动 `mobile/dist/`；网关只在 `/mobile/` 托管后者，原 Web 入口 `/` 保持不变。移动 Vite 的资源基路径必须保持 `/mobile/`，否则资源会与桌面端 `/assets` 冲突。
+
+## 7. 主题与移动浮层
+
+移动端支持浅色、深色和跟随系统三种主题，偏好保存在设备 `localStorage`。主题通过根节点 `ion-palette-dark` 类和语义CSS变量切换；状态色含义在两种主题下保持一致。
+
+Ionic的Action Sheet、Alert、Modal等overlay挂载在应用根层，不继承页面卡片的局部背景。`mobile.css`必须显式提供overlay背景、文字、分隔线和backdrop变量，项目/RM/任务节点筛选不得出现透明背景。新增overlay组件时需要同时在深浅主题下检查。
