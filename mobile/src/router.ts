@@ -29,7 +29,7 @@ router.beforeEach(async (to: RouteLocationNormalized) => {
       if (!to.meta.public) return '/login'
     }
   }
-  if (to.meta.public) return auth.loggedIn ? '/app/home' : true
+  if (to.meta.public) return auth.loggedIn || auth.authDisabled ? '/app/home' : true
   return auth.loggedIn || auth.authDisabled ? true : '/login'
 })
 
