@@ -10,6 +10,8 @@ import HdfsDiskOverviewView from './HdfsDiskOverview.vue'
 
 defineOptions({ name: 'HdfsView' })
 
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
+
 const route = useRoute()
 const router = useRouter()
 
@@ -37,11 +39,24 @@ async function loadDisk() {
 // 磁盘相关 30s 自动刷新(仅磁盘监控,不刷新目录列表)
 let diskTimer: number | undefined
 onMounted(() => {
-  diskTimer = window.setInterval(() => loadDisk(), 30000)
+  if (props.active) diskTimer = window.setInterval(() => loadDisk(), 30000)
 })
 onUnmounted(() => {
   if (diskTimer) clearInterval(diskTimer)
 })
+
+watch(
+  () => props.active,
+  (active) => {
+    if (active) {
+      void loadDisk()
+      if (!diskTimer) diskTimer = window.setInterval(() => loadDisk(), 30000)
+    } else if (diskTimer) {
+      clearInterval(diskTimer)
+      diskTimer = undefined
+    }
+  }
+)
 
 // 分页(前端分页:WebHDFS LISTSTATUS 不支持分页参数)
 const page = ref(0)
@@ -326,5 +341,38 @@ watch(path, (p) => {
 
 .entry-icon {
   color: $muted;
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    flex-wrap: wrap;
+  }
+
+  .path-input {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .toolbar-spacer {
+    display: none;
+  }
+
+  .path-bar {
+    flex-wrap: wrap;
+  }
+
+  .breadcrumb {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .path-full {
+    width: 100%;
+    margin-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 </style>

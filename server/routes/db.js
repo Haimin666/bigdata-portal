@@ -52,6 +52,7 @@ export function setupDb(app, auth) {
         if (dbs != null && !dbs.includes('*')) {
           const allowed = new Set(dbs)
           data.datasources = datasources.filter((d) => d && allowed.has(String(d.name || '')))
+          data.allowedDbs = dbs
         }
       }
       res.json({ code: 0, data })
@@ -77,7 +78,18 @@ export function setupDb(app, auth) {
       })
       const body = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-      res.json({ code: 0, data: body.data || [] })
+      let hits = Array.isArray(body.data) ? body.data : []
+      if (req.user?.role !== 'admin') {
+        const perms = loadPerms()
+        const username = req.user?.username || ''
+        const roles = req.user?.role ? [req.user.role] : []
+        const dbs = allowedDbsFor(perms, username, roles)
+        if (dbs != null && !dbs.includes('*')) {
+          const allowed = new Set(dbs)
+          hits = hits.filter((hit) => hit && allowed.has(String(hit.db || '')))
+        }
+      }
+      res.json({ code: 0, data: hits })
     } catch (e) {
       console.error('[db/search/tables]', e instanceof Error ? e.message : e)
       res.status(502).json({ code: 502, msg: `表搜索失败: ${e instanceof Error ? e.message : String(e)}` })

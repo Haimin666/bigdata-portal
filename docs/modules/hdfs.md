@@ -27,6 +27,7 @@ HdfsView → GET /api/hdfs/df(容量总览)
 - 容量数据来自 WebHDFS `fs/df` + NameNode jmx(`Hadoop:service=NameNode,name=FSNamesystemState` 等)
 - 30s 自动刷新(页面可见时),刷新后保持节点折叠状态
 - 卡片紧凑化,不挤压 HDFS 主浏览功能
+- 窄屏(≤640px)路径输入独占一行,上级/刷新操作另起一行;长路径在窄屏截断,表格保持自身横向滚动
 
 ## 5. 已知限制与历史
 

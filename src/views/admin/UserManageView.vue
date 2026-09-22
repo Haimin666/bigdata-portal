@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Delete, EditPen, Grid } from '@element-plus/icons-vue'
+import { Plus, Refresh, Delete, EditPen, Grid, Search } from '@element-plus/icons-vue'
 import { userApi, type UserInfo, type RolesDef } from '@/api/auth'
 import { menus } from '@/config/menu'
 import DbPermView from './DbPermView.vue'
@@ -16,6 +16,7 @@ const MODULE_OPTIONS = [...new Set([...menus.map((m) => m.name), 'userManage'])]
 const users = ref<UserInfo[]>([])
 const roles = ref<RolesDef>({})
 const loading = ref(false)
+const userKeyword = ref('')
 
 // ── 数据库权限(集成自数据权限矩阵,存 data/db-permissions.json)──
 const tab = ref('users')
@@ -31,6 +32,15 @@ const roleLabels = computed(() => {
   const map: Record<string, string> = {}
   for (const [k, v] of Object.entries(roles.value)) map[k] = v.title
   return map
+})
+
+const filteredUsers = computed(() => {
+  const keyword = userKeyword.value.trim().toLowerCase()
+  if (!keyword) return users.value
+  return users.value.filter((u) => {
+    const role = roleLabels.value[u.role] || u.role
+    return `${u.username} ${role} ${u.status}`.toLowerCase().includes(keyword)
+  })
 })
 
 async function load() {
@@ -223,13 +233,29 @@ function statusInfo(s: string) {
   <div class="user-manage">
     <el-tabs v-model="tab" class="um-tabs">
       <el-tab-pane label="用户管理" name="users">
-        <div class="head">
-          <span class="tip">用户管理:自建账号,控制可访问模块与可访问数据库(admin 不受限)。首个管理员在登录页初始化。</span>
-          <el-button type="primary" size="small" :icon="Plus" @click="openCreate">新建用户</el-button>
-          <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <div class="page-heading">
+          <div>
+            <h2>用户管理</h2>
+            <p>管理平台账号、角色和模块访问权限。</p>
+          </div>
+          <div class="page-actions">
+            <el-button type="primary" :icon="Plus" @click="openCreate">新建用户</el-button>
+            <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+          </div>
         </div>
 
-    <el-table :data="users" size="small" border>
+        <div class="head">
+          <el-input
+            v-model="userKeyword"
+            class="user-search"
+            clearable
+            :prefix-icon="Search"
+            placeholder="搜索用户名或角色"
+          />
+          <span class="tip">模块为空时继承角色权限；数据库权限由网关侧校验。</span>
+        </div>
+
+    <el-table :data="filteredUsers" v-loading="loading" row-key="username" stripe class="user-table">
       <el-table-column prop="username" label="用户名" min-width="120" />
       <el-table-column label="角色" width="110" align="center">
         <template #default="{ row }">
@@ -280,6 +306,9 @@ function statusInfo(s: string) {
           <el-button size="small" text type="danger" :icon="Delete" @click="removeUser(row)">删除</el-button>
         </template>
       </el-table-column>
+      <template #empty>
+        <el-empty :description="userKeyword ? '没有匹配的用户' : '暂无用户'" />
+      </template>
     </el-table>
 
     <!-- 新建用户 -->
@@ -374,26 +403,91 @@ function statusInfo(s: string) {
 
 <style scoped>
 .user-manage {
-  padding: 16px;
+  padding: 20px 24px;
   height: 100%;
   overflow: auto;
+  background: var(--bd-bg);
+}
+.um-tabs :deep(.el-tabs__header) {
+  margin-bottom: 18px;
+}
+.um-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background: var(--bd-border);
+}
+.um-tabs :deep(.el-tabs__item) {
+  height: 42px;
+  color: var(--bd-muted);
+  font-size: 14px;
+}
+.um-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--bd-primary);
+  font-weight: 600;
+}
+.um-tabs :deep(.el-tabs__active-bar) {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--bd-primary);
+}
+.page-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.page-heading h2 {
+  margin: 0;
+  color: var(--bd-text);
+  font-size: 20px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.page-heading p {
+  margin: 6px 0 0;
+  color: var(--bd-muted);
+  font-size: 13px;
+}
+.page-actions {
+  display: flex;
+  gap: 8px;
 }
 .head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+  gap: 12px;
+  min-height: 58px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--bd-panel);
+  border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius);
 }
+.user-search { width: min(320px, 100%); }
 .tip {
   font-size: 12px;
-  color: #909399;
+  color: var(--bd-muted);
   margin-right: auto;
 }
 .mod-tag {
   margin-right: 4px;
 }
 .muted {
-  color: #c0c4cc;
+  color: var(--bd-muted);
+}
+.user-table {
+  overflow: hidden;
+  border-radius: var(--bd-radius);
+  border: 1px solid var(--bd-border);
+  background: var(--bd-panel);
+}
+.user-table :deep(.el-table__header-wrapper th) {
+  background: var(--bd-table-header);
+  color: var(--bd-muted);
+  font-weight: 500;
+}
+.user-table :deep(.el-table__cell) {
+  height: 50px;
 }
 .um-tabs {
   height: 100%;
@@ -408,5 +502,15 @@ function statusInfo(s: string) {
   font-size: 12px;
   margin-top: 8px;
   line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .user-manage { padding: 14px 12px; }
+  .page-heading { flex-direction: column; }
+  .page-actions { width: 100%; }
+  .page-actions .el-button { flex: 1; }
+  .head { align-items: stretch; flex-direction: column; }
+  .user-search { width: 100%; }
+  .tip { line-height: 1.5; }
 }
 </style>

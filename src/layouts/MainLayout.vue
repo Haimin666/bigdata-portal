@@ -3,15 +3,19 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menus } from '@/config/menu'
 import SideBar from './components/SideBar.vue'
+import AppHeader from './components/AppHeader.vue'
 import TabStage from './components/TabStage.vue'
 import type { PortalTab } from '@/views/subapp/SubappTabs.vue'
+import { useAuthStore } from '@/store/auth'
 
 defineOptions({ name: 'MainLayout' })
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
 const collapsed = ref(false)
+const mobileSidebarOpen = ref(false)
 const fullscreen = ref(false)
 
 // ── 模块 Tab 常驻池(原生视图统一管理)──
@@ -34,7 +38,11 @@ function closeTab(path: string) {
   tabs.value.splice(idx, 1)
   if (path === route.path) {
     const next = tabs.value[idx] ?? tabs.value[idx - 1]
-    router.push(next ? next.path : '/yarn')
+    if (next) router.push(next.path)
+    else {
+      const fallback = menus.find((m) => auth.hasModule(m.name) && (!m.adminOnly || auth.isAdmin))
+      router.push(fallback?.path ?? '/forbidden')
+    }
   }
 }
 
@@ -49,7 +57,16 @@ watch(
 
 function handleSelect(path: string) {
   openTab(path)
+  mobileSidebarOpen.value = false
   router.push(path)
+}
+
+function toggleSidebar() {
+  if (window.innerWidth <= 768) {
+    mobileSidebarOpen.value = !mobileSidebarOpen.value
+    return
+  }
+  collapsed.value = !collapsed.value
 }
 
 function handleTabSwitch(path: string) {
@@ -81,22 +98,6 @@ function onFullscreenChange() {
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
 onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
 
-// ── 顶部状态条时钟(浏览器本地时区)──
-const clockText = ref('')
-let clockTimer: ReturnType<typeof setInterval> | null = null
-function tickClock() {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  clockText.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
-onMounted(() => {
-  tickClock()
-  clockTimer = setInterval(tickClock, 1000)
-})
-onUnmounted(() => {
-  if (clockTimer) clearInterval(clockTimer)
-})
-
 // ── 快捷键切换已打开的 tab(Ctrl/⌘+←/→ 或 Ctrl/⌘+Tab/Shift+Tab)──
 function switchTab(delta: number) {
   if (tabs.value.length < 2) return
@@ -126,14 +127,28 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <div class="portal-root">
-    <!-- 顶部状态条(深空控制台) -->
-    <div class="portal-statusbar">
-      <span class="sb-left"><span class="sb-dot"></span>BIGDATA-PORTAL // CONSOLE ONLINE</span>
-      <span class="sb-right">{{ clockText }}</span>
-    </div>
     <el-container class="portal-layout">
-      <SideBar :collapsed="collapsed" @select="handleSelect" @toggle-collapse="collapsed = !collapsed" />
-      <el-container>
+      <SideBar
+        :collapsed="collapsed"
+        :mobile-open="mobileSidebarOpen"
+        @select="handleSelect"
+        @toggle-collapse="toggleSidebar"
+      />
+      <button
+        v-if="mobileSidebarOpen"
+        class="mobile-sidebar-mask"
+        type="button"
+        aria-label="关闭侧栏"
+        @click="mobileSidebarOpen = false"
+      />
+      <el-container direction="vertical" class="portal-content-shell">
+        <AppHeader
+          :collapsed="collapsed"
+          :fullscreen="fullscreen"
+          @toggle-sidebar="toggleSidebar"
+          @refresh="handleRefresh"
+          @toggle-fullscreen="toggleFullscreen"
+        />
         <el-main class="portal-main">
           <TabStage
             :tabs="tabs"
@@ -155,45 +170,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex-direction: column;
 }
 
-/* 顶部状态条(深空控制台) */
-.portal-statusbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 30px;
-  padding: 0 18px;
-  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: $muted;
-  border-bottom: 1px solid var(--bd-border);
-  background: color-mix(in srgb, $bg 85%, transparent);
-}
-.sb-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sb-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 6px #34d399;
-  animation: sbPulse 1.6s infinite;
-}
-@keyframes sbPulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-.sb-right {
-  color: $muted;
-}
-
 .portal-layout {
   height: 100%;
+  min-height: 0;
 }
 
 .portal-main {
@@ -202,5 +181,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.mobile-sidebar-mask { display: none; }
+
+@media (max-width: 768px) {
+  .mobile-sidebar-mask {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    border: 0;
+    background: rgba(15, 23, 42, 0.35);
+  }
 }
 </style>

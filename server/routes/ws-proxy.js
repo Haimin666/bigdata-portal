@@ -32,21 +32,29 @@ export function setupWsProxies(server, { auth }) {
   jupyterWsProxy.on('error', wsErr)
 
   server.on('upgrade', (req, socket, head) => {
+    let user = null
     if (auth.enabled) {
       const cookies = {}
       for (const part of String(req.headers.cookie || '').split(';')) {
         const i = part.indexOf('=')
         if (i > 0) cookies[part.slice(0, i).trim()] = part.slice(i + 1).trim()
       }
-      const user = auth.currentUser({ cookies })
+      user = auth.currentUser({ cookies })
       if (!user) {
         socket.destroy()
         return
       }
     }
+    const hasModule = (name) => {
+      if (!auth.enabled || user?.role === 'admin') return true
+      const modules = auth.users.modulesOf(user)
+      return !Array.isArray(modules) || modules.length === 0 || modules.includes(name)
+    }
     if (req.url.startsWith('/__/stingray')) {
+      if (!hasModule('stingray')) return socket.destroy()
       wsProxy.ws(req, socket, head)
     } else if (req.url.startsWith('/apps/jupyter')) {
+      if (!hasModule('jupyter')) return socket.destroy()
       jupyterWsProxy.ws(req, socket, head)
     } else {
       socket.destroy() // 未匹配的 upgrade 直接关闭,避免悬挂

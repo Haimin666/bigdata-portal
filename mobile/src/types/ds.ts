@@ -6,6 +6,32 @@ export interface DsProject {
   updateTime?: string
 }
 
+export interface DsProcessDefinition {
+  id: number
+  name: string
+  description?: string
+  releaseState: string
+  scheduleReleaseState?: string
+  createUser?: string
+  modifyUser?: string
+  createTime?: string
+  updateTime?: string
+  processDefinitionJson?: string | { tasks?: Array<{ id?: string; name?: string; type?: string; taskType?: string }> }
+  connects?: string | Array<{ endPointSourceId?: string; endPointTargetId?: string }>
+  _projectName?: string
+}
+
+export interface DsSchedule {
+  id: number
+  processDefinitionId?: number
+  processDefinitionName?: string
+  releaseState: string
+  crontab?: string
+  startTime?: string
+  endTime?: string
+  workerGroup?: string
+}
+
 export interface DsPage<T> {
   totalList: T[]
   total: number
@@ -30,6 +56,7 @@ export interface DsTaskInstance {
   logPath: string
   retryTimes?: number
   maxRetryTimes?: number
+  _projectName?: string
 }
 
 export interface DsProcessInstance {

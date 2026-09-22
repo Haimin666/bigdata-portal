@@ -1,9 +1,15 @@
+import type { Component } from 'vue'
+
+export type ModuleLoader = () => Promise<{ default: Component }>
+
 export interface MenuItem {
   path: string
   title: string
   name: string
   icon: string
   kind: 'native' | 'subapp'
+  component?: ModuleLoader
+  adminOnly?: boolean
   url?: string
   // 多用户体系上线后已移除子应用自动登录字段(原 login?: 'ds' | 'omd' | 'stingray')
   /** 原生 iframe 直连(同源代理或跨源直连) */
@@ -18,37 +24,43 @@ export const menus: MenuItem[] = [
     title: '用户管理',
     name: 'userManage',
     icon: 'User',
-    kind: 'native'
+    kind: 'native',
+    adminOnly: true,
+    component: () => import('@/views/admin/UserManageView.vue')
   },
   {
     path: '/dataleap',
     title: 'DataLeap 实验',
     name: 'dataleap',
-    icon: 'Connection',
-    kind: 'native'
+    icon: 'DataLine',
+    kind: 'native',
+    component: () => import('@/views/dataleap/DataLeapView.vue')
   },
   {
-    path: '/yarn', title: 'YARN 应用', name: 'yarn', icon: 'Monitor', kind: 'native' },
+    path: '/yarn', title: 'YARN 应用', name: 'yarn', icon: 'Monitor', kind: 'native', component: () => import('@/views/yarn/YarnView.vue') },
   {
     path: '/ds-task',
     title: '任务监控',
     name: 'dsTask',
     icon: 'Timer',
-    kind: 'native'
+    kind: 'native',
+    component: () => import('@/views/ds/DsTaskMonitor.vue')
   },
   {
     path: '/hdfs',
     title: 'HDFS',
     name: 'hdfs',
     icon: 'Folder',
-    kind: 'native'
+    kind: 'native',
+    component: () => import('@/views/hdfs/HdfsView.vue')
   },
   {
     path: '/db-query',
     title: '数据库查询',
     name: 'dbQuery',
     icon: 'Coin',
-    kind: 'native'
+    kind: 'native',
+    component: () => import('@/views/db/QueryView.vue')
   },
   {
     path: '/query',
@@ -121,13 +133,15 @@ export const menus: MenuItem[] = [
     title: '开发助手',
     name: 'devAssistant',
     icon: 'Robot',
-    kind: 'native'
+    kind: 'native',
+    component: () => import('@/views/assistant/DevAssistantView.vue')
   },
   {
     path: '/sync',
     title: '数据同步',
     name: 'sync',
     icon: 'Refresh',
-    kind: 'native'
+    kind: 'native',
+    component: () => import('@/views/sync/SyncCodeView.vue')
   }
 ]

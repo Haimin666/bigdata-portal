@@ -98,6 +98,7 @@ export function ruleForUser(perms, username, roles) {
  * 否则 null = 不限制)。用于 /api/db/acl 过滤数据源下拉。旧 v1 数据经 loadPerms 迁移后同样生效。
  */
 export function allowedDbsFor(perms, username, roles) {
+  if (perms.broken) return []
   const rule = ruleForUser(perms, username, roles)
   if (!rule) return perms.defaultDeny ? [] : null
   const dbs = new Set()
@@ -105,7 +106,7 @@ export function allowedDbsFor(perms, username, roles) {
     if (er && typeof er.db === 'string' && er.db) dbs.add(er.db)
   }
   if (rule.engineRules && rule.engineRules.some((er) => er && er.db === '*')) return ['*']
-  return dbs.size ? [...dbs] : null
+  return dbs.size ? [...dbs] : []
 }
 
 function deny(msg) {
@@ -148,7 +149,7 @@ export function checkDbAccess(req, dbName, opts = {}) {
   if (!matched) deny(`数据库 '${dbName}' 未授权给用户 '${username}'`)
   if (write && matched.write !== true) deny(`数据库 '${dbName}' 未授予写权限`)
   if (!write && matched.read !== true) deny(`数据库 '${dbName}' 未授予读权限`)
-  if (Array.isArray(tables) && tables.length && Array.isArray(matched.tables) && matched.tables.length) {
+  if (Array.isArray(tables) && tables.length && Array.isArray(matched.tables)) {
     const allowed = new Set(matched.tables.map((t) => String(t)))
     const denied = tables.filter((t) => !allowed.has(String(t)))
     if (denied.length) deny(`表未授权: ${denied.join(', ')}`)

@@ -8,7 +8,7 @@ YARN 应用列表/概览/队列、应用详情、以及 Flink/Spark 自建 UI �
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/yarn/YarnView.vue` | 入口:工具栏(RM 切换/筛选/刷新)、表格↔卡片切换 |
+| 视图 | `src/views/yarn/YarnView.vue` | 入口:分组工具栏(RM/筛选/搜索 + 显示/刷新偏好)、表格↔卡片切换 |
 | 视图 | `src/views/yarn/AppsTable.vue` / `AppsCardView.vue` | 列表/卡片;展开行按钮:追踪UI / 资源管理器 / 终止应用 |
 | 视图 | `src/views/yarn/YarnOverview.vue` | 总资源概览卡(CPU/内存/进度条)+ 队列资源 |
 | 视图 | `UrlFrameDialog`(通用) | **资源管理器 iframe 弹窗**:打开 RM 原生 `/cluster/app/{appId}`(经 `/yarniframe` 同构代理,子页面/静态资源可跟随) |
@@ -29,7 +29,8 @@ YarnView → store.fetchApps(GET /api/yarn/apps, 带 X-Resource-Manager)
 ## 4. 核心机制
 
 - **iframe 同构代理**:`/yarniframe/*` → RM 原样转发,页面内绝对根路径链接重写为 `/yarniframe/xxx`,子页面与静态资源可跟随;资源管理器/追踪UI 共用 `UrlFrameDialog`
-- **状态色**:运行中蓝 `#3b82f6`、成功绿、失败红(StatusBadge 通用)
+- **状态色**:运行中使用 Vben 品牌蓝 `#006be6`、成功绿、失败红(StatusBadge 通用)
+- **视觉层级**:工具栏分成筛选行与视图/刷新偏好行;集群总览为四张独立轻量指标卡;应用表格使用弱化的横向行分隔而非密集竖向网格线。≤760px 时筛选控件两列折行，RM 与搜索跨满行，偏好操作可横向滚动。
 - **应用 ID 点击复制**:表格/卡片共用 `AppInfoLine`,ID 列悬停下划线 + `copy` 光标,点击复制到剪贴板(带成功提示)。复制走 src/utils/clipboard.ts 的 copyText(优先 navigator.clipboard,非安全上下文 HTTP 下自动降级 execCommand)
 - **展开行状态跨刷新保持**(2026-08):轮询/刷新整体替换行对象,el-table 按对象身份记忆的展开态会全部塌缩;`AppsTable` 改为按 `appId` 记录展开集合(`expandedIds`),数据更新后 `nextTick` 对仍在本页的行强制恢复展开(与队列树 expandedQueues 同思路)
 - 终止应用是真实操作,前端有确认;开发验证用假 appId

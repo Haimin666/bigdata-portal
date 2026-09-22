@@ -26,7 +26,7 @@ const DEFAULT_ROLES = {
   admin: { title: '管理员', modules: null },
   dev: {
     title: '开发',
-    modules: ['yarn', 'dsTask', 'hdfs', 'dbQuery', 'stingray', 'ds', 'streamx', 'jupyter', 'omd']
+    modules: ['yarn', 'dsTask', 'hdfs', 'dbQuery', 'stingray', 'ds', 'streamx', 'jupyter', 'omd', 'sync', 'devAssistant']
   },
   viewer: { title: '只读', modules: ['yarn', 'hdfs'] }
 }

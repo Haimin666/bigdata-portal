@@ -10,8 +10,8 @@
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/subapp/SubAppView.vue` / `src/layouts/components/SubappTabs.vue` | iframe 池(v-show 保状态,关闭才销毁) |
-| 配置 | `src/config/menu.ts` | `kind: 'subapp'` 菜单项(url/iframe 配置)驱动路由与 iframe |
+| 视图 | `src/views/subapp/SubAppView.vue` / `src/layouts/components/SubappTabs.vue` | iframe 池(v-show 保状态,关闭才销毁);Tab 外观按门户统一壳层主题 |
+| 配置 | `src/config/menu.ts` | 统一模块注册表;`kind: 'subapp'` 项的 url/iframe 配置同时驱动菜单、路由与 iframe |
 | 网关 | `server/routes/subapps-proxy.js` 各子应用代理:DS Web、Jupyter、DolphinScheduler、Stingray、`/dolphinscheduler`(纯代理,无登录注入);`server/routes/ws-proxy.js` WebSocket 代理 |
 
 ## 3. 子应用代理清单
@@ -26,7 +26,8 @@
 
 ## 4. 核心机制
 
-- **iframe 池**:`SubAppView` 常驻 iframe,tab 切换仅显隐,子应用滚动/登录态/未保存内容保留
+- **iframe 池**:`SubAppView` 常驻 iframe,tab 切换仅显隐,子应用滚动/登录态/未保存内容保留;原生视图由 `active` 属性控制后台轮询。`MainLayout` 使用垂直内容容器，避免顶栏与 iframe 横向挤压。
+- **统一模块权限**:菜单/路由由前端用户权限过滤；`/apps/*`、`/dolphinscheduler`、`/api/mail/*` 等代理由网关按同一 `modules` 白名单再次校验，禁止直接 URL 绕过。
 - **HTML 重写**:子应用页面内绝对路径资源(`/xxx`)重写为门户代理前缀;cookie `Domain/Path` 重写,保证 iframe 内会话生效
 - **base_url 关键点**(Jupyter):express 挂载会剥前缀,必须 `pathRewrite` 加回,否则 Jupyter 收到 `/lab` 返回 404(历史踩坑)
 - 登录页有"进入系统"引导;新窗口直开内网地址的场景(日志/资源管理器)不在本模块

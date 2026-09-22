@@ -14,7 +14,7 @@
     <div class="dp__keys">
       <span class="dk"><i class="dk__i" style="background:#10b981"></i>成功</span>
       <span class="dk"><i class="dk__i" style="background:#ef4444"></i>失败</span>
-      <span class="dk"><i class="dk__i" style="background:#3b82f6"></i>运行中</span>
+      <span class="dk"><i class="dk__i" style="background:#006be6"></i>运行中</span>
       <span class="dk"><i class="dk__i" style="background:#7c3aed"></i>当前工作流</span>
       <span class="dk"><i class="dk__i" style="background:#64748b"></i>未执行</span>
     </div>
@@ -149,7 +149,7 @@ const FAILURE_STATES = ['FAILURE', 'KILL', 'STOP']
 const isRunning = (s: string | null) => !!s && RUNNING_STATES.includes(s)
 const isFailure = (s: string | null) => !!s && FAILURE_STATES.includes(s)
 const stColor = (s: string | null) =>
-  s === 'SUCCESS' ? '#10b981' : isFailure(s) ? '#ef4444' : isRunning(s) ? '#3b82f6' : '#64748b'
+  s === 'SUCCESS' ? '#10b981' : isFailure(s) ? '#ef4444' : isRunning(s) ? '#006be6' : '#64748b'
 const stMark = (s: string | null) =>
   s === 'SUCCESS' ? '成功' : isFailure(s) ? '失败' : isRunning(s) ? '运行中' : '未执行'
 const formatDur = (sec?: number | null) => {
@@ -176,6 +176,8 @@ interface DagNode {
 function toDagData() {
   const nodes = new Map<string, DagNode>()
   const edges = new Set<string>() // `${from}|${to}`
+  const upstreamIds = new Set<string>()
+  const downstreamIds = new Set<string>()
   nodeRefMap.clear()
 
   const addNode = (
@@ -197,7 +199,8 @@ function toDagData() {
       nodes.set(key, existing)
     }
     if (isCurrent) existing.isCurrent = true
-    if (isUpstream) existing.isUpstream = true
+    if (isUpstream) upstreamIds.add(key)
+    else if (!isCurrent) downstreamIds.add(key)
   }
   const setState = (n: { processId: number; instance?: DepNode['instance'] }) => {
     const cur = nodes.get(String(n.processId))
@@ -237,6 +240,12 @@ function toDagData() {
   }
   walkU(t.upstream, t.processId)
   walkD(t.downstream, t.processId)
+
+  // 同一 processId 可能同时出现在上下游路径。它既是可执行的下游节点，
+  // 又是展示用的上游节点时，不能被永久标成 isUpstream，否则会失去重跑入口。
+  for (const node of nodes.values()) {
+    node.isUpstream = upstreamIds.has(node.id) && !downstreamIds.has(node.id) && !node.isCurrent
+  }
 
   return {
     nodes: [...nodes.values()],

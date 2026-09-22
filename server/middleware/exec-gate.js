@@ -10,9 +10,13 @@ const EXEC_GATES = [
   { re: /^\/api\/db\/jobs/, module: 'dbQuery', onlyWrite: true }, // MySQL/Oracle 异步任务提交/取消(GET 状态查询放行)
   { re: /^\/api\/db\/(schema|explain)(\/|$)/, module: 'dbQuery' }, // 元数据补全/执行计划(只读,仍需模块与角色门禁)
   { re: /^\/api\/scripts\/(new|rename|delete|move|save)/, module: 'dbQuery' }, // 脚本文件写(前缀匹配,容忍尾斜杠)
-  { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)$/, module: 'dsTask' }, // 采集/重跑
-  { re: /^\/dolphinscheduler\/projects\/[^/]+\/executors\/execute$/, module: 'dsTask' }, // 海豚实例暂停/停止/重跑/恢复
-  { re: /^\/api\/assistant\/projects/, module: 'assistant', onlyWrite: true }, // 项目/文件/目录/上传/会话绑定(POST/PUT/PATCH/DELETE;GET 只读放行)
+  { re: /^\/api\/ds-deps\/(refresh|rerun-instances|rerun-cascade|rerun-from-node)\/?$/, module: 'dsTask' }, // 采集/重跑
+  { re: /^\/dolphinscheduler\/projects\/[^/]+\/executors\/execute\/?$/, module: 'dsTask' }, // 海豚实例暂停/停止/重跑/恢复
+  { re: /^\/dolphinscheduler\/projects\/[^/]+\/executors\/start-process-instance\/?$/, module: 'dsTask' }, // 海豚手动启动工作流
+  { re: /^\/dolphinscheduler\/projects\/[^/]+\/process\/release\/?$/, module: 'dsTask' }, // 海豚工作流上下线
+  { re: /^\/dolphinscheduler\/projects\/[^/]+\/schedule\/(online|offline)\/?$/, module: 'dsTask' }, // 海豚定时上下线
+  { re: /^\/api\/dataleap(?:\/|$)/, module: 'dataleap', onlyWrite: true }, // 编排保存/执行/发布
+  { re: /^\/api\/assistant\/projects/, module: 'devAssistant', onlyWrite: true }, // 项目/文件/目录/上传/会话绑定(POST/PUT/PATCH/DELETE;GET 只读放行)
   { re: /^\/hadoopapi\//, module: 'yarn', onlyWrite: true } // RM 管理 REST(非 GET)
 ]
 

@@ -1027,7 +1027,7 @@ onUnmounted(() => {
   justify-content: center;
   font-weight: 700;
   font-size: 12px;
-  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
+  background: var(--bd-primary);
   color: #fff;
   font-family: var(--bd-font);
 }
@@ -1171,7 +1171,7 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 22px;
   font-weight: 700;
-  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
+  background: var(--bd-primary);
   color: #fff;
   font-family: var(--bd-font);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--bd-primary) 35%, transparent);
@@ -1454,14 +1454,14 @@ onUnmounted(() => {
   border: 1px solid var(--bd-border);
   border-radius: 8px;
   overflow: hidden;
-  background: #0d1420;
+  background: var(--bd-log-bg);
 }
 .da-md :deep(.md-codeblock__head) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px;
-  background: color-mix(in srgb, #0d1420 90%, var(--bd-primary) 8%);
+  background: color-mix(in srgb, var(--bd-log-bg) 90%, var(--bd-primary) 8%);
   border-bottom: 1px solid var(--bd-border);
   font-size: 11px;
   color: var(--bd-muted);
@@ -1548,7 +1548,7 @@ onUnmounted(() => {
   margin: 0 auto;
   background: var(--bd-panel);
   border: 1px solid var(--bd-border);
-  border-radius: 14px;
+  border-radius: var(--bd-radius);
   padding: 8px 8px 8px 14px;
   box-shadow: 0 4px 16px color-mix(in srgb, var(--bd-border) 40%, transparent);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
@@ -1813,7 +1813,7 @@ onUnmounted(() => {
   gap: 6px;
   padding: 0 10px;
   border: 1px solid var(--bd-border);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--bd-panel);
   color: var(--bd-text);
   font-size: 12px;
@@ -2003,5 +2003,16 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (max-width: 760px) {
+  .da-sidebar { width: 200px; }
+  .da-chat { padding-inline: 12px; }
+  .da-composer-wrap { padding-inline: 10px; }
+  .da-files-bar { align-items: flex-start; flex-direction: column; }
+  .da-files-actions { width: 100%; flex-wrap: wrap; }
+  .da-files-actions .el-button { flex: 1; }
+  .da-welcome__ex { margin-top: 14px; }
+  .da-ex { max-width: 100%; }
 }
 </style>

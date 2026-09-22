@@ -925,7 +925,7 @@ onUnmounted(() => {
     margin-right: 3px;
     border-radius: 3px;
     color: var(--el-color-primary);
-    background: var(--el-color-primary-light-9, rgba(64, 158, 255, 0.12));
+    background: var(--el-color-primary-light-9, rgba(0, 107, 230, 0.12));
   }
 
   .hist-ops {

@@ -32,7 +32,8 @@ docs/
     ├── ds-task.md       # 任务监控(海豚实例/依赖/级联重跑/追踪)
     ├── hdfs.md          # HDFS 磁盘监控
     ├── admin-auth.md    # 认证/用户管理/主题设置
-    └── subapps.md       # 子应用 iframe(DS/StreamX/Jupyter/OMD/Stingray)
+    ├── subapps.md       # 子应用 iframe(DS/StreamX/Jupyter/OMD/Stingray)
+    └── sync.md          # 数据同步代码生成
 ```
 
 ## 4. 子代理开发操作模板

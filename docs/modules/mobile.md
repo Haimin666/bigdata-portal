@@ -7,7 +7,7 @@
 首期聚焦两个高频场景：
 
 - YARN：总览、应用筛选、详情与终止操作。
-- 离线开发：任务实例查看及暂停/停止/重跑；完整 DolphinScheduler 页面通过全屏 WebView 入口访问。
+- 离线开发：项目、工作流、工作流详情、近两天工作流/任务实例的移动只读浏览，以及工作流发布/启动、定时上下线、实例停止/重跑和任务日志；完整 DolphinScheduler 页面仍可通过全屏 WebView 入口访问。
 
 ## 2. 技术与目录
 
@@ -36,7 +36,7 @@ mobile/
 - 本地开发：Vite 将 `/api`、`/hadoopapi`、`/apps`、`/dolphinscheduler` 等路径代理到现有网关，沿用 `portal_session` Cookie。
 - Android 生产地址固定为 `https://bigdata-portal.corp.shiqiao.com/mobile/`。用户先连接企业 VPN/零信任，Android 容器再加载该同源 HTTPS 页面；`/api`、`/hadoopapi`、`/dolphinscheduler` 与移动页面共享门户域和 `portal_session` Cookie。VPN 未连接时直接显示网络不可达，不回退公网地址，也不关闭 TLS 校验。
 - 首期沿用现有 Cookie 会话，不新增或复制子系统账号。后续若引入移动 Token，网关必须将 Cookie/Bearer 统一归一为同一个调用用户与模块权限上下文。
-- DolphinScheduler 完整页面仍由用户使用自己的子系统账号登录；门户不保存或注入用户密码。
+- DolphinScheduler API 读取允许具有 `dsTask` 或 `ds` 任一模块权限的已登录用户访问；完整页面入口仍归 `ds` 模块。门户不保存或注入用户密码。
 
 ## 4. 页面与操作边界
 
@@ -44,17 +44,19 @@ mobile/
 |---|---|
 | 首页 | YARN 与当日任务摘要、失败/运行状态、快捷入口 |
 | YARN | RM 选择、状态筛选、搜索、刷新、应用详情、终止应用 |
-| 离线开发 | 当日实例筛选、任务节点日志分页查看/刷新/复制、暂停、停止、重跑、打开完整 DolphinScheduler |
+| 离线开发 | 项目列表；项目下工作流列表与详情；近两天工作流实例、任务实例；工作流上线/下线和手动启动；定时列表及上下线；实例停止/重跑；任务日志分页查看/刷新/复制；打开完整 DolphinScheduler |
 | 我的 | 当前用户、角色、授权模块、门户连接信息、退出登录 |
 
-危险操作（终止 YARN 应用、暂停/停止/重跑实例）必须满足：
+危险操作（终止 YARN 应用、工作流/定时上下线、启动工作流、停止/重跑实例）必须满足：
 
 1. 按现有模块权限和角色由网关再次校验，不能只依赖前端隐藏按钮。
 2. 操作前展示目标名称和不可逆影响，并要求用户显式确认。
 3. 提交期间按钮防重复点击；成功后刷新目标列表。
 4. 开发和自动化验证只能使用假 ID，不得触发真实集群操作。
 
-DolphinScheduler 实例操作虽然沿用 `/dolphinscheduler/.../executors/execute`，但必须由网关执行门禁补充拦截：viewer 禁止操作，dev/admin 还需 `dsTask` 模块权限。移动端不得绕过该门禁直连 DolphinScheduler。
+DolphinScheduler 写操作沿用 `/dolphinscheduler/...` 代理，但网关执行门禁必须覆盖 `process/release`、`executors/start-process-instance`、`schedule/online|offline` 和 `executors/execute`：viewer 禁止操作，dev/admin 还需 `dsTask` 模块权限。移动端不得绕过该门禁直连 DolphinScheduler。所有写操作均使用二次确认并在请求期间禁用重复提交。
+
+离线开发默认查询当前时间向前两天的闭区间。项目和工作流列表允许搜索；工作流详情展示发布状态、负责人、更新时间、DAG 节点摘要和定时列表。移动端不提供工作流/节点编辑、删除或新建定时，复杂配置继续进入完整 DolphinScheduler。
 
 ## 5. 完整离线开发
 

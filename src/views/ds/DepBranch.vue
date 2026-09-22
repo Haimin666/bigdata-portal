@@ -230,7 +230,7 @@ function crontabText(n: DepNode): string {
   &.current {
     border-color: $primary;
     border-width: 2px;
-    box-shadow: 0 2px 10px rgba(0, 229, 255, 0.18);
+    box-shadow: 0 2px 10px rgba(0, 107, 230, 0.18);
     cursor: default;
     background: color-mix(in srgb, $primary 5%, transparent);
   }

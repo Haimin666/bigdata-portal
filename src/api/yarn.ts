@@ -1,13 +1,12 @@
 import type { AppFilters, ClusterMetrics, QueueNode, YarnApp } from '@/types/yarn'
+import { requestJson } from './request'
 
 async function request<T>(path: string, rm: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
     'X-Resource-Manager': rm
   }
-  const res = await fetch(path, { ...init, headers })
-  if (!res.ok) throw new Error(`Request failed: ${res.status} ${res.statusText}`)
-  return res.json() as Promise<T>
+  return requestJson<T>(path, { ...init, headers })
 }
 
 export function filtersToParams(filters: AppFilters): Record<string, string> {
@@ -22,8 +21,7 @@ export function filtersToParams(filters: AppFilters): Record<string, string> {
 /** 从网关 /api/config 拉取可用 ResourceManager 列表(替代原硬编码) */
 export async function fetchResourceManagers(): Promise<string[]> {
   try {
-    const res = await fetch('/api/config')
-    const data = (await res.json()) as { resourceManagers?: string[] }
+    const data = await requestJson<{ resourceManagers?: string[] }>('/api/config')
     return data?.resourceManagers ?? []
   } catch {
     return []

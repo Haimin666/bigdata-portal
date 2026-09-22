@@ -12,7 +12,7 @@
 | ~~写解锁 `X-Spark-Token`~~ | 已移除 | 写权限密码验证移除,由库权限矩阵 + 数据源 readOnly 管控 |
 | **db-permissions 矩阵（本模块）** | **用户/角色→库级** | **按调用者区分可访问库，网关层校验** |
 
-设计原则：**权限继续收口在网关**，db-proxy 保持无用户概念的机器代理（`main.py` L78 注释约定）；矩阵只控制「能访问哪些库」，readOnly 覆盖不做（数据源级 readOnly 已覆盖）。
+设计原则：**权限继续收口在网关**，db-proxy 保持无用户概念的机器代理（`main.py` L78 注释约定）；矩阵只控制「能访问哪些库」，readOnly 覆盖不做（数据源级 readOnly 已覆盖）。表规则中 `tables: null` 表示全部表，`tables: []` 表示不允许任何表。
 
 ## 存储
 
@@ -42,6 +42,7 @@
 | `POST /api/db/jobs`（提交） | body | 路由内显式调用（GET 状态查询放行） |
 | `POST /api/db/explain` | body | 路由内显式调用 |
 | `GET /api/db/tables`、`/fields`、`/ddl`、`/schema` | query | `app.use('/api/db', ...)` 前置中间件（仅处理 GET+query.db，其余 next） |
+| `GET /api/db/search/tables` | query.keyword | 返回结果按当前用户允许的数据库过滤 |
 
 spark/flink 引擎查询不在本矩阵范围（引擎侧库概念不同）。
 

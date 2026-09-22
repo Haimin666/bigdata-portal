@@ -3,8 +3,10 @@ import type {
   DsExecuteType,
   DsPage,
   DsProcessInstance,
+  DsProcessDefinition,
   DsProcessQuery,
   DsProject,
+  DsSchedule,
   DsTaskInstance,
   DsTaskQuery
 } from '../types/ds'
@@ -30,9 +32,74 @@ export async function listProjects(): Promise<DsProject[]> {
   return projects
 }
 
+export async function listWorkflows(projectName: string): Promise<DsProcessDefinition[]> {
+  const workflows: DsProcessDefinition[] = []
+  const pageSize = 100
+  for (let pageNo = 1; pageNo <= 20; pageNo += 1) {
+    const page = await requestJson<DsPage<DsProcessDefinition>>(
+      `/dolphinscheduler/projects/${encodeURIComponent(projectName)}/process/list-paging?pageNo=${pageNo}&pageSize=${pageSize}&searchVal=`
+    )
+    workflows.push(...page.totalList)
+    if (!page.totalList.length || workflows.length >= page.total) break
+  }
+  return workflows
+}
+
+export function getWorkflowDetail(projectName: string, processId: number): Promise<DsProcessDefinition> {
+  return requestJson(
+    `/dolphinscheduler/projects/${encodeURIComponent(projectName)}/process/select-by-id?processId=${processId}`
+  )
+}
+
+export function listSchedules(projectName: string, processDefinitionId: number): Promise<DsPage<DsSchedule>> {
+  const params = new URLSearchParams({ processDefinitionId: String(processDefinitionId), pageNo: '1', pageSize: '100', searchVal: '' })
+  return requestJson(`/dolphinscheduler/projects/${encodeURIComponent(projectName)}/schedule/list-paging?${params}`)
+}
+
+function postForm<T>(path: string, values: Record<string, string | number>): Promise<T> {
+  return requestJson(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(Object.entries(values).map(([key, value]) => [key, String(value)]))
+  })
+}
+
+export function releaseWorkflow(projectName: string, processId: number, online: boolean): Promise<unknown> {
+  return postForm(`/dolphinscheduler/projects/${encodeURIComponent(projectName)}/process/release`, {
+    processId,
+    releaseState: online ? 1 : 0
+  })
+}
+
+export function startWorkflow(projectName: string, processId: number): Promise<unknown> {
+  return postForm(`/dolphinscheduler/projects/${encodeURIComponent(projectName)}/executors/start-process-instance`, {
+    processDefinitionId: processId,
+    scheduleTime: '',
+    failureStrategy: 'CONTINUE',
+    warningType: 'NONE',
+    warningGroupId: 0,
+    execType: '',
+    startNodeList: '',
+    taskDependType: 'TASK_POST',
+    runMode: 'RUN_MODE_SERIAL',
+    processInstancePriority: 'MEDIUM',
+    receivers: '',
+    receiversCc: '',
+    workerGroup: 'default'
+  })
+}
+
+export function setScheduleState(projectName: string, scheduleId: number, online: boolean): Promise<unknown> {
+  const action = online ? 'online' : 'offline'
+  return postForm(`/dolphinscheduler/projects/${encodeURIComponent(projectName)}/schedule/${action}`, { id: scheduleId })
+}
+
 export function listTaskInstances(projectName: string, query: DsTaskQuery): Promise<DsPage<DsTaskInstance>> {
   const params = instanceParams(query)
-  if (query.taskName) params.set('taskName', query.taskName)
+  if (query.taskName) {
+    params.set('taskName', query.taskName)
+    params.set('searchVal', query.taskName)
+  }
   return requestJson(`/dolphinscheduler/projects/${encodeURIComponent(projectName)}/task-instance/list-paging?${params}`)
 }
 

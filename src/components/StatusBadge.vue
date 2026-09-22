@@ -7,7 +7,7 @@ const props = withDefaults(
   defineProps<{
     label: string
     type?: 'success' | 'failure' | 'running' | 'paused' | 'stopped' | 'neutral'
-    /** 自定义主色(hex,如 '#3b82f6'):优先级高于 type,深浅主题自动派生柔和底 */
+    /** 自定义主色(hex,如 '#006be6'):优先级高于 type,深浅主题自动派生柔和底 */
     color?: string
   }>(),
   { type: 'neutral' }

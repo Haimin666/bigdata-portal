@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
+import { getDbAcl, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
@@ -14,6 +14,8 @@ import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
 import FlinkPreJobDialog from './FlinkPreJobDialog.vue'
 
 defineOptions({ name: 'DbQueryView' })
+
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
@@ -671,6 +673,7 @@ async function pollSparkLogs() {
 
 function startSparkLogPolling() {
   stopSparkLogPolling()
+  if (!props.active) return
   activePane.value = 0 // 查询时固定切到第一个 tab(日志)
   void pollSparkLogs()
   sparkLogTimer = window.setInterval(() => void pollSparkLogs(), 3000)
@@ -682,6 +685,17 @@ function stopSparkLogPolling() {
     sparkLogTimer = null
   }
 }
+
+watch(
+  () => props.active,
+  (active) => {
+    if (active) {
+      if (loading.value && !sparkLogTimer) startSparkLogPolling()
+    } else {
+      stopSparkLogPolling()
+    }
+  }
+)
 
 /** 清空并建立新基线:offset 跳到已知文件末尾,新查询只展示新增日志。
  *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志(含旧查询的 [stage] 行)。 */
@@ -1469,7 +1483,8 @@ onMounted(async () => {
     themeMode.value = getTheme() === 'dark' ? 'dark' : 'light'
   }
   try {
-    datasources.value = await listDataSources()
+    const acl = await getDbAcl()
+    datasources.value = acl.datasources || []
     if (datasources.value.length) {
       const first = datasources.value.find(
         (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'sparksql'
@@ -1477,7 +1492,11 @@ onMounted(async () => {
       engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
-      ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
+      ElMessage.warning(
+        acl.allowedDbs?.length
+          ? `当前账号无可视数据源(网关权限过滤: ${acl.allowedDbs.join(', ')})`
+          : '当前账号暂无可用数据库源(请联系管理员配置网关数据权限)'
+      )
     }
   } catch (e) {
     ElMessage.error(`加载数据源失败:${e instanceof Error ? e.message : e}`)
@@ -1763,7 +1782,7 @@ async function onSparkExecutorsChange(val: number) {
 
 <style scoped lang="scss">
 .db-query {
-  padding: 16px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1784,7 +1803,7 @@ async function onSparkExecutorsChange(val: number) {
   width: 240px;
   flex-shrink: 0;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: var(--bd-radius);
   overflow: hidden;
 }
 
@@ -1824,8 +1843,8 @@ async function onSparkExecutorsChange(val: number) {
   gap: 2px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 2px 4px;
+  border-radius: var(--bd-radius);
+  padding: 4px 6px;
   flex-shrink: 0;
   overflow-x: auto;
 }
@@ -1834,7 +1853,8 @@ async function onSparkExecutorsChange(val: number) {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 10px;
+  min-height: 30px;
+  padding: 4px 10px;
   font-size: 12px;
   color: $muted;
   border-radius: 4px;
@@ -1891,11 +1911,13 @@ async function onSparkExecutorsChange(val: number) {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 4px 6px;
+  border-radius: var(--bd-radius);
+  padding: 6px 8px;
+  min-height: 46px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
   flex-shrink: 0;
 
   /* 按钮瘦身 */
@@ -2175,7 +2197,7 @@ async function onSparkExecutorsChange(val: number) {
 
       &.running {
         color: $primary;
-        background: rgba(64, 158, 255, 0.12);
+        background: rgba(0, 107, 230, 0.12);
       }
 
       &.succeeded {
@@ -2257,5 +2279,23 @@ async function onSparkExecutorsChange(val: number) {
   color: var(--el-text-color-regular);
   background: var(--el-fill-color-light);
   border-radius: 4px;
+}
+
+@media (max-width: 900px) {
+  .db-query { padding: 8px; }
+  .toolbar { flex-wrap: wrap; }
+  .toolbar-spacer { display: none; }
+  .db-select { flex: 1; min-width: 160px; }
+}
+
+@media (max-width: 640px) {
+  .db-main { flex-direction: column; }
+  .db-side { width: 100% !important; height: 180px; }
+  .db-resizer { display: none; }
+  .engine-select,
+  .executor-select { width: 120px; }
+  .db-select { width: 100%; min-width: 0; }
+  .statusbar { gap: 8px; padding: 0 8px; }
+  .statusbar .sb-hints { display: none; }
 }
 </style>

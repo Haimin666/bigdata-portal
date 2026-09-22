@@ -126,6 +126,7 @@ export function setupFlink(app) {
     // 写凭证由网关自动携带(db-proxy 侧校验共享密钥,防直连绕过)
     app.post('/api/flink/prejob/jobs', async (req, res) => {
       try {
+        checkFlinkAccess(req)
         const data = await prejobSubmit({
           name: String(req.body?.name || ''),
           sql: String(req.body?.sql || ''),
@@ -133,6 +134,9 @@ export function setupFlink(app) {
         })
         res.json({ code: 0, data })
       } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
         console.error('[flink/prejob/submit]', e instanceof Error ? e.message : e)
         res.status(502).json({ code: 502, msg: 'flink PreJob 提交失败,请查看服务端日志' })
       }

@@ -11,7 +11,7 @@ import path from 'node:path'
 import cookieParser from 'cookie-parser'
 import config from './config.js'
 import { setupAuth } from './auth.js'
-import { createAuthGate } from './middleware/auth-gate.js'
+import { createAuthGate, createModuleGate } from './middleware/auth-gate.js'
 import { createExecGate } from './middleware/exec-gate.js'
 import { jsonNotFound, errorHandler } from './middleware/error-handler.js'
 import { setupAssistant } from './routes/assistant.js'
@@ -60,7 +60,8 @@ const auth = setupAuth(app, config)
 
 // 登录门禁(PROTECTED_PREFIXES)与执行门禁(EXEC_GATES)顺次挂载;
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
-app.use(createAuthGate(auth))
+app.use(createAuthGate(auth, { syncApiToken: config.syncApiToken }))
+app.use(createModuleGate(auth))
 app.use(createExecGate(auth))
 
 // ── 各业务路由模块(注册顺序与拆分前的单文件完全一致)────────────

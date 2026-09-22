@@ -12,6 +12,8 @@ import type { AppFilters } from '@/types/yarn'
 
 defineOptions({ name: 'YarnView' })
 
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
+
 const store = useYarnStore()
 const route = useRoute()
 const router = useRouter()
@@ -106,7 +108,7 @@ watch(
       clearInterval(timer)
       timer = undefined
     }
-    if (auto)
+    if (auto && props.active)
       timer = window.setInterval(() => {
         store.loadMetrics()
         store.loadQueues()
@@ -118,6 +120,16 @@ watch(
 onUnmounted(() => {
   if (timer) clearInterval(timer)
 })
+
+watch(
+  () => props.active,
+  (active) => {
+    if (!active) return
+    store.loadMetrics()
+    store.loadQueues()
+    store.loadApps()
+  }
+)
 
 // 错误提示
 watch(
@@ -186,92 +198,99 @@ function onRowsChange(s: number) {
 <template>
   <div class="yarn-view">
     <div class="toolbar">
-      <el-select v-model="store.rm" class="toolbar-item rm-select" placeholder="ResourceManager" filterable>
-        <el-option v-for="r in rms" :key="r" :label="r" :value="r" />
-      </el-select>
+      <div class="filter-row">
+        <el-select v-model="store.rm" class="rm-select" placeholder="ResourceManager" filterable>
+          <el-option v-for="r in rms" :key="r" :label="r" :value="r" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.states"
-        class="toolbar-item"
-        multiple
-        collapse-tags
-        placeholder="按状态筛选"
-      >
-        <el-option v-for="s in AVAILABLE_STATES" :key="s" :label="s" :value="s" />
-      </el-select>
+        <el-select
+          v-model="store.filters.states"
+          multiple
+          collapse-tags
+          placeholder="按状态筛选"
+        >
+          <el-option v-for="s in AVAILABLE_STATES" :key="s" :label="s" :value="s" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.user"
-        class="toolbar-item"
-        filterable
-        clearable
-        placeholder="按用户筛选"
-      >
-        <el-option v-for="u in availableUsers" :key="u" :label="u" :value="u" />
-      </el-select>
+        <el-select
+          v-model="store.filters.user"
+          filterable
+          clearable
+          placeholder="按用户筛选"
+        >
+          <el-option v-for="u in availableUsers" :key="u" :label="u" :value="u" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.queue"
-        class="toolbar-item"
-        filterable
-        clearable
-        placeholder="按队列筛选"
-      >
-        <el-option v-for="q in queues" :key="q" :label="q" :value="q" />
-      </el-select>
+        <el-select
+          v-model="store.filters.queue"
+          filterable
+          clearable
+          placeholder="按队列筛选"
+        >
+          <el-option v-for="q in queues" :key="q" :label="q" :value="q" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.appTypes"
-        class="toolbar-item"
-        multiple
-        collapse-tags
-        filterable
-        placeholder="按类型筛选"
-      >
-        <el-option v-for="t in availableAppTypes" :key="t" :label="t" :value="t" />
-      </el-select>
+        <el-select
+          v-model="store.filters.appTypes"
+          multiple
+          collapse-tags
+          filterable
+          placeholder="按类型筛选"
+        >
+          <el-option v-for="t in availableAppTypes" :key="t" :label="t" :value="t" />
+        </el-select>
 
-      <el-input
-        v-model="store.searchByAppName"
-        class="toolbar-item search-input"
-        placeholder="按应用名/ID 搜索"
-        clearable
-      />
+        <el-input
+          v-model="store.searchByAppName"
+          class="search-input"
+          placeholder="按应用名/ID 搜索"
+          clearable
+        />
 
-      <el-button class="toolbar-item" @click="onManualRefresh">刷新</el-button>
+        <el-button class="refresh-button" @click="onManualRefresh">刷新</el-button>
+      </div>
 
-      <div class="toolbar-spacer" />
+      <div class="toolbar-options">
+        <el-radio-group v-model="viewStyleModel" size="default">
+          <el-radio-button value="table">表格</el-radio-button>
+          <el-radio-button value="card">卡片</el-radio-button>
+        </el-radio-group>
 
-      <el-radio-group v-model="viewStyleModel" size="default">
-        <el-radio-button value="table">表格</el-radio-button>
-        <el-radio-button value="card">卡片</el-radio-button>
-      </el-radio-group>
+        <div class="toolbar-preferences">
+          <div class="toolbar-option">
+            <span class="option-label">自动刷新</span>
+            <el-tooltip content="自动刷新">
+              <el-switch v-model="autoRefreshModel" />
+            </el-tooltip>
+          </div>
+          <el-select
+            v-if="store.autoRefresh"
+            v-model="refreshIntervalModel"
+            class="interval-select"
+            aria-label="自动刷新间隔"
+          >
+            <el-option v-for="i in REFRESH_INTERVALS" :key="i" :label="`${i}s`" :value="i" />
+          </el-select>
 
-      <el-tooltip content="自动刷新">
-        <el-switch v-model="autoRefreshModel" class="toolbar-item" />
-      </el-tooltip>
-      <el-select
-        v-if="store.autoRefresh"
-        v-model="refreshIntervalModel"
-        class="toolbar-item interval-select"
-      >
-        <el-option v-for="i in REFRESH_INTERVALS" :key="i" :label="`${i}s`" :value="i" />
-      </el-select>
+          <div class="toolbar-option">
+            <span class="option-label">相对时间</span>
+            <el-tooltip content="人性化时间">
+              <el-switch v-model="humanizeModel" />
+            </el-tooltip>
+          </div>
 
-      <el-tooltip content="人性化时间">
-        <el-switch v-model="humanizeModel" class="toolbar-item" />
-      </el-tooltip>
-
-      <el-popover placement="bottom" :width="260" trigger="click">
-        <template #reference>
-          <el-button class="toolbar-item">字段显隐</el-button>
-        </template>
-        <div class="field-list">
-          <el-checkbox-group :model-value="visibleHeaderValues" @change="applyVisibility">
-            <el-checkbox v-for="h in headers" :key="h.value" :value="h.value" :label="h.text" />
-          </el-checkbox-group>
+          <el-popover placement="bottom" :width="260" trigger="click">
+            <template #reference>
+              <el-button>字段显隐</el-button>
+            </template>
+            <div class="field-list">
+              <el-checkbox-group :model-value="visibleHeaderValues" @change="applyVisibility">
+                <el-checkbox v-for="h in headers" :key="h.value" :value="h.value" :label="h.text" />
+              </el-checkbox-group>
+            </div>
+          </el-popover>
         </div>
-      </el-popover>
+      </div>
     </div>
 
     <YarnOverview :metrics="metrics" :queue-tree="queueTree" :humanize="store.humanize" />
@@ -319,35 +338,63 @@ function onRowsChange(s: number) {
 }
 
 .toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  display: grid;
+  gap: 12px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 10px 12px;
+  border-radius: var(--bd-radius);
+  padding: 12px 14px;
 }
 
-.toolbar-item {
-  max-width: 220px;
+.filter-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(110px, 1fr)) minmax(150px, 1.2fr) auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .rm-select {
-  min-width: 260px;
-  max-width: 380px;
+  min-width: 0;
 }
 
 .search-input {
-  width: 200px;
+  min-width: 0;
 }
 
 .interval-select {
   width: 90px;
 }
 
-.toolbar-spacer {
-  flex: 1;
+.toolbar-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid $border;
+}
+
+.toolbar-preferences {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+}
+
+.toolbar-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.option-label {
+  color: $muted;
+  font-size: 13px;
+}
+
+.refresh-button {
+  min-width: 68px;
 }
 
 .field-list {
@@ -356,5 +403,24 @@ function onRowsChange(s: number) {
   gap: 2px;
   max-height: 320px;
   overflow: auto;
+}
+
+@media (max-width: 1100px) {
+  .filter-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .rm-select { grid-column: span 2; }
+  .search-input { grid-column: span 2; }
+}
+
+@media (max-width: 640px) {
+  .yarn-view { padding: 12px; gap: 10px; }
+  .toolbar { padding: 10px; }
+  .filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rm-select,
+  .search-input { grid-column: 1 / -1; }
+  .refresh-button { grid-column: 1 / -1; width: 100%; }
+  .toolbar-options { align-items: flex-start; flex-direction: column; }
+  .toolbar-preferences { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 }
 </style>

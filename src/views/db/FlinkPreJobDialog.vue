@@ -522,8 +522,8 @@ watch(activeTab, () => loadActive())
   margin-bottom: 8px;
 }
 .log-pre {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--bd-log-bg);
+  color: var(--bd-log-text);
   border-radius: 4px;
   padding: 10px;
   font-size: 12px;

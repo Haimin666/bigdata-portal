@@ -12,6 +12,12 @@ export interface DbDataSource {
   rowLimit?: string
 }
 
+export interface DbAcl {
+  datasources: DbDataSource[]
+  /** 网关按当前用户过滤后的库名，前端仅用于初始化提示与选择状态。 */
+  allowedDbs?: string[]
+}
+
 export interface DbQueryResult {
   columns: string[]
   rows: Record<string, unknown>[]
@@ -72,8 +78,12 @@ export interface TableSearchHit {
 
 /** 拉取数据源列表(带类型,来自 /acl) */
 export async function listDataSources(): Promise<DbDataSource[]> {
-  const data = await request<{ datasources?: DbDataSource[] }>('/acl')
+  const data = await request<DbAcl>('/acl')
   return data.datasources || []
+}
+
+export async function getDbAcl(): Promise<DbAcl> {
+  return request<DbAcl>('/acl')
 }
 
 /** 执行查询(mysql/oracle 同步通道;经网关 /api/dbquery/query,写权限由网关数据权限矩阵管控) */

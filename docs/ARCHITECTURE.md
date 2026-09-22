@@ -30,29 +30,37 @@
 src/
 ├── main.ts             # 入口:主题初始化 + 加载管理端主题覆盖
 ├── App.vue             # 根组件
-├── router/index.ts     # 路由:native 静态路由 + 菜单驱动的 subapp 占位路由
+├── router/index.ts     # 路由:由统一模块注册表生成
 ├── layouts/            # 门户壳
-│   ├── MainLayout.vue      # 顶栏(状态条/UTC 时钟)+ 侧栏 + TabStage
+│   ├── MainLayout.vue      # 侧栏 + 垂直内容容器(顶栏 + TabStage)
 │   └── components/
 │       ├── SideBar.vue     # 菜单(enabledModules 白名单 + 角色过滤)
-│       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁)
+│       ├── AppHeader.vue    # Vben 风格顶栏:折叠、面包屑、刷新、主题、用户
+│       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁;active 控制轮询)
 │       └── SubAppView.vue  # 子应用 iframe 池
-├── views/              # 业务视图(见模块文档)
+├── views/              # 业务视图(见模块文档;共享 Vben 风格操作栏/响应式基线)
 ├── store/              # Pinia:auth.ts(会话/角色)、yarn.ts(应用列表/RM 选择)
-├── api/                # 后端封装:auth/db/ds/dsDeps/hdfs/yarn
+├── api/                # 后端封装:统一 request + auth/db/ds/dsDeps/hdfs/yarn
+├── api/request.ts      # 统一请求、错误与 401 处理
 ├── utils/theme.ts      # 深浅主题 + 管理端主题覆盖注入
 ├── styles/             # variables.scss(双主题 CSS 变量)/ index.scss(全局)
-├── components/         # 通用:DialogMaxBtn/StateSelect/StatusBadge/UrlFrameDialog
-├── config/menu.ts      # 静态菜单表(驱动侧栏 + subapp 路由 + 角色过滤)
+├── components/         # 通用:布局容器/状态组件/弹窗/URL iframe
+├── config/menu.ts      # 统一模块注册表(菜单/路由/组件/子应用 URL)
 └── types/              # TS 类型
 ```
 
 ### 2.2 关键机制
 
-- **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁
-- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
-- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)
-- **字体**:全局等宽字体栈 `--bd-font`,管理端可覆盖
+- **模块注册表**:`config/menu.ts` 是菜单、路由、native 异步组件、子应用 iframe URL 的唯一来源,避免三处映射漂移
+- **tab 常驻池**:`TabStage` 用 `v-show` 保留已打开 tab 的状态(iframe 池保留子应用滚动/登录态),关闭才销毁;原生视图接收 `active` 控制后台轮询
+- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`。Vben 实时演示主题主色为 `hsl(212 100% 45%)`(`#006be6`)，作为唯一蓝色强调色用于主操作/选中态，背景、边框和文字保持中性；浅深主题共用该主色。2026-09 实测暗色页面背景 `#1c1e23`、前景 `#f2f2f2`、边框 `#36363a`，门户暗色基底与之对齐。
+- **菜单**:`SideBar` 按 `enabledModules`(认证关闭时,空=全部)+ 用户角色过滤;认证开启后使用用户 `modules`。**路由守卫同样校验模块白名单**(URL 直达受限页面重定向到首个可访问模块,无权限进入 `/forbidden`)。前端使用用户管理页统一维护的 `modules`，后端对执行接口和子应用代理复用该白名单做安全兜底。
+- **请求层**:业务 API 通过 `src/api/request.ts` 统一处理 JSON 契约、错误消息、超时和 401 登出。
+- **Element Plus 按需注册**:`main.ts` 全局注册项目模板实际使用的组件与 `v-loading`,不再安装全量组件插件;主题 CSS 仍全局加载,避免组件样式缺失。新增组件时需同步注册并按构建产物确认是否引入整库。
+- **构建分包**:业务视图由菜单注册表动态导入;Monaco 仅随数据库查询路由加载,不进入门户首屏。避免将查询编辑器手工提到全局 vendor chunk。
+- **重型交互按需加载**:DolphinScheduler 依赖图面板(G6)延迟到用户打开依赖侧栏时加载,避免仅看实例表时下载图布局引擎。
+- **字体**:全局管理端字体栈 `--bd-font`;SQL、日志等代码内容按组件局部使用等宽字体
+- **响应式**:`MainLayout` 在窄屏下侧栏进入抽屉模式，原生页面操作栏允许换行，表格保持横向滚动而不压缩操作列
 
 ## 3. 网关架构(server/)
 
@@ -73,7 +81,7 @@ src/
 | `routes/yarn-proxy.js` | YARN 三套代理:hadoopapi(按 X-Resource-Manager 动态)、yarniframe(HTML 重写)、iframe-proxy(NM 日志等白名单主机) |
 | `routes/subapps-proxy.js` | 子应用 iframe 代理:HDFS(/apps/hdfs、/static、/webhdfs)、DS Web、Jupyter、DolphinScheduler、Stingray(HTML 注入) |
 | `routes/db.js` | DB 访问:/api/db 权限校验 + acl + jobs + explain + 透传,以及 /api/db-perms 管理 API(admin) |
-| `routes/spark.js` | Spark SQL:X-Spark-Token 签发/校验/绑定用户、暴力破解限速、query/jobs/logs/status/config/stages/cancel |
+| `routes/spark.js` | Spark SQL:query/jobs/logs/status/config/stages/cancel；用户访问由模块与数据权限矩阵控制 |
 | `routes/flink.js` | Flink SQL:交互查询/async/连接器/DDL 生成/jobs/PreJob 全套路由 |
 | `routes/dbquery.js` | MySQL/Oracle 同步查询 `/api/dbquery/query`(写检测 + 权限矩阵) |
 | `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 代理 |
@@ -98,10 +106,9 @@ src/
 ### 3.3 认证与写操作防线
 
 - 会话:`portal_session` cookie(httpOnly),`requireAuth`/`requireAdmin` 守卫;`PROTECTED_PREFIXES` 内未登录一律 401
-- **WebSocket 鉴权**:upgrade 请求不经过 Express 中间件,网关在 `server.on('upgrade')` 手动解析 `portal_session` cookie 校验,未登录/未初始化一律断开(`/__/stingray`、`/apps/jupyter` 的 WS 同样受控)
-- **写操作解锁**:Spark/Flink 写 SQL 必须带 `X-Spark-Token`(由 `/api/spark/auth` 校验 `sparkWritePassword` 签发,12h);`isSparkWriteSql` 白名单检测(去注释 + 拒绝多语句 + 防 `/*!` 走私 + `SET GLOBAL` 视为写);**token 绑定签发用户**——仅本人会话可用,跨用户复用立即失效删除(防 XSS 窃取复用)
-- **MySQL/Oracle 同防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` + token 校验;db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线);`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束,GET 状态查询放行
-- 未配置 `sparkWritePassword` → 写操作一律禁止(默认只读)
+- **WebSocket 鉴权**:upgrade 请求不经过 Express 中间件,网关在 `server.on('upgrade')` 手动解析 `portal_session` cookie 并校验 Stingray/Jupyter 模块权限；未登录、未授权或未初始化一律断开。
+- **写操作权限**:独立 `X-Spark-Token` 解锁已移除；Spark/Flink/MySQL/Oracle 写操作由模块权限、数据权限矩阵、数据源 `readOnly` 与 db-proxy 资源护栏共同控制，写 SQL 继续执行语句检测与审计。
+- **MySQL/Oracle 防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` 与数据权限校验；db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线)；`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束，GET 状态查询放行。
 - **数据权限矩阵(用户/角色→库)**:`server/data/db-permissions.json`(userRules/roleRules,不存在即无规则不拦截);带 `db` 参数的 MySQL/Oracle 访问接口(query/jobs/explain 路由内 + tables/fields/ddl/schema GET 前置中间件)按调用者校验,不在其 dbs → 403;**admin 一律放行**,无规则回退 db-proxy 全局白名单;管理 API `GET/PUT /api/db-perms`(admin only)。详见 `docs/modules/db-permissions.md`
 
 ## 4. db-proxy(数据服务,Python FastAPI)
@@ -128,7 +135,7 @@ src/
 QueryView.vue
   └─ api/db.ts queryDb/querySpark/queryFlink
        └─ GET/POST /api/db/*、/api/spark/*、/api/flink/*(网关)
-            ├─ 写检测(isSparkWriteSql + X-Spark-Token)
+            ├─ 写检测(isSparkWriteSql + 数据权限矩阵)
             └─ spark-gateway / flink-gateway
                  └─ db-proxy /query | /spark/query | /flink/query
                       └─ 引擎执行(常驻 session / flink 网关)→ {columns, rows, costMs, truncated}
@@ -164,9 +171,9 @@ QueryView.vue
 
 仓库新增独立 `mobile/` 子工程（Vue 3 + Ionic Vue + Capacitor）。移动端复用 Express 网关的认证、模块权限和 YARN/DolphinScheduler API，不直连集群，也不持有 `dsToken`、`dbProxyToken` 等服务凭证。
 
-- YARN 与任务监控使用专门的移动页面，避免复用桌面大表格、G6 和 Monaco。
+- YARN 与离线开发使用专门的移动页面；离线开发原生覆盖项目、工作流/详情、近两天工作流/任务实例及常用受控操作，避免复用桌面大表格、G6 和 Monaco。
 - 完整“离线开发”继续通过网关的 `/apps/dsweb/ui/#/home` 代理入口访问，在 Android 全屏 WebView 容器中运行。
 - 本地开发由移动 Vite 服务代理到网关并沿用 `portal_session` Cookie。生产 Android 在企业 VPN/零信任网络内加载 `https://bigdata-portal.corp.shiqiao.com/mobile/`；网关从独立 `mobile/dist/` 托管该路径，桌面 Web 仍使用根路径 `/` 和 `dist/`。两端共享 HTTPS 域名、`portal_session` Cookie、API 与权限体系。
-- 移动端危险操作继续由网关角色/模块门禁兜底，前端必须增加目标确认与重复提交保护。
+- 移动端危险操作继续由网关角色/模块门禁兜底，前端必须增加目标确认与重复提交保护；DolphinScheduler 门禁覆盖工作流发布/启动、定时上下线和实例执行类接口。
 
 详细边界见 `docs/modules/mobile.md`。
