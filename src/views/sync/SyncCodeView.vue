@@ -176,36 +176,4 @@ async function copy(text: string, label: string) {
   align-items: center;
   justify-content: center;
 }
-
-@media (max-width: 640px) {
-  .sync-view {
-    padding: 12px;
-  }
-
-  .sync-form {
-    flex-wrap: wrap;
-  }
-
-  .sync-input {
-    flex: 1 1 0;
-    width: auto;
-    min-width: 0;
-  }
-
-  .sync-form > .el-button {
-    flex: 1 0 100%;
-    width: 100%;
-  }
-
-  .sync-body {
-    flex-direction: column;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
-  .code-pane {
-    flex: 0 0 240px;
-    min-height: 0;
-  }
-}
 </style>

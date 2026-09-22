@@ -1,78 +1,62 @@
-// ── 全局主题色(亮/暗双主题 · Vben Admin 风格)────────────────────
+// ── 全局主题色(亮/暗双主题 · 深空控制台风格)────────────────────
 // 方式:SCSS 变量引用 CSS 变量,挂在 html 根元素。
 //   - :root       亮色(默认)  —— 白底控制台
-//   - html.dark   深色(html 上挂 dark class 即全局切换) —— Vben 中性深灰 + 品牌蓝
+//   - html.dark   深色(html 上挂 dark class 即全局切换) —— 深空黑 + 电光青
 // 所有组件内 $bg/$panel/$border/$text/$muted/$primary 自动跟随主题,
 // 无需改动各组件样式。Element Plus 深色组件依赖 html.dark 同款约定。
 
 /* ── 亮色(浅色控制台)── */
 :root {
   /* 全局字体栈(管理端「主题设置」可覆盖);body 与 Element Plus 均引用此变量 */
-  --bd-font: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  --bd-primary: #006be6;
-  --bd-bg: #f5f7fa;
+  --bd-font: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
+    'Microsoft YaHei', monospace;
+  --bd-primary: #00849c;
+  --bd-bg: #eef3f8;
   --bd-panel: #ffffff;
-  --bd-border: #e5e7eb;
-  --bd-border-strong: #d1d5db;
-  --bd-text: #1f2937;
-  --bd-header: #ffffff;
-  --bd-tabbar: #ffffff;
-  --bd-primary-soft: #e6f1fd;
-  --bd-tab-hover: #f3f4f6;
-  --bd-tab-active: #ffffff;
-  --bd-radius: 8px;
-  --bd-header-height: 50px;
-  --bd-tabbar-height: 38px;
+  --bd-border: rgba(11, 74, 104, 0.16);
+  --bd-text: #0d2433;
 
-  /* Element Plus 主色与 Vben 实测品牌蓝统一 */
-  --el-color-primary: #006be6;
-  --el-color-primary-light-3: #3389eb;
-  --el-color-primary-light-5: #66a6f0;
-  --el-color-primary-light-7: #99c4f5;
-  --el-color-primary-light-8: #bfdbf9;
-  --el-color-primary-light-9: #e6f1fd;
-  --el-color-primary-dark-2: #0056b8;
+  /* Element Plus 主色对齐(青,替代默认蓝) */
+  --el-color-primary: #00849c;
+  --el-color-primary-light-3: #33a2b5;
+  --el-color-primary-light-5: #66b9c7;
+  --el-color-primary-light-7: #99d0da;
+  --el-color-primary-light-8: #b3dce3;
+  --el-color-primary-light-9: #cce8ed;
+  --el-color-primary-dark-2: #006a7d;
 
   /* Element Plus 字体统一为深空控制台等宽系(可被 --bd-font 覆盖) */
   --el-font-family: var(--bd-font);
-  --bd-muted: #6b7280;
-  --bd-table-header: #fafafa;
-  --bd-table-hover: #f5f9ff;
-  --bd-sidebar: #ffffff;
-  --bd-panel-sub: #f9fafb;
-  --bd-log-bg: #111827;
-  --bd-log-text: #e5e7eb;
+  --bd-muted: #5d7a8c;
+  --bd-table-header: #f1f6fa;
+  --bd-table-hover: #e9f2f8;
+  --bd-sidebar: #e6edf4;
+  --bd-panel-sub: #f4f8fc;
+  --bd-grid-line: rgba(11, 74, 104, 0.07);
 }
 
 /* ── 深色(深空控制台)── */
 html.dark {
-  --bd-primary: #006be6;
-  --bd-bg: #1c1e23;
-  --bd-panel: #1f1f1f;
-  --bd-border: #36363a;
-  --bd-border-strong: #4a4a50;
-  --bd-text: #f2f2f2;
-  --bd-muted: #9ca3af;
-  --bd-header: #1f1f1f;
-  --bd-tabbar: #1f1f1f;
-  --bd-primary-soft: rgba(0, 107, 230, 0.14);
-  --bd-tab-hover: #262626;
-  --bd-tab-active: #1f1f1f;
-  --bd-table-header: #262626;
-  --bd-table-hover: #252d38;
-  --bd-sidebar: #1f1f1f;
-  --bd-panel-sub: #262626;
-  --bd-log-bg: #111827;
-  --bd-log-text: #e5e7eb;
+  --bd-primary: #00e5ff;
+  --bd-bg: #070b12;
+  --bd-panel: #0c1420;
+  --bd-border: rgba(0, 229, 255, 0.16);
+  --bd-text: #cfe9f2;
+  --bd-muted: #5f7d8c;
+  --bd-table-header: #0a1420;
+  --bd-table-hover: #101b2a;
+  --bd-sidebar: #0a1019;
+  --bd-panel-sub: #0a1019;
+  --bd-grid-line: rgba(0, 229, 255, 0.06);
 
-  /* 深浅主题共用 Vben 实测品牌蓝,不再切换成偏青的另一种蓝 */
-  --el-color-primary: #006be6;
-  --el-color-primary-light-3: #3389eb;
-  --el-color-primary-light-5: #66a6f0;
-  --el-color-primary-light-7: #99c4f5;
-  --el-color-primary-light-8: #bfdbf9;
-  --el-color-primary-light-9: #e6f1fd;
-  --el-color-primary-dark-2: #0056b8;
+  /* Element Plus 主色对齐(电光青,替代默认蓝) */
+  --el-color-primary: #00e5ff;
+  --el-color-primary-light-3: #33eaff;
+  --el-color-primary-light-5: #66efff;
+  --el-color-primary-light-7: #99f5ff;
+  --el-color-primary-light-8: #b3f8ff;
+  --el-color-primary-light-9: #ccfbff;
+  --el-color-primary-dark-2: #00b8cc;
 }
 
 /* ── 暗色组件级覆盖(深空控制台一致)──────────────────────────

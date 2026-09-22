@@ -20,7 +20,7 @@ export function yarnStateColor(state: string): StatusColor {
 export function yarnStateHex(state: string): string | undefined {
   switch (state) {
     case 'RUNNING':
-      return '#006be6'
+      return '#3b82f6'
     case 'ACCEPTED':
       return '#f59e0b'
     case 'FINISHED':

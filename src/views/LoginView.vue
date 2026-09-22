@@ -145,28 +145,37 @@ async function submit() {
   height: 100%;
   background: $bg;
   color: $text;
-  font-family: var(--bd-font);
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
   overflow: hidden;
 }
 
-/* 保留结构但关闭旧控制台网格，登录页与主工作台使用同一背景基线。 */
+/* 网格背景 */
 .grid-bg {
-  display: none;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--bd-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bd-grid-line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 80% at 30% 40%, #000 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 30% 40%, #000 20%, transparent 75%);
 }
 
-/* 顶部工具条 */
+/* 顶部状态条 */
 .status-bar {
   position: relative;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 28px;
-  font-size: 12px;
-  letter-spacing: 0;
+  padding: 12px 26px;
+  font-size: 11px;
+  letter-spacing: 2px;
   color: $muted;
   border-bottom: 1px solid var(--bd-border);
-  background: var(--bd-panel);
+  background: color-mix(in srgb, $bg 80%, transparent);
+  backdrop-filter: blur(8px);
 }
 .status-left {
   display: flex;
@@ -174,53 +183,58 @@ async function submit() {
   gap: 10px;
 }
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--bd-primary);
+  background: #34d399;
+  box-shadow: 0 0 8px #34d399;
+  animation: pulse 1.6s infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 .theme-toggle {
   display: flex;
   align-items: center;
+  gap: 8px;
   border: 1px solid var(--bd-border);
-  background: var(--bd-panel);
+  background: transparent;
   color: $text;
   font-family: inherit;
-  font-size: 12px;
-  padding: 6px 12px;
-  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  padding: 5px 12px;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  transition: background 0.25s, color 0.25s;
   &:hover {
-    background: var(--bd-primary-soft);
-    border-color: var(--bd-primary);
-    color: $primary;
+    background: $primary;
+    color: $bg;
   }
 }
 
 /* 主体 */
 .login-wrap {
-  height: calc(100% - 58px);
+  height: calc(100% - 54px);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
-  gap: 96px;
+  grid-template-columns: 1.15fr 0.85fr;
   align-items: center;
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 0 32px;
+  padding: 0 7vw;
 }
 
 .brand h1 {
-  font-size: clamp(32px, 4vw, 52px);
+  font-size: clamp(30px, 4.6vw, 58px);
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 6px;
   color: $text;
+  text-shadow: 0 0 24px color-mix(in srgb, $primary 35%, transparent);
   min-height: 1.2em;
 }
 .brand .sub {
-  margin-top: 12px;
-  font-size: 14px;
-  letter-spacing: 0;
+  margin-top: 18px;
+  font-size: 13px;
+  letter-spacing: 4px;
   color: $muted;
   b {
     color: $primary;
@@ -228,12 +242,14 @@ async function submit() {
   }
 }
 .console {
-  margin-top: 32px;
-  border-left: 2px solid var(--bd-primary);
-  padding: 4px 20px;
-  font-size: 13px;
-  line-height: 2;
+  margin-top: 44px;
+  border: 1px solid var(--bd-border);
+  background: color-mix(in srgb, $panel 55%, transparent);
+  padding: 18px 20px;
+  font-size: 12px;
+  line-height: 2.1;
   max-width: 460px;
+  box-shadow: 0 0 40px color-mix(in srgb, $primary 5%, transparent) inset;
   .ln {
     color: $muted;
   }
@@ -260,13 +276,12 @@ async function submit() {
 .login-card {
   position: relative;
   border: 1px solid var(--bd-border);
-  background: var(--bd-panel);
-  border-radius: 10px;
-  padding: 34px 32px 28px;
-  max-width: 420px;
+  background: linear-gradient(160deg, color-mix(in srgb, $panel 95%, transparent), color-mix(in srgb, $bg 90%, transparent));
+  padding: 44px 40px 36px;
+  max-width: 400px;
   width: 100%;
   margin-left: auto;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
   animation: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes rise {
@@ -280,52 +295,72 @@ async function submit() {
   }
 }
 .login-card::before {
-  display: none;
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  right: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, $primary, transparent);
+  animation: scanline 3s linear infinite;
+}
+@keyframes scanline {
+  0% {
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 .card-title {
-  font-size: 18px;
-  letter-spacing: 0;
+  font-size: 15px;
+  letter-spacing: 5px;
   color: $primary;
   display: flex;
   align-items: center;
   gap: 10px;
   &::before {
-    content: '';
-    width: 4px;
-    height: 18px;
-    border-radius: 2px;
-    background: var(--bd-primary);
+    content: '▸';
   }
 }
 .card-tip {
-  margin: 10px 0 26px;
-  font-size: 13px;
+  margin: 10px 0 30px;
+  font-size: 11px;
   color: $muted;
+  letter-spacing: 1px;
 }
 .field {
-  margin-bottom: 18px;
+  margin-bottom: 20px;
   label {
     display: block;
-    font-size: 13px;
-    letter-spacing: 0;
+    font-size: 11px;
+    letter-spacing: 2px;
     color: $muted;
     margin-bottom: 8px;
   }
   input {
     width: 100%;
-    background: var(--bd-panel);
-    border: 1px solid var(--bd-border-strong);
-    border-radius: 6px;
+    background: color-mix(in srgb, $bg 60%, transparent);
+    border: 1px solid color-mix(in srgb, $primary 30%, transparent);
     color: $text;
     font-family: inherit;
     font-size: 14px;
-    letter-spacing: 0;
-    padding: 10px 12px;
+    letter-spacing: 1px;
+    padding: 12px 14px;
     outline: none;
     transition: border-color 0.25s, box-shadow 0.25s;
     &:focus {
       border-color: $primary;
-      box-shadow: 0 0 0 2px color-mix(in srgb, $primary 16%, transparent);
+      box-shadow: 0 0 0 1px $primary, 0 0 18px color-mix(in srgb, $primary 18%, transparent);
     }
     &::placeholder {
       color: $muted;
@@ -336,19 +371,18 @@ async function submit() {
 .btn-primary {
   width: 100%;
   margin-top: 10px;
-  padding: 11px 14px;
-  background: var(--bd-primary);
-  border: 1px solid var(--bd-primary);
-  border-radius: 6px;
-  color: #fff;
+  padding: 14px;
+  background: transparent;
+  border: 1px solid $primary;
+  color: $primary;
   font-family: inherit;
   font-size: 13px;
-  letter-spacing: 0;
+  letter-spacing: 6px;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  transition: background 0.3s, color 0.3s;
   &:hover:not(:disabled) {
-    background: #4096ff;
-    border-color: #4096ff;
+    background: $primary;
+    color: $bg;
   }
   &:disabled {
     opacity: 0.6;
@@ -358,7 +392,7 @@ async function submit() {
 .login-foot {
   margin-top: 24px;
   font-size: 10px;
-  letter-spacing: 0;
+  letter-spacing: 1px;
   color: $muted;
   text-align: center;
 }
@@ -366,11 +400,8 @@ async function submit() {
 @media (max-width: 960px) {
   .login-wrap {
     grid-template-columns: 1fr;
-    gap: 32px;
     padding: 60px 20px 20px;
   }
-  .brand { text-align: center; }
-  .brand .sub { justify-content: center; }
   .console {
     display: none;
   }

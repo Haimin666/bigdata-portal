@@ -508,7 +508,7 @@ async function showJson(v: unknown) {
   font-weight: 600;
 }
 .tab-log-icon {
-  color: var(--bd-primary, #006be6);
+  color: var(--bd-primary, #409eff);
   font-size: 13px;
 }
 .tab-name.err {
@@ -635,7 +635,7 @@ async function showJson(v: unknown) {
   cursor: pointer;
 }
 .mode-toggle.on {
-  color: var(--bd-primary, #006be6);
+  color: var(--bd-primary, #409eff);
 }
 .footer-job {
   color: #e6a23c;
@@ -651,7 +651,7 @@ async function showJson(v: unknown) {
   white-space: nowrap;
 }
 .col-header:hover {
-  color: var(--bd-primary, #006be6);
+  color: var(--bd-primary, #409eff);
   text-decoration: underline;
 }
 .row-selectable {
@@ -693,7 +693,7 @@ async function showJson(v: unknown) {
 .cell-edit-input {
   width: 100%;
   min-width: 120px;
-  border: 1px solid var(--bd-primary, #006be6);
+  border: 1px solid var(--bd-primary, #409eff);
   border-radius: 3px;
   padding: 1px 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

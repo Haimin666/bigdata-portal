@@ -29,8 +29,32 @@ export interface RolesDef {
   [key: string]: { title: string; modules: string[] | null }
 }
 
+interface ApiResp<T> {
+  code?: number
+  data?: T
+  detail?: string
+  msg?: string
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  return requestJson<T>(path, init)
+  const res = await fetch(path, init)
+  let body: ApiResp<T> | null = null
+  try {
+    body = (await res.json()) as ApiResp<T>
+  } catch {
+    /* 忽略非 JSON */
+  }
+  if (!res.ok) {
+    const err = new Error(body?.detail || body?.msg || `HTTP ${res.status}`) as Error & { status?: number }
+    err.status = res.status
+    throw err
+  }
+  if (body && body.code !== undefined && body.code !== 0) {
+    const err = new Error(body.detail || body.msg || '请求失败') as Error & { status?: number }
+    err.status = res.status
+    throw err
+  }
+  return (body?.data ?? {}) as T
 }
 
 const jsonInit = (method: string, payload?: unknown): RequestInit => ({
@@ -60,4 +84,3 @@ export const userApi = {
   remove: (username: string) =>
     req<{ deleted: string }>('/api/users/' + encodeURIComponent(username), jsonInit('DELETE'))
 }
-import { requestJson } from './request'

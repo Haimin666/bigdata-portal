@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from 'vue'
 import { useRoute } from 'vue-router'
-import { menus } from '@/config/menu'
+import type { Component } from 'vue'
 import SubAppView from '@/views/subapp/SubAppView.vue'
 import SubappTabs, { type PortalTab } from '@/views/subapp/SubappTabs.vue'
+import YarnView from '@/views/yarn/YarnView.vue'
+import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
+import HdfsView from '@/views/hdfs/HdfsView.vue'
+import UserManageView from '@/views/admin/UserManageView.vue'
+import DataLeapView from '@/views/dataleap/DataLeapView.vue'
+import DevAssistantView from '@/views/assistant/DevAssistantView.vue'
+// SQL 画布含 Monaco(~1.5MB gzip),必须异步:避免拖慢首屏(全量打包进主 chunk 曾致 index 4.9MB)
+const DbQueryView = defineAsyncComponent(() => import('@/views/db/QueryView.vue'))
+const SyncCodeView = defineAsyncComponent(() => import('@/views/sync/SyncCodeView.vue'))
 
 defineOptions({ name: 'TabStage' })
 
@@ -20,12 +29,17 @@ const emit = defineEmits<{
 
 const route = useRoute()
 
-// 原生视图组件映射来自统一模块注册表,全部保持异步加载。
-const nativeComponents = Object.fromEntries(
-  menus
-    .filter((m) => m.kind === 'native' && m.component)
-    .map((m) => [m.name, defineAsyncComponent(m.component!)])
-)
+// 原生视图组件映射:按 menu.name 渲染
+const nativeComponents: Record<string, Component> = {
+  yarn: YarnView,
+  dsTask: DsTaskMonitor,
+  hdfs: HdfsView,
+  dbQuery: DbQueryView,
+  userManage: UserManageView,
+  dataleap: DataLeapView,
+  devAssistant: DevAssistantView,
+  sync: SyncCodeView
+}
 
 const activePath = computed(() => route.path)
 </script>
@@ -39,6 +53,8 @@ const activePath = computed(() => route.path)
       :active-path="activePath"
       @switch="(p: string) => emit('switch', p)"
       @close="(p: string) => emit('close', p)"
+      @refresh="emit('refresh')"
+      @toggle-fullscreen="emit('toggle-fullscreen')"
     />
     <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
     <div class="view-stage">
@@ -54,7 +70,6 @@ const activePath = computed(() => route.path)
           <component
             v-else
             :is="nativeComponents[tab.menu.name]"
-            :active="tab.path === activePath"
             :key="tab.refreshKey"
           />
         </div>

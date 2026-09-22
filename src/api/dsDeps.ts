@@ -1,5 +1,4 @@
 // 工作流依赖采集与级联重跑 API(/api/ds-deps)
-import { requestJson } from './request'
 
 export interface DepNode {
   processId: number
@@ -47,16 +46,29 @@ export interface TaskGraph {
   connects: TaskGraphConnect[]
 }
 
+interface ApiResp<T> {
+  code: number
+  msg?: string
+  data?: T
+  updatedAt?: string
+}
+
 async function get<T>(path: string): Promise<T> {
-  return requestJson<T>(`/api/ds-deps${path}`)
+  const res = await fetch(`/api/ds-deps${path}`)
+  const body = (await res.json()) as ApiResp<T>
+  if (body.code !== 0) throw new Error(body.msg || `HTTP ${res.status}`)
+  return body.data as T
 }
 
 async function post<T>(path: string, payload: unknown): Promise<T> {
-  return requestJson<T>(`/api/ds-deps${path}`, {
+  const res = await fetch(`/api/ds-deps${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   })
+  const body = (await res.json()) as ApiResp<T>
+  if (body.code !== 0) throw new Error(body.msg || `HTTP ${res.status}`)
+  return body.data as T
 }
 
 /** 工作流级依赖树(最上游→当前→最下游),可指定日期区间(默认近 90 天最近一次) */

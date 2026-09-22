@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Refresh, View, Setting } from '@element-plus/icons-vue'
@@ -18,10 +18,9 @@ import { formatTimestamp } from '@/utils/format'
 import type { TableInstance } from 'element-plus'
 import StateSelect, { type StateOption } from '@/components/StateSelect.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import DsDepsPanel from './DsDepsPanel.vue'
 import { searchWorkflows, rerunInstances, rerunFromNode, refreshDeps, fetchDepsStatus } from '@/api/dsDeps'
 import { useAuthStore } from '@/store/auth'
-
-const DsDepsPanel = defineAsyncComponent(() => import('./DsDepsPanel.vue'))
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -62,12 +61,12 @@ const stateOptions: StateOption[] = [
   // 注意:本版本海豚运行中状态枚举为 RUNNING_EXEUTION(少一个 C),
   // 展示与筛选参数均为该拼写(实测确认,传标准 RUNNING_EXECUTION 会 10113 报错)
   // 运行中 → 蓝(与 yarn RUNNING 一致);成功绿/失败红/暂停橙/停止灰保持语义色
-  { label: '运行中', value: 'RUNNING_EXEUTION', color: '#006be6', running: true },
+  { label: '运行中', value: 'RUNNING_EXEUTION', color: '#3b82f6', running: true },
   { label: '成功', value: 'SUCCESS', type: 'success' },
   { label: '失败', value: 'FAILURE', type: 'danger' },
   { label: '暂停', value: 'PAUSE', type: 'warning' },
   { label: '停止', value: 'STOP', type: 'info' },
-  { label: '已提交', value: 'SUBMITTED_SUCCESS', color: '#006be6', running: true },
+  { label: '已提交', value: 'SUBMITTED_SUCCESS', color: '#3b82f6', running: true },
   { label: '已终止', value: 'KILL', type: 'info' }
 ]
 
@@ -129,23 +128,29 @@ function rangeDates(): { start?: string; end?: string } {
 let loadSeq = 0
 
 /**
- * 默认项目:从项目列表前 PROBE 个里挑第一个"当天有实例"的(仅在工作流实例视图探测)。
- * 串行探测少量项目,避免把默认页落在当天完全无数据的项目上或瞬时压垮海豚。
+ * 默认项目:从项目列表前 PROBE 个里挑第一个"当天有实例"的(仅在工作流实例视图探测,
+ * 串行、命中即停,避免每个项目都发请求)。找不到(当天全空)回退第一个项目,页面展示空态引导。
  */
 const DEFAULT_PROBE = 5
 async function findDefaultProject(list: { name: string }[]): Promise<string> {
   if (!list.length) return ''
   if (list.length === 1) return list[0].name
   const { start, end } = rangeDates()
-  const candidates = list.slice(0, DEFAULT_PROBE)
-  for (const candidate of candidates) {
+  const last = list.slice(0, DEFAULT_PROBE)
+  for (const p of last) {
     try {
-      const data = await listProcessInstances(candidate.name, { pageNo: 1, pageSize: 1, startDate: start, endDate: end })
-      if ((data.total ?? 0) > 0) return candidate.name
+      const d = await listProcessInstances(p.name, {
+        pageNo: 1,
+        pageSize: 1,
+        startDate: start,
+        endDate: end
+      })
+      if ((d.total ?? 0) > 0) return p.name
     } catch {
-      // 当前项目不可用时继续探测下一个
+      /* 该探测失败,继续下一个(不阻断默认选中) */
     }
   }
+  // 前几个当天都没实例:回退第一个(保持确定性),页面显示找到数据前的空态/引导
   return list[0].name
 }
 
@@ -204,7 +209,7 @@ async function loadAllOrOne<T>(
   }
   // 全部项目
   const kw = (mode === 'task' ? searchTask.value : searchProcess.value)?.trim()
-  const targets: { projectName: string; processName?: string; taskName?: string; processId?: number }[] = []
+  const targets: { projectName: string; processName?: string; processId?: number }[] = []
   if (!kw) {
     // 全部项目必须有搜索词才跨项目查(避免并发请求全部项目,打垮海豚/页面卡顿)
     return { totalList: [], total: 0 }
@@ -214,7 +219,7 @@ async function loadAllOrOne<T>(
   const byProject = new Map<string, { projectName: string }>()
   for (const h of hits) {
     if (h.matchedTask || h.processName.toLowerCase().includes(kw.toLowerCase())) {
-      targets.push({ projectName: h.projectName, processName: h.processName, taskName: h.matchedTask || undefined, processId: h.processId })
+      targets.push({ projectName: h.projectName, processName: h.processName, processId: h.processId })
     } else {
       byProject.set(h.projectName, { projectName: h.projectName })
     }
@@ -234,7 +239,7 @@ async function loadAllOrOne<T>(
           // 精确工作流:按工作流名搜索实例
           const d =
             mode === 'task'
-              ? await listTaskInstances(t.projectName, { ...common, taskName: t.taskName || kw })
+              ? await listTaskInstances(t.projectName, { ...common, taskName: t.processName })
               : await listProcessInstances(t.projectName, { ...common, searchVal: t.processName })
           results.push(...(tag(d.totalList || []) as T[]))
         } else {
@@ -281,19 +286,14 @@ function formatDuration(sec: number): string {
 
 /** 从任务日志解析 YARN application id(取日志前 300 行) */
 async function resolveYarnAppId(taskId: number): Promise<string | null> {
-  if (yarnAppCache.has(taskId)) return yarnAppCache.get(taskId) ?? null
   try {
     const log = await getTaskLog(taskId, 0, 300)
     const m = log.match(YARN_APP_RE)
-    const appId = m ? m[0] : null
-    if (appId) yarnAppCache.set(taskId, appId)
-    return appId
+    return m ? m[0] : null
   } catch {
     return null
   }
 }
-
-const yarnAppCache = new Map<number, string>()
 
 // 工作流实例表格实例(整行点击展开用)
 const tableRef = ref<TableInstance>()
@@ -534,7 +534,8 @@ onMounted(async () => {
   }
   try {
     projects.value = await listProjects()
-    // 默认选中前 20 个项目中当天有实例的项目,避免默认落在空项目上。
+    // 默认选中第一个"当天有实例"的项目(仅探测前 5 个,串行限频,找到即停),
+    // 避免默认落在一个当天没跑的空项目上导致列表空白。找不到则回退第一个。
     projectName.value = await findDefaultProject(projects.value)
     await load()
   } catch (e) {
@@ -781,7 +782,7 @@ async function onRefreshDeps() {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty :description="!projectName && !searchProcess.trim() ? '全部项目下请输入工作流名称搜索' : `当前${rangeKey === 'today' ? '当天' : '时间范围'}暂无工作流实例，可切换查询范围`" />
+        <el-empty :description="!projectName && !searchProcess.trim() ? '全部项目下请输入工作流名称搜索' : '暂无工作流实例'" />
       </template>
     </el-table>
 
@@ -844,7 +845,7 @@ async function onRefreshDeps() {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty :description="!projectName && !searchTask.trim() ? '全部项目下请输入任务名称搜索' : `当前${rangeKey === 'today' ? '当天' : '时间范围'}暂无任务实例，可切换查询范围`" />
+        <el-empty :description="!projectName && !searchTask.trim() ? '全部项目下请输入任务名称搜索' : '暂无任务实例'" />
       </template>
     </el-table>
 
@@ -897,10 +898,10 @@ async function onRefreshDeps() {
 
 <style scoped lang="scss">
 .ds-monitor {
-  padding: 12px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   height: 100%;
   overflow: auto;
   box-sizing: border-box;
@@ -909,15 +910,12 @@ async function onRefreshDeps() {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
-  padding: 8px 10px;
-  min-height: 46px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+  border-radius: 6px;
+  padding: 10px 12px;
   flex-wrap: wrap;
-  flex-shrink: 0;
 }
 
 .project-select {
@@ -940,7 +938,7 @@ async function onRefreshDeps() {
   flex-shrink: 0;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
+  border-radius: 6px;
   overflow: hidden;
 }
 
@@ -997,7 +995,7 @@ async function onRefreshDeps() {
   justify-content: flex-end;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
+  border-radius: 6px;
   padding: 8px 12px;
 }
 
@@ -1008,10 +1006,9 @@ async function onRefreshDeps() {
   gap: 8px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
+  border-radius: 6px;
   padding: 8px 12px;
   flex-wrap: wrap;
-  flex-shrink: 0;
 }
 
 .stat-item {
@@ -1041,7 +1038,7 @@ async function onRefreshDeps() {
 }
 
 .stat-item.running .stat-num {
-  color: #006be6;
+  color: #3b82f6;
 }
 
 .stat-item.success .stat-num {
@@ -1092,38 +1089,18 @@ async function onRefreshDeps() {
 .log-box {
   max-height: 60vh;
   overflow: auto;
-  background: var(--bd-log-bg);
+  background: #1e1e1e;
   border-radius: 4px;
   padding: 10px;
 }
 
 .log-box pre {
   margin: 0;
-  color: var(--bd-log-text);
+  color: #d4d4d4;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-@media (max-width: 900px) {
-  .ds-monitor { padding: 8px; }
-  .toolbar-spacer { display: none; }
-  .project-select { flex: 1; min-width: 180px; }
-  .search-input { flex: 1; min-width: 180px; }
-  .stat-hint { width: 100%; margin-left: 0; }
-}
-
-@media (max-width: 640px) {
-  .project-select,
-  .state-select,
-  .range-select,
-  .search-input { width: 100%; min-width: 0; }
-  .search-input { flex: 1 1 100%; }
-  .toolbar > .el-button,
-  .toolbar :deep(.el-button) { flex: 1; }
-  .stat-item { flex: 1; min-width: 0; }
-  .main-split { min-height: 520px; }
 }
 </style>

@@ -117,6 +117,7 @@ function openResource(row: { id: string; name?: string }): void {
       :data="paged"
       v-loading="loading"
       size="small"
+      border
       class="apps-table-el"
       @sort-change="onSortChange"
       @row-click="onRowClick"
@@ -180,22 +181,12 @@ function openResource(row: { id: string; name?: string }): void {
   flex-shrink: 0;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
+  border-radius: 6px;
   overflow: hidden;
 }
 
 .apps-table-el {
   width: 100%;
-}
-
-.apps-table-el :deep(.el-table__header-wrapper th.el-table__cell) {
-  background: var(--bd-table-header);
-  color: $muted;
-  font-weight: 500;
-}
-
-.apps-table-el :deep(.el-table__inner-wrapper::before) {
-  display: none;
 }
 
 .row-actions {

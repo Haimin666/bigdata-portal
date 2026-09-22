@@ -176,21 +176,18 @@ watch(
 .overview-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  padding: 0;
+  gap: 10px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 6px;
+  padding: 8px 12px;
 }
 
 .mini {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 7px;
+  gap: 3px;
   min-width: 0;
-  min-height: 88px;
-  padding: 12px 16px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: var(--bd-radius);
 }
 
 .mini-label {
@@ -219,8 +216,8 @@ watch(
 .queue-panel {
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
-  padding: 14px 16px;
+  border-radius: 6px;
+  padding: 12px 16px;
 }
 
 .panel-title {
@@ -247,16 +244,6 @@ watch(
   font-size: 12px;
   color: $muted;
   white-space: nowrap;
-}
-
-.queue-panel :deep(.el-table th.el-table__cell) {
-  background: var(--bd-table-header);
-  color: $muted;
-  font-weight: 500;
-}
-
-.queue-panel :deep(.el-table__inner-wrapper::before) {
-  display: none;
 }
 
 .empty {

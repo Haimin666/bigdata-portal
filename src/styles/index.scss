@@ -7,7 +7,8 @@ body,
 }
 
 body {
-  /* Vben 风格企业后台字体 */
+  /* 深空控制台:全局等宽字体(与状态条/侧边栏/登录页统一),中文回退系统字体
+     字体可通过管理端「主题设置」覆盖(变量 --bd-font) */
   font-family: var(
     --bd-font,
     'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
@@ -24,6 +25,21 @@ input,
 textarea,
 select {
   font-family: inherit;
+}
+
+/* 深空控制台网格背景(深浅主题由 --bd-grid-line 跟随) */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--bd-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bd-grid-line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, #000 25%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, #000 25%, transparent 78%);
 }
 
 * {
@@ -59,59 +75,8 @@ select {
   justify-content: flex-end;
   background: $panel;
   border: 1px solid $border;
-  border-radius: var(--bd-radius);
+  border-radius: 6px;
   padding: 8px 12px;
-}
-
-/* ── Vben 风格全局组件基线 ─────────────────────────────── */
-.el-card {
-  border-radius: var(--bd-radius);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
-}
-
-.el-button {
-  border-radius: 6px;
-  transition: color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-}
-.el-button:not(.is-link):not(.is-text) { min-height: 32px; }
-.el-button.is-link,
-.el-button.is-text { padding-inline: 6px; }
-.el-button > span > svg,
-.user-avatar > svg {
-  width: 1em;
-  height: 1em;
-}
-.el-button:focus-visible,
-.el-button.is-link:focus-visible,
-.el-button.is-text:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--bd-primary) 38%, transparent);
-  outline-offset: 1px;
-}
-.el-input__wrapper,
-.el-select__wrapper,
-.el-textarea__inner {
-  border-radius: 6px;
-}
-
-.el-table {
-  border-radius: var(--bd-radius);
-  overflow: hidden;
-}
-
-.el-table th.el-table__cell { font-weight: 500; }
-
-.el-dialog { border-radius: 10px; }
-
-html:not(.dark) .el-button--primary {
-  color: #fff;
-  background: var(--bd-primary);
-  border-color: var(--bd-primary);
-}
-
-html:not(.dark) .el-button--primary:hover,
-html:not(.dark) .el-button--primary:focus {
-  background: color-mix(in srgb, var(--bd-primary) 90%, transparent);
-  border-color: color-mix(in srgb, var(--bd-primary) 90%, transparent);
 }
 
 
@@ -139,22 +104,24 @@ html:not(.dark) .el-button--primary:focus {
    additionalData 注入每个组件 style,嵌套规则会被 scoped 化,导致
    只对带对应 data-v 属性的元素生效(曾使按钮覆盖失效)。 */
 html.dark {
-  /* primary 按钮:Vben 风格蓝色实心 */
+  /* primary 按钮:描边风 —— 透明底+青边+青字,hover 实心青底+深字,与登录页/状态条一致。
+     注意:用 !important 属性直覆盖而非变量 —— 实测变量覆盖在部分组件(带 data-v)上
+     background 不跟随,属性覆盖 100% 生效。 */
   .el-button--primary {
-    background: var(--el-color-primary) !important;
+    background: transparent !important;
     border-color: var(--el-color-primary) !important;
-    color: #fff !important;
-    --el-button-bg-color: var(--el-color-primary);
+    color: var(--el-color-primary) !important;
+    --el-button-bg-color: transparent;
     --el-button-border-color: var(--el-color-primary);
-    --el-button-text-color: #fff;
+    --el-button-text-color: var(--el-color-primary);
   }
   .el-button--primary:hover,
   .el-button--primary:focus,
   .el-button--primary.is-active,
   .el-button--primary:active {
-    background: color-mix(in srgb, var(--bd-primary) 90%, transparent) !important;
-    border-color: color-mix(in srgb, var(--bd-primary) 90%, transparent) !important;
-    color: #fff !important;
+    background: var(--el-color-primary) !important;
+    border-color: var(--el-color-primary) !important;
+    color: var(--bd-bg) !important;
     --el-button-hover-bg-color: var(--el-color-primary);
     --el-button-hover-border-color: var(--el-color-primary);
     --el-button-hover-text-color: var(--bd-bg);
@@ -165,9 +132,9 @@ html.dark {
 
   /* 状态 badge(el-tag light):柔和深底+低饱和彩字,消除荧光感 */
   .el-tag {
-    --el-tag-bg-color: rgba(0, 107, 230, 0.12);
-    --el-tag-border-color: rgba(0, 107, 230, 0.35);
-    --el-tag-text-color: #70adf0;
+    --el-tag-bg-color: rgba(0, 229, 255, 0.1);
+    --el-tag-border-color: rgba(0, 229, 255, 0.35);
+    --el-tag-text-color: #00e5ff;
     --el-tag-success-bg-color: rgba(103, 194, 58, 0.12);
     --el-tag-success-border-color: rgba(103, 194, 58, 0.35);
     --el-tag-success-text-color: #7fd35e;
@@ -205,13 +172,4 @@ html.dark {
     --el-switch-off-color: #23303f;
     --el-switch-off-border-color: #2c3b4d;
   }
-}
-
-@media (max-width: 768px) {
-  .el-message-box,
-  .el-dialog { max-width: calc(100vw - 24px); }
-  .el-dialog { width: calc(100vw - 24px) !important; }
-  .el-table { min-width: 720px; }
-  .el-table__body-wrapper,
-  .el-table__header-wrapper { overflow-x: auto; }
 }

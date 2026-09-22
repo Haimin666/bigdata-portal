@@ -30,37 +30,29 @@
 src/
 ├── main.ts             # 入口:主题初始化 + 加载管理端主题覆盖
 ├── App.vue             # 根组件
-├── router/index.ts     # 路由:由统一模块注册表生成
+├── router/index.ts     # 路由:native 静态路由 + 菜单驱动的 subapp 占位路由
 ├── layouts/            # 门户壳
-│   ├── MainLayout.vue      # 侧栏 + 垂直内容容器(顶栏 + TabStage)
+│   ├── MainLayout.vue      # 顶栏(状态条/UTC 时钟)+ 侧栏 + TabStage
 │   └── components/
 │       ├── SideBar.vue     # 菜单(enabledModules 白名单 + 角色过滤)
-│       ├── AppHeader.vue    # Vben 风格顶栏:折叠、面包屑、刷新、主题、用户
-│       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁;active 控制轮询)
+│       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁)
 │       └── SubAppView.vue  # 子应用 iframe 池
-├── views/              # 业务视图(见模块文档;共享 Vben 风格操作栏/响应式基线)
+├── views/              # 业务视图(见模块文档)
 ├── store/              # Pinia:auth.ts(会话/角色)、yarn.ts(应用列表/RM 选择)
-├── api/                # 后端封装:统一 request + auth/db/ds/dsDeps/hdfs/yarn
-├── api/request.ts      # 统一请求、错误与 401 处理
+├── api/                # 后端封装:auth/db/ds/dsDeps/hdfs/yarn
 ├── utils/theme.ts      # 深浅主题 + 管理端主题覆盖注入
 ├── styles/             # variables.scss(双主题 CSS 变量)/ index.scss(全局)
-├── components/         # 通用:布局容器/状态组件/弹窗/URL iframe
-├── config/menu.ts      # 统一模块注册表(菜单/路由/组件/子应用 URL)
+├── components/         # 通用:DialogMaxBtn/StateSelect/StatusBadge/UrlFrameDialog
+├── config/menu.ts      # 静态菜单表(驱动侧栏 + subapp 路由 + 角色过滤)
 └── types/              # TS 类型
 ```
 
 ### 2.2 关键机制
 
-- **模块注册表**:`config/menu.ts` 是菜单、路由、native 异步组件、子应用 iframe URL 的唯一来源,避免三处映射漂移
-- **tab 常驻池**:`TabStage` 用 `v-show` 保留已打开 tab 的状态(iframe 池保留子应用滚动/登录态),关闭才销毁;原生视图接收 `active` 控制后台轮询
-- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`。Vben 实时演示主题主色为 `hsl(212 100% 45%)`(`#006be6`)，作为唯一蓝色强调色用于主操作/选中态，背景、边框和文字保持中性；浅深主题共用该主色。2026-09 实测暗色页面背景 `#1c1e23`、前景 `#f2f2f2`、边框 `#36363a`，门户暗色基底与之对齐。
-- **菜单**:`SideBar` 按 `enabledModules`(认证关闭时,空=全部)+ 用户角色过滤;认证开启后使用用户 `modules`。**路由守卫同样校验模块白名单**(URL 直达受限页面重定向到首个可访问模块,无权限进入 `/forbidden`)。前端使用用户管理页统一维护的 `modules`，后端对执行接口和子应用代理复用该白名单做安全兜底。
-- **请求层**:业务 API 通过 `src/api/request.ts` 统一处理 JSON 契约、错误消息、超时和 401 登出。
-- **Element Plus 按需注册**:`main.ts` 全局注册项目模板实际使用的组件与 `v-loading`,不再安装全量组件插件;主题 CSS 仍全局加载,避免组件样式缺失。新增组件时需同步注册并按构建产物确认是否引入整库。
-- **构建分包**:业务视图由菜单注册表动态导入;Monaco 仅随数据库查询路由加载,不进入门户首屏。避免将查询编辑器手工提到全局 vendor chunk。
-- **重型交互按需加载**:DolphinScheduler 依赖图面板(G6)延迟到用户打开依赖侧栏时加载,避免仅看实例表时下载图布局引擎。
-- **字体**:全局管理端字体栈 `--bd-font`;SQL、日志等代码内容按组件局部使用等宽字体
-- **响应式**:`MainLayout` 在窄屏下侧栏进入抽屉模式，原生页面操作栏允许换行，表格保持横向滚动而不压缩操作列
+- **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁
+- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
+- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)
+- **字体**:全局等宽字体栈 `--bd-font`,管理端可覆盖
 
 ## 3. 网关架构(server/)
 
