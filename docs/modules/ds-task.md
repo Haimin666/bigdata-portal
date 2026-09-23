@@ -44,6 +44,9 @@ DsTaskMonitor → GET /api/ds/process-instances(海豚 API, dsToken;默认当天
 - **当日页项目列**:任务实例按当前筛选项目注入 `projectName`,工作流实例(单项目/全项目)注入 `_projectName`+`projectName`,独立「项目」列展示且可排序
 - **当日页工作流依赖侧边栏**:任务实例行「依赖级联」按钮 → `openDeps()` 右侧滑出 `el-drawer`(72%) 画布;工作流实例视图用 `processDefinitionId` 调 `/workflow-tree/:processId`,任务实例视图用 `projectName + processInstanceId` 调新增的 `/workflow-tree-by-instance/:projectName/:processInstanceId`(后端先 `instance/query-by-id` 反查 `processDefinitionCode` 再聚合);画布内 G6 有向图(dagre)渲染**当前工作流完整上下游**,节点展示工作流名称/项目/执行状态/最近实例时间,颜色标记最新实例状态(成功绿/失败红/运行中蓝/未执行灰,含 RUNNING_EXECUTION/SUBMITTED_SUCCESS 等运行态)
 - **移动端离线开发**:`mobile/src/pages/OfflinePage.vue` 以项目/工作流/工作流实例/任务实例四视图组织。工作流详情读取 `process/select-by-id` 与 `schedule/list-paging`；实例窗口固定近两天。工作流发布、启动、定时上下线、实例停止/重跑均二次确认；任务实例和实例内节点均可打开分页日志。
+- **桌面端视觉层**:任务监控按标题、筛选、统计摘要、实例列表四层组织;统计摘要使用低饱和语义色区分运行/成功/失败,实例与任务表格保持宽内容和展开层级,日志/依赖抽屉沿用统一面板边界与主题变量。
+- **标题策略**:主页面不重复展示“任务监控”标题,侧栏与 Tab 负责导航标识,具体操作说明由筛选区、统计卡和空状态承担。
+- **滚动策略**:页面和分栏根节点不滚动,工作流/任务实例表格 body 内滚动,分页条固定在表格下方,展开任务仍在表格内部显示。
 
 ## 5. 安全红线
 

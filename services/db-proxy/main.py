@@ -1,7 +1,7 @@
 """db-proxy:数据库只读 HTTP 代理服务(客户机侧)。
 
 运行在可直连数据库的客户机上,把"查询"能力以 HTTP API 暴露给平台。
-支持 MySQL 与 Oracle 的**多数据源**(一个服务连多套库,按 db 参数路由)。
+支持 MySQL、Oracle 与 Impala 的**多数据源**(一个服务连多套库,按 db 参数路由)。
 
 **所有配置集中在 datasources.json 一个文件**(代码写死路径,无需其他配置):
   - 服务配置:authToken / listenHost / listenPort / 超时 / 行数限制
@@ -10,7 +10,7 @@
   - 数据源:datasources 数组(每个源独立 type/host/port/账密/service)
 
 设计目标:
-  - 只读强制(SELECT/SHOW/DESC/EXPLAIN/WITH),杜绝写操作
+  - 网关管控读写权限;Impala 数据源可额外启用只读保护
   - 库级 + 表级白名单,防越权访问
   - 强制行数上限,防大结果集拖垮(MySQL LIMIT / Oracle 12c+ FETCH / 11g ROWNUM)
   - 连接信息只存在于客户机,平台永远不接触数据库密码
@@ -21,6 +21,7 @@
   - MySQL:  pymysql(Python 3.7 兼容)
   - Oracle: oracledb>=1.4,<2.2(Python 3.7 兼容,thin 模式无需客户端库;
             连 11g 需配 oracleClientLib 走 thick 模式)
+  - Impala(可选):impyla + sqlglot(类型检查);AI SQL 修复仅使用服务端配置
 用法:python main.py
 """
 
@@ -96,6 +97,7 @@ log = logging.getLogger("db-proxy")
 
 # Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
 from spark_engine import init_engine  # noqa: E402
+from impala_engine import ImpalaEngine  # noqa: E402
 
 SPARK_CFG = CONFIG.get("spark") or {}
 SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -130,6 +132,14 @@ if FLINK_CFG.get("enabled"):
 if FLINK_PREJOB.enabled:
     log.info("flink prejob enabled (mode=yarn-per-job, queue=%s, flinkHome=%s)",
              FLINK_PREJOB.status().get("queue"), FLINK_PREJOB.status().get("flinkHome"))
+
+# Impala 引擎(可选):impyla 未安装时不影响 MySQL/Oracle/Spark/Flink 启动;
+# 仅在 datasources.json 声明 type=impala 的数据源时实际连接。
+IMPALA_CFG = CONFIG.get("impala") or {}
+IMPALA_ENGINE = ImpalaEngine(IMPALA_CFG)
+if any(str(x.get("type", "")).lower() == "impala" for x in CONFIG.get("datasources", [])):
+    log.info("impala engine configured (driver=%s, typeCheck=%s, aiFix=%s)",
+             IMPALA_ENGINE.available, IMPALA_ENGINE.type_check_enabled, IMPALA_ENGINE.ai.enabled)
 
 # 驱动按需导入(未装对应驱动不阻塞另一个类型)
 try:
@@ -175,17 +185,21 @@ class DataSource:
         # 显示别名:下拉/展示用,缺省回退到 name
         self.label: str = str(cfg.get("label", "")).strip() or self.name
         self.type: str = str(cfg.get("type", "mysql")).strip().lower()
-        if self.type not in ("mysql", "oracle"):
-            raise ValueError(f"datasource '{self.name}' type must be mysql/oracle")
-        self.host: str = str(cfg.get("host", "127.0.0.1"))
-        self.port: int = int(cfg.get("port", 3306 if self.type == "mysql" else 1521))
+        if self.type not in ("mysql", "oracle", "impala"):
+            raise ValueError(f"datasource '{self.name}' type must be mysql/oracle/impala")
+        raw_hosts = cfg.get("hosts", cfg.get("host", "127.0.0.1"))
+        if isinstance(raw_hosts, list):
+            self.host: str = ",".join(str(x).strip() for x in raw_hosts if str(x).strip())
+        else:
+            self.host = str(raw_hosts)
+        self.port: int = int(cfg.get("port", 21050 if self.type == "impala" else 3306 if self.type == "mysql" else 1521))
         self.user: str = str(cfg.get("user", ""))
         self.password: str = str(cfg.get("password", ""))
         self.charset: str = str(
             cfg.get("charset", "utf8mb4" if self.type == "mysql" else "AL32UTF8")
         )
         # Oracle service_name / MySQL schema(可选,缺省用 name)
-        self.service: str = str(cfg.get("service", cfg.get("schema", self.name)))
+        self.service: str = str(cfg.get("database", cfg.get("service", cfg.get("schema", self.name))))
         # 只读策略(默认 false = 写操作放行,权限收口到门户网关密码解锁):
         # 配 readOnly:true 的数据源强制只读(纵深保护,如只读账号/敏感库),拒绝一切非查询 SQL
         self.read_only: bool = bool(cfg.get("readOnly", False))
@@ -215,7 +229,7 @@ class DataSource:
         """确定实际行数限制模式:配置优先,否则按 Oracle 版本自动推断。"""
         if self.row_limit:
             return self.row_limit
-        if self.type == "mysql":
+        if self.type in ("mysql", "impala"):
             return "mysql"
         # Oracle:探测主版本,11g(11)用 rownum,12+ 用 fetch
         if self._oracle_major < 0:
@@ -223,6 +237,16 @@ class DataSource:
         return "rownum" if self._oracle_major <= 11 else "fetch"
 
     def connect(self, connect_timeout: int, query_timeout: int):
+        if self.type == "impala":
+            return IMPALA_ENGINE.connect(
+                host=self.host,
+                port=self.port,
+                user=self.user,
+                password=self.password,
+                database=self.service,
+                connect_timeout=connect_timeout,
+                query_timeout=query_timeout,
+            )
         if self.type == "mysql":
             if not _HAS_MYSQL:
                 raise RuntimeError("pymysql not installed")
@@ -399,12 +423,13 @@ def _rows_to_dicts(rows: List[Any], description: List[Any]) -> List[Dict[str, An
 class DbError(Exception):
     """数据库执行错误(结构化,类似 SQL 客户端:类型 + 错误码)。"""
 
-    def __init__(self, engine: str, error_type: str, error_code, message: str):
+    def __init__(self, engine: str, error_type: str, error_code, message: str, logs: Optional[List[str]] = None):
         super().__init__(message)
         self.engine = engine
         self.error_type = error_type
         self.error_code = error_code
         self.message = message
+        self.logs = list(logs or [])
 
 
 _MYSQL_ERROR_TYPES = {
@@ -450,6 +475,23 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
             etype = _ORACLE_ERROR_TYPES.get(full, "DatabaseError")
         m = getattr(e, "message", None) or msg
         return DbError(engine, etype, code, m)
+    if engine == "impala":
+        lower = msg.lower()
+        if "authorization" in lower or "not authorized" in lower or "permission" in lower:
+            etype = "AccessDenied"
+        elif "transport" in lower or "connection" in lower or "timed out" in lower or "timeout" in lower:
+            etype = "ConnectError"
+        elif "parseexception" in lower or "syntax" in lower:
+            etype = "SyntaxError"
+        elif "type mismatch" in lower or "incompatible types" in lower or "cannot resolve" in lower:
+            etype = "TypeMismatch"
+        elif "analysisexception" in lower or "column not found" in lower:
+            etype = "ColumnNotFound"
+        elif "table not found" in lower or "unknown table" in lower:
+            etype = "TableNotFound"
+        else:
+            etype = "DatabaseError"
+        return DbError(engine, etype, None, msg)
     return DbError(engine, "DatabaseError", None, msg)
 
 
@@ -501,8 +543,9 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
         else:
             fetched = cur.fetchmany(limit + 1)
             truncated = len(fetched) > limit
-            rows = _rows_to_dicts(fetched[:limit], cur.description)
-            columns = list(rows[0].keys()) if rows else []
+            description = list(cur.description or [])
+            columns = [str(d[0]).lower() for d in description]
+            rows = _rows_to_dicts(fetched[:limit], description)
         cur.close()
         return {
             "columns": columns,
@@ -526,6 +569,101 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
     }
 
 
+def _impala_read_only(sql: str) -> bool:
+    """AI 修复只允许保持只读语义,避免模型把查询改成 DML/DDL。"""
+    clean = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql or "").strip()
+    if not READ_ONLY_SQL_RE.match(clean):
+        return False
+    if re.match(r"^WITH\b", clean, re.IGNORECASE) and re.search(
+        r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE)\b", clean, re.IGNORECASE
+    ):
+        return False
+    return IMPALA_ENGINE.is_read_only_sql(clean)
+
+
+def _execute_database(
+    ds: DataSource,
+    conn: Any,
+    clean_sql: str,
+    is_select: bool,
+    limit: int,
+    start: float,
+    job_logs: Optional[List[str]] = None,
+    query_timeout: Optional[int] = None,
+) -> Dict[str, Any]:
+    """执行数据库语句,并为 Impala 增加类型检查、AI 修复与结构化日志。"""
+    logs: List[str] = job_logs if job_logs is not None else []
+    run_sql = clean_sql
+    schema_summary = None
+    if ds.type == "impala" and ds.read_only and not is_select:
+        logs.append("[guard] write rejected: Impala datasource is read-only")
+        raise DbError(ds.type, "ReadOnly", None, "Impala datasource is configured read-only", logs)
+    if ds.type == "impala" and is_select:
+        schema_conn = None
+        try:
+            # Impyla cursors share a Thrift transport/session; isolate DESCRIBE from query execution.
+            if IMPALA_ENGINE.type_check_available:
+                schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
+                run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(schema_conn, run_sql, logs)
+            elif IMPALA_ENGINE.type_check_enabled:
+                logs.append("[type-check] skipped: sqlglot is not installed")
+        except Exception as exc:
+            logs.append("[type-check] skipped: %s" % (str(exc) or exc.__class__.__name__))
+        finally:
+            if schema_conn is not None:
+                try:
+                    schema_conn.close()
+                except Exception:
+                    pass
+    ai_attempt = 0
+    while True:
+        logs.append("[execute] attempt %d" % (ai_attempt + 1))
+        try:
+            result = _execute_query(ds, conn, run_sql, is_select, limit, start)
+            if ds.type == "impala":
+                logs.append("[execute] completed in %sms" % result.get("costMs", 0))
+                result["engine"] = "impala"
+                result["executedSql"] = run_sql
+                result["logs"] = logs
+            return result
+        except Exception as exc:
+            if ds.type != "impala" or not is_select:
+                de = _extract_sql_error(exc, ds.type)
+                de.logs = logs
+                raise de
+            de = _extract_sql_error(exc, ds.type)
+            if de.error_type not in ("SyntaxError", "TypeMismatch", "ColumnNotFound", "TableNotFound"):
+                logs.append("[ai-fix] skipped for %s" % de.error_type)
+                de.logs = logs
+                raise de
+            ai_attempt += 1
+            new_sql = IMPALA_ENGINE.rewrite_sql(
+                run_sql,
+                de.message,
+                schema_summary,
+                logs,
+                ai_attempt,
+            )
+            if not new_sql:
+                de = _extract_sql_error(exc, ds.type)
+                de.logs = logs
+                raise de
+            if not _impala_read_only(new_sql):
+                logs.append("[ai-fix] rejected: rewritten SQL is not read-only")
+                de = _extract_sql_error(exc, ds.type)
+                de.logs = logs
+                raise de
+            run_sql = new_sql.strip().rstrip(";").strip()
+            try:
+                schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
+                try:
+                    run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(schema_conn, run_sql, logs)
+                finally:
+                    schema_conn.close()
+            except Exception as type_exc:
+                logs.append("[type-check] retry skipped: %s" % (str(type_exc) or type_exc.__class__.__name__))
+
+
 def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync") -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
@@ -542,9 +680,9 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
             de = DbError(ds.type, "ConnectError", de.error_code, de.message)
         if not is_select:
             _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
-        raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}")
+        raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}", de.logs)
     try:
-        result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
+        result = _execute_database(ds, conn, clean_sql, is_select, limit, start, query_timeout=q_timeout)
         if not is_select:
             affected = (
                 result["rows"][0].get("affected_rows") if result.get("rows") else None
@@ -554,8 +692,10 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
     except Exception as e:
         if not is_select:
             _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
-        de = _extract_sql_error(e, ds.type)
-        raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}")
+        de = e if isinstance(e, DbError) else _extract_sql_error(e, ds.type)
+        if not de.logs:
+            de.logs = []
+        raise DbError(ds.type, de.error_type, de.error_code, f"query failed: {de.message}", de.logs)
     finally:
         try:
             conn.close()
@@ -613,7 +753,8 @@ class DbJobManager:
                     "id": job_id, "state": "queued", "db": db, "sql": sql,
                     "timeout_ms": timeout_ms, "created_at": time.time(),
                     "started_at": None, "finished_at": None,
-                    "result": None, "error": None, "conn": None, "cancel_requested": False,
+                    "result": None, "error": None, "logs": [], "executed_sql": None,
+                    "conn": None, "cancel_requested": False,
                 }
             threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
             return job_id
@@ -639,6 +780,7 @@ class DbJobManager:
         j["state"] = "running"
         j["started_at"] = time.time()
         conn = None
+        ds = None
         clean_sql = ""
         is_select = False
         start = time.time()
@@ -648,7 +790,7 @@ class DbJobManager:
             conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
             j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
             try:
-                result = _execute_query(ds, conn, clean_sql, is_select, limit, start)
+                result = _execute_database(ds, conn, clean_sql, is_select, limit, start, j["logs"], q_timeout)
             finally:
                 j["conn"] = None
                 try:
@@ -662,6 +804,8 @@ class DbJobManager:
                 )
                 _write_audit(j["db"], ds.type, clean_sql, affected, result["costMs"], "async")
             j["result"] = result
+            j["logs"] = result.get("logs", [])
+            j["executed_sql"] = result.get("executedSql")
             j["state"] = "done"
         except Exception as e:
             if j.get("cancel_requested") or (conn is not None and str(e).find("closed") >= 0):
@@ -669,8 +813,10 @@ class DbJobManager:
                 j["state"] = "cancelled"
             else:
                 # 写语句执行失败也审计(仅当 _prepare_query 已通过,避免 readOnly 等前置拦截重复记录)
-                if not is_select and clean_sql:
+                if not is_select and clean_sql and ds is not None:
                     _write_audit(j["db"], ds.type, clean_sql, None, (time.time() - start) * 1000, "async")
+                if isinstance(e, DbError):
+                    j["logs"] = e.logs
                 j["error"] = str(e)[:2000]
                 j["state"] = "failed"
         finally:
@@ -686,6 +832,7 @@ class DbJobManager:
                 "id": j["id"], "state": j["state"], "db": j["db"], "sql": j["sql"][:500],
                 "createdAt": j["created_at"], "startedAt": j["started_at"],
                 "finishedAt": j["finished_at"], "result": j["result"], "error": j["error"],
+                "logs": list(j.get("logs") or []), "executedSql": j.get("executed_sql"),
             }
 
     def cancel(self, job_id: str) -> bool:
@@ -770,6 +917,7 @@ def query(
                     (" [%s]" % e.error_code) if e.error_code is not None else "",
                     e.message,
                 )[:500],
+                "logs": e.logs,
             },
         )
     except HTTPException:
@@ -844,6 +992,7 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),
+            "impala": IMPALA_ENGINE.status(),
             "spark": SPARK_ENGINE.status(),
             "flink": FLINK_ENGINE.status(),
         },
@@ -1056,7 +1205,7 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
     out: list = []
     seen: set = set()
     for ds in DATASOURCES.values():
-        ent = (ds.type, ds.host, ds.port)
+        ent = (ds.type, ds.host, ds.port, ds.service if ds.type == "impala" else "")
         if ent in seen:
             continue
         seen.add(ent)
@@ -1074,7 +1223,7 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
                     )
                     for schema, tbl in cur.fetchall():
                         out.append({"engine": "mysql", "db": schema, "table": tbl})
-                else:  # oracle
+                elif ds.type == "oracle":
                     cur.execute(
                         "SELECT owner, table_name FROM all_tables "
                         "WHERE LOWER(table_name) LIKE :1 AND ROWNUM <= :2 ORDER BY owner, table_name",
@@ -1082,6 +1231,14 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
                     )
                     for owner, tbl in cur.fetchall():
                         out.append({"engine": "oracle", "db": owner, "table": tbl})
+                else:  # impala
+                    cur.execute("SHOW TABLES")
+                    for row in cur.fetchall():
+                        tbl = str(row[0])
+                        if kw.lower() in tbl.lower():
+                            out.append({"engine": "impala", "db": ds.name, "table": tbl})
+                            if len(out) >= _SEARCH_LIMIT:
+                                break
             finally:
                 conn.close()
         except Exception:
@@ -1545,6 +1702,16 @@ FILES_DIR = os.path.join(SCRIPTS_DIR, "files")
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_$#.\- ]+$")
 
 
+def _impala_ident(name: str) -> str:
+    """Quote a validated Impala identifier, including optional database qualification."""
+    if not _TABLE_NAME_RE.match(name or ""):
+        raise HTTPException(status_code=400, detail="非法表名")
+    parts = [part.strip().strip("`") for part in name.split(".") if part.strip()]
+    if not parts:
+        raise HTTPException(status_code=400, detail="非法表名")
+    return ".".join("`%s`" % part for part in parts)
+
+
 def _ensure_scripts() -> None:
     os.makedirs(FILES_DIR, exist_ok=True)
     if not os.path.exists(TREE_FILE):
@@ -1746,6 +1913,9 @@ def tables(
                 }
                 for d in rows
             ]
+        elif ds.type == "impala":
+            cur.execute("SHOW TABLES")
+            items = [{"name": str(r[0]), "comment": ""} for r in cur.fetchall()]
         else:
             # 当前用户 schema 下表 + 注释(Oracle 注释可为 NULL → 空串)
             cur.execute(
@@ -1801,6 +1971,16 @@ def fields(
                             "default": d.get("Default"),
                         }
                     )
+                cols.append(base)
+        elif ds.type == "impala":
+            cur.execute("DESCRIBE " + _impala_ident(table))
+            cols = []
+            for row in cur.fetchall():
+                if not row or not row[0] or str(row[0]).startswith("#"):
+                    continue
+                base = {"name": str(row[0]), "type": str(row[1] or "") if len(row) > 1 else ""}
+                if detail:
+                    base.update({"comment": str(row[2] or "") if len(row) > 2 else "", "nullable": True, "key": ""})
                 cols.append(base)
         else:
             # 主键列集合(约束型 P)
@@ -1870,6 +2050,10 @@ def ddl(
                 raise HTTPException(status_code=404, detail=f"table '{table}' not found")
             d = {k: v for k, v in row.items()} if hasattr(row, "items") else {}
             ddl_text = str(d.get("Create Table") or (row[1] if len(row) > 1 else "") or "")
+        elif ds.type == "impala":
+            cur.execute("SHOW CREATE TABLE " + _impala_ident(table))
+            rows = cur.fetchall()
+            ddl_text = "\n".join(str(r[0]) for r in rows if r and r[0])
         else:
             cur.execute(
                 "SELECT DBMS_METADATA.GET_DDL('TABLE', :t) FROM dual",
@@ -1948,6 +2132,15 @@ def schema(
                     t["columns"].append(
                         {"name": str(d.get("column_name") or ""), "type": str(d.get("column_type") or "")}
                     )
+        elif ds.type == "impala":
+            cur.execute("SHOW TABLES")
+            table_rows = cur.fetchall()
+            tables = [{"name": str(r[0] or ""), "comment": "", "columns": []} for r in table_rows]
+            for table_meta in tables[:SCHEMA_MAX_TABLES]:
+                cur.execute("DESCRIBE " + _impala_ident(table_meta["name"]))
+                for col in cur.fetchall():
+                    if col and col[0] and not str(col[0]).startswith("#"):
+                        table_meta["columns"].append({"name": str(col[0]), "type": str(col[1] or "")})
         else:
             cur.execute(
                 "SELECT t.table_name, c.comments FROM all_tables t "
@@ -2220,6 +2413,10 @@ def explain(
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if rows else []
                 return {"code": 0, "data": {"kind": "table", "columns": columns, "rows": rows}}
+        elif ds.type == "impala":
+            cur.execute("EXPLAIN " + clean)
+            lines = [str(r[0]) for r in cur.fetchall() if r and r[0] is not None]
+            return {"code": 0, "data": {"kind": "table", "columns": ["plan"], "rows": [{"plan": line} for line in lines]}}
         else:
             cur.execute("EXPLAIN PLAN FOR " + clean)
             try:

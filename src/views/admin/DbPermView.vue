@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Delete, EditPen } from '@element-plus/icons-vue'
+import { Plus, Delete, EditPen } from '@element-plus/icons-vue'
 import { getDbPerms, saveDbPerms, listDataSources, type DbUserRule, type DbRoleRule } from '@/api/db'
 import { userApi, type RolesDef } from '@/api/auth'
 import DbRuleEditor, { type DbRuleV2 } from './DbRuleEditor.vue'
+import TableToolbar from '@/components/TableToolbar.vue'
 
 defineOptions({ name: 'DbPermView' })
 
@@ -22,6 +23,7 @@ const defaultDeny = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const loadFailed = ref(false)
+const tableDensity = ref<'large' | 'default' | 'small'>('small')
 
 // ── 加载 ─────────────────────────────────────────────────
 async function load() {
@@ -207,19 +209,28 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
 
 <template>
   <div class="db-perm">
-    <div class="head">
-      <span class="title">数据权限矩阵</span>
-      <el-tooltip content="开启后,未配置任何规则的用户/角色将被拒绝访问数据库模块(admin 不受限);关闭则未配置者放行(仅受 db-proxy 全局白名单兜底)" placement="bottom">
-        <span class="deny-switch">
-          默认拒绝
-          <el-switch :model-value="defaultDeny" size="small" @change="onToggleDefaultDeny" />
-        </span>
-      </el-tooltip>
-      <el-button type="primary" size="small" :icon="Plus" @click="openCreate(activeTab)">
-        新增{{ activeTab === 'user' ? '用户' : '角色' }}规则
-      </el-button>
-      <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-    </div>
+    <TableToolbar
+      :loading="loading"
+      density="small"
+      storage-key="db-permissions"
+      @update:density="tableDensity = $event"
+      @refresh="load"
+    >
+      <template #filters>
+        <span class="toolbar-title">数据权限矩阵</span>
+        <el-tooltip content="开启后,未配置任何规则的用户/角色将被拒绝访问数据库模块(admin 不受限);关闭则未配置者放行(仅受 db-proxy 全局白名单兜底)" placement="bottom">
+          <span class="deny-switch">
+            默认拒绝
+            <el-switch :model-value="defaultDeny" size="small" @change="onToggleDefaultDeny" />
+          </span>
+        </el-tooltip>
+      </template>
+      <template #actions>
+        <el-button type="primary" :icon="Plus" @click="openCreate(activeTab)">
+          新增{{ activeTab === 'user' ? '用户' : '角色' }}规则
+        </el-button>
+      </template>
+    </TableToolbar>
 
     <el-alert type="info" :closable="false" show-icon class="hint">
       匹配顺序:用户规则优先 —— 命中用户规则的用户不再回退到其角色规则;未命中再用角色规则。admin 不受限。{{ defaultDeny ? '当前为默认拒绝模式:未配置规则的用户/角色一律禁止。' : '当前未配置规则的用户/角色一律放行(建议把预设角色全部配置后开启「默认拒绝」)。' }}
@@ -228,10 +239,10 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
       权限规则加载失败,请确认网关服务可用后重试。
     </el-alert>
 
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" class="perm-tabs">
       <!-- 用户规则 -->
       <el-tab-pane label="用户规则" name="user">
-        <el-table v-loading="loading" :data="userRules" size="small" border empty-text="暂无用户规则,点击「新增用户规则」配置">
+        <el-table v-loading="loading" :data="userRules" :size="tableDensity" border height="100%" class="perm-table" empty-text="暂无用户规则,点击「新增用户规则」配置">
           <el-table-column prop="user" label="用户名" min-width="140" />
           <el-table-column label="引擎规则" min-width="280">
             <template #default="{ row }">
@@ -259,7 +270,7 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
 
       <!-- 角色规则(预设角色全量展示:未配置的也可直接编辑;已配置的自定义角色追加在后) -->
       <el-tab-pane label="角色规则" name="role">
-        <el-table v-loading="loading" :data="roleRows" size="small" border empty-text="暂无预设角色">
+        <el-table v-loading="loading" :data="roleRows" :size="tableDensity" border height="100%" class="perm-table" empty-text="暂无预设角色">
           <el-table-column label="角色名" min-width="160">
             <template #default="{ row }">
               <span>{{ row._title }}({{ row.role }})</span>
@@ -308,18 +319,16 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
 .db-perm {
   padding: 16px;
   height: 100%;
-  overflow: auto;
-}
-.head {
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+  flex-direction: column;
+  overflow: hidden;
 }
-.title {
+.toolbar-title {
   font-size: 16px;
   font-weight: 600;
-  margin-right: auto;
+  color: $text;
+  white-space: nowrap;
 }
 .deny-switch {
   display: inline-flex;
@@ -341,9 +350,30 @@ function subjectOf(rule: DbUserRule | DbRoleRule): string {
 .form-hint {
   margin-left: 8px;
   font-size: 12px;
-  color: #909399;
+  color: $muted;
 }
 .muted {
-  color: #c0c4cc;
+  color: $muted;
+}
+.perm-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.perm-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.perm-tabs :deep(.el-tab-pane) {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.perm-table {
+  flex: 1;
+  min-height: 0;
 }
 </style>

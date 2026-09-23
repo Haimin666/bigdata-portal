@@ -15,10 +15,22 @@
     "th_ccrs",
     "sqqy_ccrs",
     "pre_ccrs",
-    "finance_order_trade"
+    "finance_order_trade",
+    "impala_warehouse"
   ],
   "allowedTables": [],
   "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
+  "impala": {
+    "typeCheck": {"enabled": true},
+    "aiFix": {
+      "enabled": false,
+      "baseUrl": "https://your-compatible-api.example/v1",
+      "apiKey": "CHANGE_ME",
+      "model": "CHANGE_ME",
+      "timeout": 60,
+      "maxAttempts": 2
+    }
+  },
   "spark": {
     "enabled": false,
     "master": "yarn",
@@ -183,6 +195,17 @@
       "user": "financemxh_o0",
       "password": "CHANGE_ME",
       "schema": "finance_order_trade"
+    },
+    {
+      "name": "impala_warehouse",
+      "label": "Impala",
+      "type": "impala",
+      "hosts": ["CHANGE_ME_IMPALA_HOST"],
+      "port": 21050,
+      "user": "CHANGE_ME",
+      "password": "CHANGE_ME",
+      "database": "default",
+      "readOnly": true
     }
   ]
 }

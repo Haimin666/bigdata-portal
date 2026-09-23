@@ -38,6 +38,7 @@ const emit = defineEmits<{
 const ENGINE_OPTIONS = [
   { value: 'mysql', label: 'MySQL' },
   { value: 'oracle', label: 'Oracle' },
+  { value: 'impala', label: 'Impala' },
   { value: '*', label: '全部引擎' }
 ]
 
@@ -260,7 +261,7 @@ function save() {
 }
 .rule-tip {
   font-size: 12px;
-  color: #909399;
+  color: var(--bd-muted, #909399);
   line-height: 1.5;
 }
 </style>

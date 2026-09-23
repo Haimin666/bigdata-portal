@@ -1,65 +1,74 @@
-// ── 全局主题色(亮/暗双主题 · 深空控制台风格)────────────────────
+// ── 全局主题色(亮/暗双主题 · 低饱和蓝灰管理台风格)────────────────
 // 方式:SCSS 变量引用 CSS 变量,挂在 html 根元素。
-//   - :root       亮色(默认)  —— 白底控制台
-//   - html.dark   深色(html 上挂 dark class 即全局切换) —— 深空黑 + 电光青
+//   - :root       亮色(默认)  —— 白底蓝灰管理台
+//   - html.dark   深色(html 上挂 dark class 即全局切换) —— 深蓝灰工作台
 // 所有组件内 $bg/$panel/$border/$text/$muted/$primary 自动跟随主题,
 // 无需改动各组件样式。Element Plus 深色组件依赖 html.dark 同款约定。
 
 /* ── 亮色(浅色控制台)── */
 :root {
-  /* 全局字体栈(管理端「主题设置」可覆盖);body 与 Element Plus 均引用此变量 */
-  --bd-font: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', 'PingFang SC',
-    'Microsoft YaHei', monospace;
-  --bd-primary: #00849c;
-  --bd-bg: #eef3f8;
+  /* 全局字体栈(管理端「主题设置」可覆盖);数据编辑器自行使用等宽字体 */
+  --bd-font: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --bd-primary: #3b82f6;
+  --bd-bg: #f5f7fb;
   --bd-panel: #ffffff;
-  --bd-border: rgba(11, 74, 104, 0.16);
-  --bd-text: #0d2433;
+  --bd-border: #e5e7eb;
+  --bd-text: #1f2937;
+  --bd-muted: #6b7280;
+  --bd-primary-soft: #eff6ff;
+  --bd-shadow: 0 8px 24px rgba(30, 64, 175, 0.08);
 
-  /* Element Plus 主色对齐(青,替代默认蓝) */
-  --el-color-primary: #00849c;
-  --el-color-primary-light-3: #33a2b5;
-  --el-color-primary-light-5: #66b9c7;
-  --el-color-primary-light-7: #99d0da;
-  --el-color-primary-light-8: #b3dce3;
-  --el-color-primary-light-9: #cce8ed;
-  --el-color-primary-dark-2: #006a7d;
+  /* Element Plus 主色对齐 */
+  --el-color-primary: #3b82f6;
+  --el-color-primary-light-3: #60a5fa;
+  --el-color-primary-light-5: #93c5fd;
+  --el-color-primary-light-7: #bfdbfe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-primary-dark-2: #2563eb;
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 999px;
 
-  /* Element Plus 字体统一为深空控制台等宽系(可被 --bd-font 覆盖) */
+  /* Element Plus 字体与桌面端管理台统一 */
   --el-font-family: var(--bd-font);
-  --bd-muted: #5d7a8c;
-  --bd-table-header: #f1f6fa;
-  --bd-table-hover: #e9f2f8;
-  --bd-sidebar: #e6edf4;
-  --bd-panel-sub: #f4f8fc;
-  --bd-grid-line: rgba(11, 74, 104, 0.07);
+  --bd-table-header: #f8fafc;
+  --bd-table-hover: #f0f6ff;
+  --bd-sidebar: #ffffff;
+  --bd-panel-sub: #f8fafc;
+  --bd-grid-line: transparent;
 }
 
-/* ── 深色(深空控制台)── */
+/* ── 深色(蓝灰工作台)── */
 html.dark {
-  --bd-primary: #00e5ff;
-  --bd-bg: #070b12;
-  --bd-panel: #0c1420;
-  --bd-border: rgba(0, 229, 255, 0.16);
-  --bd-text: #cfe9f2;
-  --bd-muted: #5f7d8c;
-  --bd-table-header: #0a1420;
-  --bd-table-hover: #101b2a;
-  --bd-sidebar: #0a1019;
-  --bd-panel-sub: #0a1019;
-  --bd-grid-line: rgba(0, 229, 255, 0.06);
+  --bd-primary: #60a5fa;
+  --bd-bg: #111827;
+  --bd-panel: #182233;
+  --bd-border: #2b374a;
+  --bd-text: #e5edf7;
+  --bd-muted: #94a3b8;
+  --bd-primary-soft: #1e3a5f;
+  --bd-shadow: 0 8px 24px rgba(2, 6, 23, 0.28);
+  --bd-table-header: #1f2937;
+  --bd-table-hover: #22304a;
+  --bd-sidebar: #131c2b;
+  --bd-panel-sub: #111827;
+  --bd-grid-line: transparent;
 
-  /* Element Plus 主色对齐(电光青,替代默认蓝) */
-  --el-color-primary: #00e5ff;
-  --el-color-primary-light-3: #33eaff;
-  --el-color-primary-light-5: #66efff;
-  --el-color-primary-light-7: #99f5ff;
-  --el-color-primary-light-8: #b3f8ff;
-  --el-color-primary-light-9: #ccfbff;
-  --el-color-primary-dark-2: #00b8cc;
+  /* Element Plus 主色对齐 */
+  --el-color-primary: #60a5fa;
+  --el-color-primary-light-3: #93c5fd;
+  --el-color-primary-light-5: #bfdbfe;
+  --el-color-primary-light-7: #dbeafe;
+  --el-color-primary-light-8: #e0f2fe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-primary-dark-2: #3b82f6;
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 999px;
 }
 
-/* ── 暗色组件级覆盖(深空控制台一致)──────────────────────────
+/* ── 暗色组件级覆盖(蓝灰管理台一致)──────────────────────────
    注意:必须放 index.scss(全局非 scoped)。variables.scss 被
    additionalData 注入每个组件 style,组件级覆盖放那里会被 scoped 化,
    只对带对应 data-v 属性的元素生效(曾导致按钮覆盖失效)。 */

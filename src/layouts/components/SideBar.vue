@@ -19,7 +19,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'select', path: string): void
-  (e: 'toggle-collapse'): void
 }>()
 
 const icons: Record<string, Component> = {
@@ -66,7 +65,11 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-aside :width="props.collapsed ? '64px' : '220px'" class="portal-aside">
+  <el-aside
+    :width="props.collapsed ? '64px' : '220px'"
+    class="portal-aside"
+    :class="{ 'is-collapsed': props.collapsed }"
+  >
     <div class="portal-logo">
       <span class="logo-dot"></span>
       <span class="logo-text">BIGDATA 门户</span>
@@ -84,36 +87,49 @@ onMounted(async () => {
         </template>
       </el-menu-item>
     </el-menu>
-    <!-- 折叠按钮:位于侧边栏右边缘栏线,垂直居中,箭头指示展开方向 -->
-    <div class="collapse-bar" :class="{ collapsed: props.collapsed }" @click="emit('toggle-collapse')">
-      <span class="collapse-arrow"></span>
-    </div>
   </el-aside>
 </template>
 
 <style scoped lang="scss">
 .portal-aside {
   position: relative;
-  background: var(--bd-sidebar, #f0f1f5);
+  background: var(--bd-sidebar, #ffffff);
   border-right: 1px solid $border;
-  transition: width 0.2s;
-  overflow: visible;
+  transition: width 0.22s ease, background-color 0.22s ease, border-color 0.22s ease;
+  overflow: hidden;
 }
 
 .portal-logo {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   height: 56px;
+  padding: 0 18px;
   font-size: 15px;
   font-weight: 700;
-  letter-spacing: 3px;
+  letter-spacing: 0.01em;
   color: $text;
   white-space: nowrap;
   overflow: hidden;
-  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
   border-bottom: 1px solid var(--bd-border);
+}
+.portal-aside.is-collapsed {
+  .portal-logo {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .logo-text {
+    display: none;
+  }
+
+  .portal-menu :deep(.el-menu-item) {
+    justify-content: center;
+    margin-left: 10px;
+    margin-right: 10px;
+    padding: 0 !important;
+  }
 }
 .logo-dot {
   width: 7px;
@@ -132,69 +148,29 @@ onMounted(async () => {
 .portal-menu {
   border-right: none;
   background: transparent;
+  padding: 8px 0;
 
-  /* 菜单项 hover/选中:深空控制台(青色 ▸ 指示) */
+  /* 菜单项采用轻量圆角状态,保持现有侧栏宽度与折叠行为 */
   :deep(.el-menu-item) {
     font-size: 13px;
-    letter-spacing: 1px;
+    letter-spacing: 0;
     color: $muted;
     height: 44px;
     line-height: 44px;
-    transition: color 0.2s, background 0.2s;
+    margin: 3px 10px;
+    padding: 0 12px !important;
+    border-radius: 8px;
+    transition: color 0.18s ease, background 0.18s ease;
   }
   :deep(.el-menu-item:hover) {
     color: $text;
-    background: color-mix(in srgb, $primary 6%, transparent);
+    background: var(--bd-panel-sub);
   }
   :deep(.el-menu-item.is-active) {
     color: $primary;
-    background: color-mix(in srgb, $primary 9%, transparent);
-    border-right: 2px solid $primary;
-  }
-  :deep(.el-menu-item.is-active)::before {
-    content: '▸';
-    margin-right: 6px;
-    font-size: 11px;
+    background: var(--bd-primary-soft);
+    font-weight: 600;
   }
 }
 
-.collapse-bar {
-  position: absolute;
-  right: -1px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 40px;
-  border: 1px solid $border;
-  background: $panel;
-  cursor: pointer;
-  z-index: 20;
-  border-radius: 0 6px 6px 0;
-  box-shadow: 1px 0 4px rgba(0, 0, 0, 0.06);
-
-  &:hover {
-    border-color: $primary;
-    .collapse-arrow {
-      border-color: $primary;
-    }
-  }
-}
-
-/* 纯 CSS 箭头:指向折叠后的方向(展开时→ 表示可收,折叠时← 表示可展) */
-.collapse-arrow {
-  width: 6px;
-  height: 6px;
-  border-top: 2px solid $muted;
-  border-right: 2px solid $muted;
-  transform: rotate(45deg);
-  transition: transform 0.2s;
-
-  /* 折叠时箭头反向 */
-  .collapsed & {
-    transform: rotate(225deg);
-  }
-}
 </style>

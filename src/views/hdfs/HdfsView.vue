@@ -2,11 +2,13 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowUp, Document, Folder, HomeFilled, Position, Refresh } from '@element-plus/icons-vue'
+import { ArrowUp, Document, Folder, HomeFilled, Position } from '@element-plus/icons-vue'
 import { listStatus, fetchHdfsDiskOverview } from '@/api/hdfs'
 import { formatBytes, formatTimestamp } from '@/utils/format'
 import type { HdfsDiskOverview, HdfsFileStatus } from '@/types/hdfs'
 import HdfsDiskOverviewView from './HdfsDiskOverview.vue'
+import TableToolbar from '@/components/TableToolbar.vue'
+import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'HdfsView' })
 
@@ -46,6 +48,7 @@ onUnmounted(() => {
 // 分页(前端分页:WebHDFS LISTSTATUS 不支持分页参数)
 const page = ref(0)
 const pageSize = ref(20)
+const tableDensity = ref<'large' | 'default' | 'small'>('default')
 
 const segments = computed(() => path.value.split('/').filter(Boolean))
 const isRoot = computed(() => path.value === '/')
@@ -144,7 +147,12 @@ watch(path, (p) => {
   <div class="hdfs-view">
     <HdfsDiskOverviewView :data="diskData" :loading="diskLoading" />
 
-    <div class="toolbar">
+    <TableToolbar
+      v-model:density="tableDensity"
+      storage-key="hdfs-files"
+      :loading="loading"
+      @refresh="refresh"
+    >
       <el-input
         v-model="pathInput"
         class="path-input"
@@ -157,13 +165,10 @@ watch(path, (p) => {
         </template>
       </el-input>
 
-      <div class="toolbar-spacer" />
-
       <el-tooltip content="上级目录">
         <el-button :disabled="isRoot" :icon="ArrowUp" circle @click="goUp" />
       </el-tooltip>
-      <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新</el-button>
-    </div>
+    </TableToolbar>
 
     <div class="path-bar">
       <el-breadcrumb class="breadcrumb" separator="/">
@@ -178,18 +183,19 @@ watch(path, (p) => {
       <span class="path-full">{{ path }}</span>
     </div>
 
-    <el-result v-if="error" icon="error" title="加载失败" :sub-title="error">
-      <template #extra>
+    <StateView v-if="error" mode="error" :description="error" @retry="refresh">
+      <template #actions>
         <el-button type="primary" @click="refresh">重试</el-button>
         <el-button v-if="!isRoot" @click="goUp">返回上级</el-button>
       </template>
-    </el-result>
+    </StateView>
 
     <el-table
       v-else
       v-loading="loading"
+      :size="tableDensity"
+      height="100%"
       :data="pagedEntries"
-      border
       class="file-table"
       @row-click="onRowClick"
     >
@@ -218,7 +224,7 @@ watch(path, (p) => {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="空目录" />
+        <StateView mode="empty" compact description="空目录" />
       </template>
     </el-table>
 
@@ -241,9 +247,10 @@ watch(path, (p) => {
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   height: 100%;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
@@ -268,8 +275,9 @@ watch(path, (p) => {
   gap: 12px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .path-full {
@@ -297,13 +305,17 @@ watch(path, (p) => {
 }
 
 .file-table {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .pagination-bar {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   background: $panel;

@@ -199,7 +199,7 @@ onMounted(async () => {
   }
 })
 
-const ENGINE_LABEL: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', spark: 'Spark' }
+const ENGINE_LABEL: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', spark: 'Spark' }
 
 /** 树懒加载:引擎组 → 库 → 表 → 字段(mysql/oracle 走 db-proxy,spark 走 /spark/schema) */
 async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
@@ -209,7 +209,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
       const groups: CatNode[] = []
       for (const d of props.dbs) {
         const t = d.type
-        if (t !== 'mysql' && t !== 'oracle') continue
+        if (t !== 'mysql' && t !== 'oracle' && t !== 'impala') continue
         if (!groups.some((g) => g.engine === t)) {
           groups.push({ id: `eng:${t}`, name: ENGINE_LABEL[t] || t, kind: 'engine', engine: t, isLeaf: false })
         }
@@ -758,19 +758,21 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  border-right: 1px solid $border;
-  background: var(--bd-panel-sub, #fafbfc);
+  background: var(--bd-panel, #fff);
   overflow: hidden;
 }
 
 .panel-tabs {
   display: flex;
+  padding: 4px 4px 0;
   border-bottom: 1px solid $border;
+  background: var(--bd-panel-sub, #fafbfc);
   flex-shrink: 0;
 
   .ptab {
     flex: 1;
-    padding: 8px 0;
+    position: relative;
+    padding: 9px 0 8px;
     text-align: center;
     font-size: 14px;
     color: $muted;
@@ -782,6 +784,16 @@ onUnmounted(() => {
       color: $primary;
       border-bottom-color: $primary;
       font-weight: 600;
+    }
+
+    &:hover {
+      color: $primary;
+      background: var(--bd-table-hover);
+    }
+
+    &:focus-visible {
+      outline: 2px solid color-mix(in srgb, $primary 55%, transparent);
+      outline-offset: -2px;
     }
   }
 }
@@ -797,8 +809,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
+  padding: 8px 10px 7px;
   border-bottom: 1px solid $border;
+  background: var(--bd-panel-sub, #fafbfc);
   flex-shrink: 0;
 
   .toolbar-title {
@@ -815,11 +828,12 @@ onUnmounted(() => {
 .tree-wrap {
   flex: 1;
   overflow: auto;
-  padding: 4px;
+  padding: 6px 5px 8px;
+  scrollbar-width: thin;
 }
 
 .tree-search {
-  margin: 6px 8px 0;
+  margin: 8px 10px 0;
   flex-shrink: 0;
 }
 
@@ -847,7 +861,7 @@ onUnmounted(() => {
   color: $text;
 }
 .search-hit:hover {
-  background: rgba(120, 140, 180, 0.12);
+  background: var(--bd-table-hover);
 }
 .search-hit-engine {
   flex-shrink: 0;
@@ -861,6 +875,9 @@ onUnmounted(() => {
   }
   &.oracle {
     color: #d97706;
+  }
+  &.impala {
+    color: #0f766e;
   }
 }
 .search-hit-name {
@@ -895,7 +912,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 7px 8px;
   border-radius: 4px;
   cursor: pointer;
 
@@ -966,8 +983,8 @@ onUnmounted(() => {
   background: transparent;
 
   :deep(.el-tree-node__content) {
-    height: 30px;
-    border-radius: 4px;
+    height: 32px;
+    border-radius: 5px;
 
     &:hover {
       background: var(--bd-table-hover);
@@ -976,6 +993,10 @@ onUnmounted(() => {
 
   :deep(.el-tree-node__expand-icon) {
     color: $muted;
+  }
+
+  :deep(.el-tree-node:focus > .el-tree-node__content) {
+    background: var(--bd-primary-soft);
   }
 }
 

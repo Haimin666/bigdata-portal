@@ -9,7 +9,6 @@ import DsTaskMonitor from '@/views/ds/DsTaskMonitor.vue'
 import HdfsView from '@/views/hdfs/HdfsView.vue'
 import UserManageView from '@/views/admin/UserManageView.vue'
 import DataLeapView from '@/views/dataleap/DataLeapView.vue'
-import DevAssistantView from '@/views/assistant/DevAssistantView.vue'
 // SQL 画布含 Monaco(~1.5MB gzip),必须异步:避免拖慢首屏(全量打包进主 chunk 曾致 index 4.9MB)
 const DbQueryView = defineAsyncComponent(() => import('@/views/db/QueryView.vue'))
 const SyncCodeView = defineAsyncComponent(() => import('@/views/sync/SyncCodeView.vue'))
@@ -18,6 +17,7 @@ defineOptions({ name: 'TabStage' })
 
 const props = defineProps<{
   tabs: PortalTab[]
+  collapsed: boolean
 }>()
 
 const emit = defineEmits<{
@@ -25,6 +25,7 @@ const emit = defineEmits<{
   (e: 'close', path: string): void
   (e: 'refresh'): void
   (e: 'toggle-fullscreen'): void
+  (e: 'toggle-collapse'): void
 }>()
 
 const route = useRoute()
@@ -37,7 +38,6 @@ const nativeComponents: Record<string, Component> = {
   dbQuery: DbQueryView,
   userManage: UserManageView,
   dataleap: DataLeapView,
-  devAssistant: DevAssistantView,
   sync: SyncCodeView
 }
 
@@ -51,10 +51,12 @@ const activePath = computed(() => route.path)
       v-if="props.tabs.length"
       :tabs="props.tabs"
       :active-path="activePath"
+      :collapsed="props.collapsed"
       @switch="(p: string) => emit('switch', p)"
       @close="(p: string) => emit('close', p)"
       @refresh="emit('refresh')"
       @toggle-fullscreen="emit('toggle-fullscreen')"
+      @toggle-collapse="emit('toggle-collapse')"
     />
     <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
     <div class="view-stage">

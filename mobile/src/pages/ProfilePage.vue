@@ -1,8 +1,8 @@
 <template>
   <ion-page><ion-header class="ion-no-border"><ion-toolbar><ion-title>我的</ion-title></ion-toolbar></ion-header><ion-content :fullscreen="true"><main class="page-shell">
-    <section class="identity-card"><span class="avatar">{{ auth.username.slice(0, 1).toUpperCase() || 'A' }}</span><div><h2>{{ auth.username || '免认证模式' }}</h2><p>{{ roleName }}</p></div></section>
+    <section class="identity-card"><span class="avatar">{{ auth.username.slice(0, 1).toUpperCase() || 'A' }}</span><div><h2>{{ auth.username || '免认证模式' }}</h2><p>{{ roleName }}</p></div><span class="connection-badge" :class="{ open: auth.authDisabled || auth.loggedIn }"><i />{{ auth.authDisabled ? '免认证' : auth.loggedIn ? '已连接' : '未连接' }}</span></section>
     <section class="theme-panel"><p class="eyebrow">APPEARANCE</p><h3>显示主题</h3><div class="theme-options"><button v-for="option in themeOptions" :key="option.value" :class="{ active: preference === option.value }" @click="setTheme(option.value)"><ion-icon :icon="option.icon" /><span><strong>{{ option.label }}</strong><small>{{ option.note }}</small></span></button></div></section>
-    <section class="profile-list"><div><span>模块权限</span><strong>{{ auth.modules?.length ? `${auth.modules.length} 个模块` : '全部模块' }}</strong></div><div><span>门户环境</span><strong>{{ portalHost }}</strong></div><div><span>连接策略</span><strong>HTTPS · Cookie</strong></div></section>
+    <section class="profile-list"><div><span>模块权限</span><strong>{{ auth.modules?.length ? `${auth.modules.length} 个模块` : '全部模块' }}</strong></div><div><span>门户环境</span><strong>{{ portalHost }}</strong></div><div><span>连接策略</span><strong>HTTPS · Cookie</strong></div><div><span>主题偏好</span><strong>{{ preference === 'system' ? '跟随系统' : preference === 'dark' ? '深色' : '浅色' }}</strong></div></section>
     <ion-button v-if="!auth.authDisabled" class="logout-button" expand="block" fill="outline" color="danger" @click="logout">退出登录</ion-button>
   </main></ion-content></ion-page>
 </template>

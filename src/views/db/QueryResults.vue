@@ -34,7 +34,8 @@ export interface QueryResultItem {
   editable?: boolean // 是否允许单元格双击编辑
   db?: string // 目标库(onOpenTable 设置)
   table?: string // 目标表(onOpenTable 设置)
-  engine?: 'mysql' | 'oracle' // 目标引擎(onOpenTable 设置)
+  engine?: 'mysql' | 'oracle' | 'impala' // 目标引擎(onOpenTable 设置)
+  logs?: string[]
   pkCols?: string[] // 主键列(loadPreviewPk 异步填充)
   pendingEdits?: PendingEdit[]
   running?: boolean // 执行中(结果 tab 状态点)
@@ -73,7 +74,7 @@ const pagedRows = computed(() => {
 })
 
 // ═════════════════════ 单元格行内编辑(仅表预览 editable) ═════════════════════
-const editingCell = ref<{ row: Record<string, unknown>; rowIdx: number; col: string; val: string } | null>(null)
+const editingCell = ref<{ result: QueryResultItem; row: Record<string, unknown>; rowIdx: number; col: string; val: string } | null>(null)
 function isEditableCell(_col: string): boolean {
   const r = currentResult.value
   return !!(r?.editable && r.pkCols?.length)
@@ -86,6 +87,7 @@ function startCellEdit(row: Record<string, unknown>, col: string) {
     return
   }
   editingCell.value = {
+    result: r,
     row,
     rowIdx: r.rows.indexOf(row),
     col,
@@ -104,8 +106,7 @@ async function saveCellEdit() {
   const e = editingCell.value
   editingCell.value = null
   if (!e) return
-  const r = props.results[e.rowIdx]
-  if (!r) return
+  const r = e.result
   const oldVal = e.row[e.col]
   if (oldVal == null && e.val === '') return // 原 NULL 仍为空:无修改
   if (String(oldVal) === e.val) return
@@ -471,7 +472,7 @@ async function showJson(v: unknown) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 0 8px;
+  padding: 0 8px 2px;
 }
 
 /* 横向 tab 条 */
@@ -479,30 +480,41 @@ async function showJson(v: unknown) {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 2px 0;
+  padding: 4px 4px 0;
+  border: 1px solid var(--bd-border, #dfe3ea);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--bd-panel-sub, #f8fafc);
   flex-shrink: 0;
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 .result-tab {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px 3px;
+  position: relative;
+  padding: 6px 10px 5px;
   border-radius: 6px 6px 0 0;
   border: 1px solid transparent;
   font-size: 12px;
   cursor: pointer;
   user-select: none;
-  color: var(--bd-text-muted, #8a94a6);
+  color: var(--bd-muted, #8a94a6);
 }
 .result-tab:hover {
-  background: rgba(120, 140, 180, 0.1);
+  background: var(--bd-table-hover, rgba(120, 140, 180, 0.1));
 }
 .result-tab.active {
   background: var(--bd-panel, #fff);
   border-color: var(--bd-border, #dfe3ea);
   border-bottom-color: transparent;
   color: var(--bd-text, #24292f);
+  box-shadow: inset 0 -2px 0 var(--bd-primary, #409eff);
+}
+.result-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--bd-primary, #409eff) 55%, transparent);
+  outline-offset: -2px;
 }
 .result-tab.log-tab .tab-name {
   font-weight: 600;
@@ -520,7 +532,7 @@ async function showJson(v: unknown) {
   padding: 1px;
   opacity: 0;
   transition: opacity 0.15s;
-  color: var(--bd-text-muted, #8a94a6);
+  color: var(--bd-muted, #8a94a6);
 }
 .result-tab:hover .tab-close {
   opacity: 1;
@@ -566,12 +578,17 @@ async function showJson(v: unknown) {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .result-card {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  border: 1px solid var(--bd-border, #dfe3ea);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: var(--bd-panel, #fff);
   /* 结果表格占满,但给底部信息条让出空间 */
   padding-bottom: 0;
 }
@@ -579,12 +596,25 @@ async function showJson(v: unknown) {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--bd-border, #dfe3ea);
-  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid var(--bd-border, #dfe3ea);
   background: var(--bd-panel, #fff);
 }
 .result-table {
   width: 100%;
+
+  :deep(.el-table__header th.el-table__cell) {
+    background: var(--bd-table-header, #f8fafc);
+    color: var(--bd-muted, #6b7280);
+    font-weight: 600;
+  }
+
+  :deep(.el-table__row td.el-table__cell) {
+    transition: background-color 0.15s ease;
+  }
+
+  :deep(.el-table__body tr:hover > td.el-table__cell) {
+    background: var(--bd-table-hover, #f0f6ff);
+  }
 }
 .err-alert {
   margin: 4px 0;
@@ -592,21 +622,21 @@ async function showJson(v: unknown) {
 .result-pagination {
   flex-shrink: 0;
   justify-content: flex-end;
-  padding: 6px 8px;
-  border: 1px solid var(--bd-border, #dfe3ea);
-  border-top: none;
-  border-radius: 0 0 8px 8px;
-  background: var(--bd-table-header, #f7f8fa);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--bd-border, #dfe3ea);
+  background: var(--bd-panel-sub, #f7f8fa);
 }
 .result-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 4px 2px;
+  min-height: 34px;
+  padding: 4px 10px;
   font-size: 12px;
-  color: var(--bd-text-muted, #8a94a6);
+  color: var(--bd-muted, #8a94a6);
   flex-shrink: 0;
+  background: var(--bd-panel, #fff);
 }
 .stats {
   display: inline-flex;
@@ -620,6 +650,7 @@ async function showJson(v: unknown) {
 .stats-num {
   color: var(--bd-text, #24292f);
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .tools {
   display: inline-flex;
@@ -642,7 +673,7 @@ async function showJson(v: unknown) {
   font-weight: 600;
 }
 .footer-muted {
-  color: var(--bd-text-muted, #8a94a6);
+  color: var(--bd-muted, #8a94a6);
 }
 
 /* 单元格 */

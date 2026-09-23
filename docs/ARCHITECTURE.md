@@ -13,7 +13,7 @@
                      ┌────────────────▼───┐   ┌─────▼──────────────┐
                      │ db-proxy(FastAPI   │   │ 集群/子应用直连      │
                      │  :8756, 客户机)    │   │ RM/NM/DS/StreamX/    │
-                     │  MySQL/Oracle/Doris│   │ Jupyter/OMD/Stingray │
+                     │ MySQL/Oracle/Impala│   │ Jupyter/OMD/Stingray │
                      │  Spark/Flink 引擎  │   └─────────────────────┘
                      └────────────────────┘
 ```
@@ -32,7 +32,7 @@ src/
 ├── App.vue             # 根组件
 ├── router/index.ts     # 路由:native 静态路由 + 菜单驱动的 subapp 占位路由
 ├── layouts/            # 门户壳
-│   ├── MainLayout.vue      # 顶栏(状态条/UTC 时钟)+ 侧栏 + TabStage
+│   ├── MainLayout.vue      # 侧栏 + TabStage
 │   └── components/
 │       ├── SideBar.vue     # 菜单(enabledModules 白名单 + 角色过滤)
 │       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁)
@@ -42,7 +42,7 @@ src/
 ├── api/                # 后端封装:auth/db/ds/dsDeps/hdfs/yarn
 ├── utils/theme.ts      # 深浅主题 + 管理端主题覆盖注入
 ├── styles/             # variables.scss(双主题 CSS 变量)/ index.scss(全局)
-├── components/         # 通用:DialogMaxBtn/StateSelect/StatusBadge/UrlFrameDialog
+├── components/         # 通用:PageHeader/TableToolbar/StateView/StatusBadge 等
 ├── config/menu.ts      # 静态菜单表(驱动侧栏 + subapp 路由 + 角色过滤)
 └── types/              # TS 类型
 ```
@@ -50,9 +50,17 @@ src/
 ### 2.2 关键机制
 
 - **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁
+- **tab 交互**:`SubappTabs` 提供刷新、关闭当前、关闭左右侧/其他 tab 的上下文操作;操作只改变内存中的常驻池,不改变页面内容区尺寸
+- **列表状态**:`StateView` 统一加载完成后的空数据、错误和重试反馈;保留表格的 loading 遮罩,不改变内容区高度
+- **表格工具栏**:`TableToolbar` 统一刷新、表格密度和筛选/操作插槽;密度偏好按页面保存在 localStorage,列显隐仍由业务页面维护
+- **自建页面滚动契约**:原生页面根节点固定在 `TabStage` 内容区内并使用 `min-height:0; overflow:hidden`;表格、结果集、文件列表、消息流等长内容由自身容器 `flex:1; overflow:auto` 承担滚动,工具栏和分页不随数据行数下移
+- **tab 刷新策略**:标签页上下文刷新只递增当前 tab 的 `refreshKey`;常驻池继续使用 `v-show`,不会因为切换丢失页面状态。打开 tab 路径按用户写入 `sessionStorage`,浏览器刷新后恢复顺序,不同用户使用不同键
+- **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;开发助手作为跨源 iframe 子应用嵌入 Datadeck Agent,固定使用受控入口用户
+- **危险操作反馈**:工作流实例、任务节点、YARN 应用和同步生成等异步操作必须在目标按钮上显示 loading,成功后刷新或展示结果,失败保留可重试入口;不得用全局遮罩阻塞无关页面操作
+- **桌面端视觉层**:桌面壳采用低饱和蓝灰中性色、系统无衬线字体和语义主题变量;侧栏/标签页统一使用轻量层级和明确 hover/active/focus 状态,不改变业务页面的宽表格、SQL 画布和内容区尺寸。侧栏折叠入口固定在顶部壳层左侧,使用 `Fold/Expand` 图标切换 220px/64px 宽度;深浅主题入口固定在顶部操作区,切换状态持久化到 `localStorage` 并同步 `html.dark`
 - **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
 - **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)
-- **字体**:全局等宽字体栈 `--bd-font`,管理端可覆盖
+- **字体**:全局系统无衬线字体栈 `--bd-font`;SQL/日志等数据组件按需使用等宽字体,管理端可覆盖
 
 ## 3. 网关架构(server/)
 
@@ -117,7 +125,7 @@ src/
 | `selfcheck_guards.py` | 护栏自检(12 例) |
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
-- **引擎路由**:`/dbs`、`/query`、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等
+- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,结构化日志随 job 状态返回
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN)
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 

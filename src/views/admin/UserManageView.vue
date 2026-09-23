@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Delete, EditPen, Grid } from '@element-plus/icons-vue'
+import { Plus, Delete, EditPen, Grid } from '@element-plus/icons-vue'
 import { userApi, type UserInfo, type RolesDef } from '@/api/auth'
 import { menus } from '@/config/menu'
 import DbPermView from './DbPermView.vue'
 import DbRuleEditor, { type DbRuleV2 } from './DbRuleEditor.vue'
 import { getDbPerms, saveDbPerms, listDataSources, type DbUserRule, type DbRoleRule } from '@/api/db'
+import TableToolbar from '@/components/TableToolbar.vue'
+import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'UserManageView' })
 
@@ -16,6 +18,8 @@ const MODULE_OPTIONS = [...new Set([...menus.map((m) => m.name), 'userManage'])]
 const users = ref<UserInfo[]>([])
 const roles = ref<RolesDef>({})
 const loading = ref(false)
+const loadError = ref('')
+const tableDensity = ref<'large' | 'default' | 'small'>('small')
 
 // ── 数据库权限(集成自数据权限矩阵,存 data/db-permissions.json)──
 const tab = ref('users')
@@ -35,12 +39,14 @@ const roleLabels = computed(() => {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const data = await userApi.list()
     users.value = data.users
     roles.value = data.roles
   } catch (e) {
-    ElMessage.error(`加载用户失败:${e instanceof Error ? e.message : e}`)
+    loadError.value = e instanceof Error ? e.message : String(e)
+    ElMessage.error(`加载用户失败:${loadError.value}`)
   } finally {
     loading.value = false
   }
@@ -223,13 +229,24 @@ function statusInfo(s: string) {
   <div class="user-manage">
     <el-tabs v-model="tab" class="um-tabs">
       <el-tab-pane label="用户管理" name="users">
-        <div class="head">
-          <span class="tip">用户管理:自建账号,控制可访问模块与可访问数据库(admin 不受限)。首个管理员在登录页初始化。</span>
-          <el-button type="primary" size="small" :icon="Plus" @click="openCreate">新建用户</el-button>
-          <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        </div>
+        <TableToolbar
+          :loading="loading"
+          density="small"
+          storage-key="user-manage"
+          @update:density="tableDensity = $event"
+          @refresh="load"
+        >
+          <template #filters>
+            <span class="toolbar-title">用户与访问控制</span>
+            <span class="tip">管理账号、模块授权与数据库权限</span>
+          </template>
+          <template #actions>
+            <el-button type="primary" :icon="Plus" @click="openCreate">新建用户</el-button>
+          </template>
+        </TableToolbar>
 
-    <el-table :data="users" size="small" border>
+        <StateView v-if="loadError" mode="error" title="用户列表加载失败" :description="loadError" @retry="load" />
+        <el-table v-else v-loading="loading" :data="users" :size="tableDensity" border height="100%" class="users-table">
       <el-table-column prop="username" label="用户名" min-width="120" />
       <el-table-column label="角色" width="110" align="center">
         <template #default="{ row }">
@@ -280,7 +297,7 @@ function statusInfo(s: string) {
           <el-button size="small" text type="danger" :icon="Delete" @click="removeUser(row)">删除</el-button>
         </template>
       </el-table-column>
-    </el-table>
+        </el-table>
 
     <!-- 新建用户 -->
     <el-dialog v-model="showCreate" title="新建用户" width="480px">
@@ -376,33 +393,50 @@ function statusInfo(s: string) {
 .user-manage {
   padding: 16px;
   height: 100%;
-  overflow: auto;
-}
-.head {
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+  flex-direction: column;
+  overflow: hidden;
+}
+.toolbar-title {
+  color: $text;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 .tip {
   font-size: 12px;
-  color: #909399;
-  margin-right: auto;
+  color: $muted;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mod-tag {
   margin-right: 4px;
 }
 .muted {
-  color: #c0c4cc;
+  color: $muted;
 }
 .um-tabs {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 .um-tabs :deep(.el-tabs__content) {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.um-tabs :deep(.el-tab-pane) {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.users-table {
+  flex: 1;
+  min-height: 0;
 }
 .db-perm-tip {
   font-size: 12px;

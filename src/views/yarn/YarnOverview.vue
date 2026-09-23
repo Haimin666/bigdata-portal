@@ -128,7 +128,9 @@ watch(
         ref="tableRef"
         :data="queueTree"
         row-key="queueName"
+        height="100%"
         :tree-props="{ children: 'children' }"
+        class="queue-table"
         @expand-change="onExpandChange"
       >
         <el-table-column prop="queueName" label="队列" min-width="170" />
@@ -177,10 +179,6 @@ watch(
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
 }
 
 .mini {
@@ -188,6 +186,12 @@ watch(
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  min-height: 76px;
+  padding: 12px 14px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .mini-label {
@@ -214,16 +218,27 @@ watch(
 }
 
 .queue-panel {
+  min-height: 0;
+  max-height: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 12px 16px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
+}
+
+.queue-table {
+  flex: 1;
+  min-height: 0;
 }
 
 .panel-title {
   font-size: 14px;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   color: $text;
 }
 

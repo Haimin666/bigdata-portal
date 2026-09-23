@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Refresh, View, Setting } from '@element-plus/icons-vue'
+import { Document, View, Setting } from '@element-plus/icons-vue'
 import {
   listProjects,
   listProcessInstances,
@@ -21,6 +21,8 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import DsDepsPanel from './DsDepsPanel.vue'
 import { searchWorkflows, rerunInstances, rerunFromNode, refreshDeps, fetchDepsStatus } from '@/api/dsDeps'
 import { useAuthStore } from '@/store/auth'
+import TableToolbar from '@/components/TableToolbar.vue'
+import StateView from '@/components/StateView.vue'
 
 // YARN application id 在任务日志中的正则(海豚任务日志含 application_<cluster>_<id>)
 const YARN_APP_RE = /application_\d+_\d+/
@@ -52,6 +54,23 @@ const stateType = ref('')
 const searchProcess = ref('')
 const searchTask = ref('')
 const rangeKey = ref('today')
+const tableDensity = ref<'large' | 'default' | 'small'>('default')
+const busyActions = ref<Set<string>>(new Set())
+
+function actionKey(scope: string, id: string | number, action: string): string {
+  return `${scope}:${id}:${action}`
+}
+
+function isActionBusy(key: string): boolean {
+  return busyActions.value.has(key)
+}
+
+function setActionBusy(key: string, busy: boolean) {
+  const next = new Set(busyActions.value)
+  if (busy) next.add(key)
+  else next.delete(key)
+  busyActions.value = next
+}
 
 // YARN RM 地址(从 /api/config 获取,用于 application id 跳转)
 const rmHost = ref('')
@@ -394,12 +413,16 @@ async function onExecute(inst: DsProcessInstance, executeType: string) {
   } catch {
     return
   }
+  const key = actionKey('instance', inst.id, executeType)
+  setActionBusy(key, true)
   try {
     await executeProcess(instProject(inst), inst.id, executeType)
     ElMessage.success(`${label}成功`)
-    load()
+    await load()
   } catch (e) {
     ElMessage.error(`${label}失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    setActionBusy(key, false)
   }
 }
 
@@ -459,6 +482,8 @@ async function rerunAllFailed() {
   } catch {
     return
   }
+  const batchKey = actionKey('batch', 'failed', 'rerun')
+  setActionBusy(batchKey, true)
   try {
     const targets = failed.map((i) => ({
       projectName: i._projectName || projectName.value,
@@ -470,9 +495,11 @@ async function rerunAllFailed() {
     const fail = results.filter((r) => !r.ok)
     ElMessage.success(`拉起完成:成功 ${ok},失败 ${fail.length}`)
     if (fail.length) ElMessage.warning(fail.map((f) => `${f.name}:${f.msg}`).join(';'))
-    load()
+    await load()
   } catch (e) {
     ElMessage.error(`拉起失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    setActionBusy(batchKey, false)
   }
 }
 
@@ -511,6 +538,8 @@ async function onRerunFromTask(t: DsTaskInstance, cascade: boolean) {
   } catch {
     return
   }
+  const key = actionKey('task', t.id, cascade ? 'cascade' : 'rerun')
+  setActionBusy(key, true)
   try {
     await rerunFromNode({
       projectName: instProject(t),
@@ -518,9 +547,11 @@ async function onRerunFromTask(t: DsTaskInstance, cascade: boolean) {
       startNodeId: nodeId
     })
     ElMessage.success(`${label}成功`)
-    load()
+    await load()
   } catch (e) {
     ElMessage.error(`${label}失败:${e instanceof Error ? e.message : e}`)
+  } finally {
+    setActionBusy(key, false)
   }
 }
 
@@ -597,7 +628,12 @@ async function onRefreshDeps() {
 
 <template>
   <div class="ds-monitor">
-    <div class="toolbar">
+    <TableToolbar
+      v-model:density="tableDensity"
+      storage-key="ds-task-monitor"
+      :loading="loading"
+      @refresh="load"
+    >
       <el-select
         v-model="projectName"
         class="project-select"
@@ -636,13 +672,16 @@ async function onRefreshDeps() {
         @clear="onTaskSearchChange"
       />
 
-      <div class="toolbar-spacer" />
       <el-tooltip v-if="auth.isAdmin" :content="depsStatus.updatedAt ? `缓存 ${depsStatus.count} 个工作流, 更新于 ${depsStatus.updatedAt}` : '暂无缓存数据'">
         <el-button :icon="Setting" :loading="depsRefreshing" @click="onRefreshDeps">刷新依赖</el-button>
       </el-tooltip>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <el-button type="danger" plain :loading="loading" @click="rerunAllFailed">一键拉起失败</el-button>
-    </div>
+      <el-button
+        type="danger"
+        plain
+        :loading="isActionBusy(actionKey('batch', 'failed', 'rerun'))"
+        @click="rerunAllFailed"
+      >一键拉起失败</el-button>
+    </TableToolbar>
 
     <!-- 当日统计概览 -->
     <div class="stat-bar">
@@ -656,27 +695,25 @@ async function onRefreshDeps() {
 
     <div class="main-split">
       <div class="left-pane">
-    <el-result v-if="error && !loading" icon="error" title="加载失败" :sub-title="error">
-      <template #extra>
-        <el-button type="primary" @click="load">重试</el-button>
-      </template>
-    </el-result>
+    <StateView v-if="error && !loading" mode="error" :description="error" @retry="load" />
 
     <!-- 工作流实例视图(默认,支持展开任务) -->
     <el-table
       ref="tableRef"
       v-else-if="viewMode === 'process'"
       v-loading="loading"
+      :size="tableDensity"
+      height="100%"
       row-key="id"
       :data="instances"
-      border class="task-table"
+      class="task-table"
       @expand-change="onExpandChange"
       @row-click="onRowClick"
     >
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="sub-wrap">
-            <el-table v-loading="(row as any)._tasksLoading" :data="(row as any)._tasks || []" size="small" border class="sub-table">
+            <el-table v-loading="(row as any)._tasksLoading" :data="(row as any)._tasks || []" size="small" class="sub-table">
               <el-table-column label="任务名" min-width="200" show-overflow-tooltip sortable>
                 <template #default="{ row: t }">{{ t.name }}</template>
               </el-table-column>
@@ -721,8 +758,19 @@ async function onRefreshDeps() {
               </el-table-column>
               <el-table-column label="操作" width="150" fixed="right">
                 <template #default="{ row: t }">
-                  <el-button link size="small" @click="onRerunFromTask(t, false)">单任务重跑</el-button>
-                  <el-button link type="success" size="small" @click="onRerunFromTask(t, true)">节点级联</el-button>
+                  <el-button
+                    link
+                    size="small"
+                    :loading="isActionBusy(actionKey('task', t.id, 'rerun'))"
+                    @click="onRerunFromTask(t, false)"
+                  >单任务重跑</el-button>
+                  <el-button
+                    link
+                    type="success"
+                    size="small"
+                    :loading="isActionBusy(actionKey('task', t.id, 'cascade'))"
+                    @click="onRerunFromTask(t, true)"
+                  >节点级联</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -774,20 +822,43 @@ async function onRefreshDeps() {
       <el-table-column label="操作" width="190" fixed="right">
         <template #default="{ row }">
           <template v-if="isRunning(row.state)">
-            <el-button link type="warning" size="small" @click="onExecute(row, 'PAUSE')">暂停</el-button>
-            <el-button link type="danger" size="small" @click="onExecute(row, 'STOP')">停止</el-button>
+            <el-button
+              link
+              type="warning"
+              size="small"
+              :loading="isActionBusy(actionKey('instance', row.id, 'PAUSE'))"
+              @click="onExecute(row, 'PAUSE')"
+            >暂停</el-button>
+            <el-button
+              link
+              type="danger"
+              size="small"
+              :loading="isActionBusy(actionKey('instance', row.id, 'STOP'))"
+              @click="onExecute(row, 'STOP')"
+            >停止</el-button>
           </template>
-          <el-button v-else link type="primary" size="small" @click="onExecute(row, 'REPEAT_RUNNING')">重跑</el-button>
+          <el-button
+            v-else
+            link
+            type="primary"
+            size="small"
+            :loading="isActionBusy(actionKey('instance', row.id, 'REPEAT_RUNNING'))"
+            @click="onExecute(row, 'REPEAT_RUNNING')"
+          >重跑</el-button>
           <el-button link type="success" size="small" @click="showDeps(row)">依赖 · 级联</el-button>
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty :description="!projectName && !searchProcess.trim() ? '全部项目下请输入工作流名称搜索' : '暂无工作流实例'" />
+        <StateView
+          mode="empty"
+          compact
+          :description="!projectName && !searchProcess.trim() ? '全部项目下请输入工作流名称搜索' : '暂无工作流实例'"
+        />
       </template>
     </el-table>
 
     <!-- 任务实例视图(填写了任务名搜索) -->
-    <el-table v-else v-loading="loading" :data="tasks" border class="task-table">
+    <el-table v-else v-loading="loading" :size="tableDensity" height="100%" :data="tasks" class="task-table">
       <el-table-column label="项目" min-width="130" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="proj-name">{{ instProject(row) || '—' }}</span>
@@ -845,7 +916,11 @@ async function onRefreshDeps() {
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty :description="!projectName && !searchTask.trim() ? '全部项目下请输入任务名称搜索' : '暂无任务实例'" />
+        <StateView
+          mode="empty"
+          compact
+          :description="!projectName && !searchTask.trim() ? '全部项目下请输入任务名称搜索' : '暂无任务实例'"
+        />
       </template>
     </el-table>
 
@@ -901,9 +976,10 @@ async function onRefreshDeps() {
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   height: 100%;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
@@ -935,17 +1011,20 @@ async function onRefreshDeps() {
 }
 
 .task-table {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
   overflow: hidden;
 }
 
 .sub-wrap {
   // 缩进:任务实例从属于上级工作流,不与上级列头对齐
   padding: 8px 8px 8px 48px;
-  background: rgba(94, 106, 210, 0.03);
+  background: var(--bd-panel-sub);
 }
 
 .sub-table {
@@ -991,6 +1070,7 @@ async function onRefreshDeps() {
 }
 
 .pagination-bar {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   background: $panel;
@@ -1004,10 +1084,7 @@ async function onRefreshDeps() {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
+  padding: 0;
   flex-wrap: wrap;
 }
 
@@ -1015,10 +1092,12 @@ async function onRefreshDeps() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 72px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: $bg;
+  min-width: 88px;
+  padding: 10px 12px;
+  border: 1px solid $border;
+  border-radius: 10px;
+  background: $panel;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .stat-num {
@@ -1057,7 +1136,8 @@ async function onRefreshDeps() {
   margin-left: auto;
   font-size: 12px;
   color: $muted;
-  padding-right: 4px;
+  padding: 0 4px;
+  line-height: 1.5;
 }
 
 /* ── 左右分栏 ───────────────────────────────── */
@@ -1072,10 +1152,11 @@ async function onRefreshDeps() {
 .left-pane {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow: auto;
+  overflow: hidden;
   padding-bottom: 2px;
 }
 

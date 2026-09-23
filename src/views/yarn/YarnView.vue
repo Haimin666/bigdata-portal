@@ -9,6 +9,8 @@ import AppsTable from './AppsTable.vue'
 import AppsCardView from './AppsCardView.vue'
 import YarnOverview from './YarnOverview.vue'
 import type { AppFilters } from '@/types/yarn'
+import TableToolbar from '@/components/TableToolbar.vue'
+import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'YarnView' })
 
@@ -39,6 +41,8 @@ const viewStyleModel = computed({
 // 分页状态
 const page = ref(0)
 const rowsPerPage = ref(16)
+const tableDensity = ref<'large' | 'default' | 'small'>('default')
+const killLoadingId = ref('')
 
 // ── URL 筛选同步 ─────────────────────────────────────────────
 let filtersFromUrl = false
@@ -148,11 +152,14 @@ async function onKill(appId: string, appName: string) {
   } catch {
     return // 用户取消
   }
+  killLoadingId.value = appId
   try {
     await store.kill(appId)
     ElMessage.success(`已请求终止 ${appName},请刷新确认`)
   } catch (e) {
     ElMessage.error(`终止 ${appName} 失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    killLoadingId.value = ''
   }
 }
 
@@ -185,99 +192,91 @@ function onRowsChange(s: number) {
 
 <template>
   <div class="yarn-view">
-    <div class="toolbar">
-      <el-select v-model="store.rm" class="toolbar-item rm-select" placeholder="ResourceManager" filterable>
-        <el-option v-for="r in rms" :key="r" :label="r" :value="r" />
-      </el-select>
+    <TableToolbar
+      v-model:density="tableDensity"
+      storage-key="yarn-apps"
+      :loading="store.loading"
+      @refresh="onManualRefresh"
+    >
+      <template #filters>
+        <el-select v-model="store.rm" class="toolbar-item rm-select" placeholder="ResourceManager" filterable>
+          <el-option v-for="r in rms" :key="r" :label="r" :value="r" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.states"
-        class="toolbar-item"
-        multiple
-        collapse-tags
-        placeholder="按状态筛选"
-      >
-        <el-option v-for="s in AVAILABLE_STATES" :key="s" :label="s" :value="s" />
-      </el-select>
+        <el-select
+          v-model="store.filters.states"
+          class="toolbar-item"
+          multiple
+          collapse-tags
+          placeholder="按状态筛选"
+        >
+          <el-option v-for="s in AVAILABLE_STATES" :key="s" :label="s" :value="s" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.user"
-        class="toolbar-item"
-        filterable
-        clearable
-        placeholder="按用户筛选"
-      >
-        <el-option v-for="u in availableUsers" :key="u" :label="u" :value="u" />
-      </el-select>
+        <el-select v-model="store.filters.user" class="toolbar-item" filterable clearable placeholder="按用户筛选">
+          <el-option v-for="u in availableUsers" :key="u" :label="u" :value="u" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.queue"
-        class="toolbar-item"
-        filterable
-        clearable
-        placeholder="按队列筛选"
-      >
-        <el-option v-for="q in queues" :key="q" :label="q" :value="q" />
-      </el-select>
+        <el-select v-model="store.filters.queue" class="toolbar-item" filterable clearable placeholder="按队列筛选">
+          <el-option v-for="q in queues" :key="q" :label="q" :value="q" />
+        </el-select>
 
-      <el-select
-        v-model="store.filters.appTypes"
-        class="toolbar-item"
-        multiple
-        collapse-tags
-        filterable
-        placeholder="按类型筛选"
-      >
-        <el-option v-for="t in availableAppTypes" :key="t" :label="t" :value="t" />
-      </el-select>
+        <el-select
+          v-model="store.filters.appTypes"
+          class="toolbar-item"
+          multiple
+          collapse-tags
+          filterable
+          placeholder="按类型筛选"
+        >
+          <el-option v-for="t in availableAppTypes" :key="t" :label="t" :value="t" />
+        </el-select>
 
-      <el-input
-        v-model="store.searchByAppName"
-        class="toolbar-item search-input"
-        placeholder="按应用名/ID 搜索"
-        clearable
-      />
+        <el-input v-model="store.searchByAppName" class="toolbar-item search-input" placeholder="按应用名/ID 搜索" clearable />
+      </template>
 
-      <el-button class="toolbar-item" @click="onManualRefresh">刷新</el-button>
+      <template #actions>
+        <el-radio-group v-model="viewStyleModel" size="default">
+          <el-radio-button value="table">表格</el-radio-button>
+          <el-radio-button value="card">卡片</el-radio-button>
+        </el-radio-group>
 
-      <div class="toolbar-spacer" />
+        <el-tooltip content="自动刷新">
+          <el-switch v-model="autoRefreshModel" class="toolbar-item" />
+        </el-tooltip>
+        <el-select v-if="store.autoRefresh" v-model="refreshIntervalModel" class="toolbar-item interval-select">
+          <el-option v-for="i in REFRESH_INTERVALS" :key="i" :label="`${i}s`" :value="i" />
+        </el-select>
 
-      <el-radio-group v-model="viewStyleModel" size="default">
-        <el-radio-button value="table">表格</el-radio-button>
-        <el-radio-button value="card">卡片</el-radio-button>
-      </el-radio-group>
+        <el-tooltip content="人性化时间">
+          <el-switch v-model="humanizeModel" class="toolbar-item" />
+        </el-tooltip>
 
-      <el-tooltip content="自动刷新">
-        <el-switch v-model="autoRefreshModel" class="toolbar-item" />
-      </el-tooltip>
-      <el-select
-        v-if="store.autoRefresh"
-        v-model="refreshIntervalModel"
-        class="toolbar-item interval-select"
-      >
-        <el-option v-for="i in REFRESH_INTERVALS" :key="i" :label="`${i}s`" :value="i" />
-      </el-select>
-
-      <el-tooltip content="人性化时间">
-        <el-switch v-model="humanizeModel" class="toolbar-item" />
-      </el-tooltip>
-
-      <el-popover placement="bottom" :width="260" trigger="click">
-        <template #reference>
-          <el-button class="toolbar-item">字段显隐</el-button>
-        </template>
-        <div class="field-list">
-          <el-checkbox-group :model-value="visibleHeaderValues" @change="applyVisibility">
-            <el-checkbox v-for="h in headers" :key="h.value" :value="h.value" :label="h.text" />
-          </el-checkbox-group>
-        </div>
-      </el-popover>
-    </div>
+        <el-popover placement="bottom" :width="260" trigger="click">
+          <template #reference>
+            <el-button class="toolbar-item">字段显隐</el-button>
+          </template>
+          <div class="field-list">
+            <el-checkbox-group :model-value="visibleHeaderValues" @change="applyVisibility">
+              <el-checkbox v-for="h in headers" :key="h.value" :value="h.value" :label="h.text" />
+            </el-checkbox-group>
+          </div>
+        </el-popover>
+      </template>
+    </TableToolbar>
 
     <YarnOverview :metrics="metrics" :queue-tree="queueTree" :humanize="store.humanize" />
 
+    <StateView
+      v-if="store.error && !store.loading && !apps.length"
+      mode="error"
+      :description="store.error"
+      @retry="onManualRefresh"
+    />
+    <el-alert v-else-if="store.error && apps.length" :title="store.error" type="error" show-icon :closable="false" />
+
     <AppsTable
-      v-if="viewStyleModel === 'table'"
+      v-if="viewStyleModel === 'table' && !(store.error && !store.loading && !apps.length)"
       :apps="apps"
       :loading="store.loading"
       :humanize="store.humanize"
@@ -286,12 +285,14 @@ function onRowsChange(s: number) {
       :resource-manager="store.rm"
       :page="page"
       :rows-per-page="rowsPerPage"
+      :density="tableDensity"
+      :kill-loading-id="killLoadingId"
       @kill="onKill"
       @page-change="onPageChange"
       @rows-change="onRowsChange"
     />
     <AppsCardView
-      v-else
+      v-else-if="!(store.error && !store.loading && !apps.length)"
       :apps="apps"
       :loading="store.loading"
       :humanize="store.humanize"
@@ -300,6 +301,7 @@ function onRowsChange(s: number) {
       :resource-manager="store.rm"
       :page="page"
       :rows-per-page="rowsPerPage"
+      :kill-loading-id="killLoadingId"
       @kill="onKill"
       @page-change="onPageChange"
       @rows-change="onRowsChange"
@@ -312,25 +314,24 @@ function onRowsChange(s: number) {
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   height: 100%;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
   box-sizing: border-box;
-}
-
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 10px 12px;
 }
 
 .toolbar-item {
   max-width: 220px;
+}
+
+.yarn-view :deep(.data-toolbar) {
+  align-items: flex-start;
+}
+
+.yarn-view :deep(.toolbar-filters),
+.yarn-view :deep(.toolbar-actions) {
+  min-height: 32px;
 }
 
 .rm-select {
@@ -344,10 +345,6 @@ function onRowsChange(s: number) {
 
 .interval-select {
   width: 90px;
-}
-
-.toolbar-spacer {
-  flex: 1;
 }
 
 .field-list {

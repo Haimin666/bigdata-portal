@@ -4,6 +4,7 @@ import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
+import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'AppsTable' })
 
@@ -16,6 +17,8 @@ const props = defineProps<{
   resourceManager: string
   page: number
   rowsPerPage: number
+  density: 'large' | 'default' | 'small'
+  killLoadingId: string
 }>()
 
 const emit = defineEmits<{
@@ -116,8 +119,8 @@ function openResource(row: { id: string; name?: string }): void {
       ref="tableRef"
       :data="paged"
       v-loading="loading"
-      size="small"
-      border
+      :size="density"
+      height="100%"
       class="apps-table-el"
       @sort-change="onSortChange"
       @row-click="onRowClick"
@@ -137,7 +140,12 @@ function openResource(row: { id: string; name?: string }): void {
             <el-button link type="primary" @click.stop="openResource(row)">
               资源管理器
             </el-button>
-            <el-button link type="danger" @click.stop="emit('kill', row.id, row.name)">
+            <el-button
+              link
+              type="danger"
+              :loading="killLoadingId === row.id"
+              @click.stop="emit('kill', row.id, row.name)"
+            >
               终止应用
             </el-button>
           </div>
@@ -157,7 +165,7 @@ function openResource(row: { id: string; name?: string }): void {
         </template>
       </el-table-column>
       <template #empty>
-        <span>{{ loading ? '' : '无数据' }}</span>
+        <StateView v-if="!loading" mode="empty" compact description="当前筛选条件下暂无 YARN 应用" />
       </template>
     </el-table>
     <el-pagination
@@ -178,25 +186,34 @@ function openResource(row: { id: string; name?: string }): void {
 
 <style scoped lang="scss">
 .apps-table {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
   overflow: hidden;
 }
 
 .apps-table-el {
+  flex: 1;
+  min-height: 0;
   width: 100%;
+  height: 100%;
 }
 
 .row-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 8px 16px;
+  padding: 10px 18px;
+  background: var(--bd-panel-sub);
 }
 
 .apps-pagination {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   align-items: center;

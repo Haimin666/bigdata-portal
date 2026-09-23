@@ -5,7 +5,7 @@ export interface DbDataSource {
   name: string
   /** 显示别名(缺省回退 name) */
   label?: string
-  type: 'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql'
+  type: 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql'
   host: string
   port: number
   user: string
@@ -59,13 +59,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.data as T
 }
 
-/** 跨库表搜索(mysql information_schema / oracle all_tables;db-proxy 按实例去重 + 30s 缓存) */
+/** 跨库表搜索(mysql information_schema / oracle all_tables / Impala SHOW TABLES;按实例去重 + 30s 缓存) */
 export async function searchTables(keyword: string): Promise<TableSearchHit[]> {
   return request<TableSearchHit[]>(`/search/tables?keyword=${encodeURIComponent(keyword)}`)
 }
 
 export interface TableSearchHit {
-  engine: 'mysql' | 'oracle'
+  engine: 'mysql' | 'oracle' | 'impala'
   db: string
   table: string
 }
@@ -76,7 +76,7 @@ export async function listDataSources(): Promise<DbDataSource[]> {
   return data.datasources || []
 }
 
-/** 执行查询(mysql/oracle 同步通道;经网关 /api/dbquery/query,写权限由网关数据权限矩阵管控) */
+/** 执行查询(mysql/oracle 同步通道;Impala 等通过通用异步任务执行) */
 export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
   const res = await fetch('/api/dbquery/query', {
     method: 'POST',
@@ -253,6 +253,8 @@ export interface SparkJobInfo {
   finishedAt?: number
   result?: DbQueryResult
   error?: string
+  logs?: string[]
+  executedSql?: string
 }
 
 /** 异步提交 Spark 任务,立即返回 jobId(不阻塞等结果) */

@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menus } from '@/config/menu'
+import { useAuthStore } from '@/store/auth'
 import SideBar from './components/SideBar.vue'
 import TabStage from './components/TabStage.vue'
-import type { PortalTab } from '@/views/subapp/SubappTabs.vue'
+import type { PortalTab, TabContextAction } from '@/views/subapp/SubappTabs.vue'
 
 defineOptions({ name: 'MainLayout' })
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
 const collapsed = ref(false)
 const fullscreen = ref(false)
@@ -17,6 +19,7 @@ const fullscreen = ref(false)
 // ── 模块 Tab 常驻池(原生视图统一管理)──
 // 组件常驻 v-show 切换,状态保留;refreshKey 供刷新按钮重建。
 const tabs = ref<PortalTab[]>([])
+const tabStorageKey = computed(() => `portal-open-tabs:${auth.username || 'anonymous'}`)
 
 /** 打开模块 tab:已存在则仅激活,否则加入池(组件首次创建) */
 function openTab(path: string) {
@@ -24,6 +27,27 @@ function openTab(path: string) {
   if (!menu) return
   if (!tabs.value.some((t) => t.path === path)) {
     tabs.value.push({ path, menu, refreshKey: 0 })
+  }
+}
+
+function restoreTabs() {
+  try {
+    const raw = sessionStorage.getItem(tabStorageKey.value)
+    const paths = raw ? (JSON.parse(raw) as unknown) : []
+    if (!Array.isArray(paths)) return
+    for (const path of paths) {
+      if (typeof path === 'string') openTab(path)
+    }
+  } catch {
+    // 会话存储不可用或内容损坏时,回退到当前路由创建单个 tab。
+  }
+}
+
+function persistTabs() {
+  try {
+    sessionStorage.setItem(tabStorageKey.value, JSON.stringify(tabs.value.map((tab) => tab.path)))
+  } catch {
+    // 不影响页面使用。
   }
 }
 
@@ -37,6 +61,10 @@ function closeTab(path: string) {
     router.push(next ? next.path : '/yarn')
   }
 }
+
+restoreTabs()
+
+watch(tabs, persistTabs, { deep: true })
 
 // 路由变化(菜单/URL 直达/关闭后跳转)→ 自动补/切 tab
 watch(
@@ -62,6 +90,34 @@ function handleRefresh() {
   if (t) t.refreshKey++
 }
 
+function handleTabContextAction(action: TabContextAction, path: string) {
+  const index = tabs.value.findIndex((tab) => tab.path === path)
+  if (index === -1) return
+
+  if (action === 'refresh') {
+    tabs.value[index].refreshKey++
+    return
+  }
+  if (action === 'close') {
+    closeTab(path)
+    return
+  }
+
+  if (action === 'close-others') {
+    tabs.value = tabs.value.filter((tab) => tab.path === path)
+  } else if (action === 'close-left') {
+    tabs.value = tabs.value.slice(index)
+  } else if (action === 'close-right') {
+    tabs.value = tabs.value.slice(0, index + 1)
+  }
+
+  // 关闭范围可能包含当前路由,自动回到仍然存在的目标 tab。
+  if (!tabs.value.some((tab) => tab.path === route.path)) {
+    const next = tabs.value.find((tab) => tab.path === path) ?? tabs.value[tabs.value.length - 1]
+    router.push(next?.path ?? '/yarn')
+  }
+}
+
 async function toggleFullscreen() {
   try {
     if (document.fullscreenElement) {
@@ -80,22 +136,6 @@ function onFullscreenChange() {
 }
 onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
 onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
-
-// ── 顶部状态条时钟(浏览器本地时区)──
-const clockText = ref('')
-let clockTimer: ReturnType<typeof setInterval> | null = null
-function tickClock() {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  clockText.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
-onMounted(() => {
-  tickClock()
-  clockTimer = setInterval(tickClock, 1000)
-})
-onUnmounted(() => {
-  if (clockTimer) clearInterval(clockTimer)
-})
 
 // ── 快捷键切换已打开的 tab(Ctrl/⌘+←/→ 或 Ctrl/⌘+Tab/Shift+Tab)──
 function switchTab(delta: number) {
@@ -126,13 +166,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <div class="portal-root">
-    <!-- 顶部状态条(深空控制台) -->
-    <div class="portal-statusbar">
-      <span class="sb-left"><span class="sb-dot"></span>BIGDATA-PORTAL // CONSOLE ONLINE</span>
-      <span class="sb-right">{{ clockText }}</span>
-    </div>
     <el-container class="portal-layout">
-      <SideBar :collapsed="collapsed" @select="handleSelect" @toggle-collapse="collapsed = !collapsed" />
+      <SideBar :collapsed="collapsed" @select="handleSelect" />
       <el-container>
         <el-main class="portal-main">
           <TabStage
@@ -141,6 +176,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             @close="closeTab"
             @refresh="handleRefresh"
             @toggle-fullscreen="toggleFullscreen"
+            :collapsed="collapsed"
+            @toggle-collapse="collapsed = !collapsed"
+            @context-action="handleTabContextAction"
           />
         </el-main>
       </el-container>
@@ -155,45 +193,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex-direction: column;
 }
 
-/* 顶部状态条(深空控制台) */
-.portal-statusbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 30px;
-  padding: 0 18px;
-  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: $muted;
-  border-bottom: 1px solid var(--bd-border);
-  background: color-mix(in srgb, $bg 85%, transparent);
-}
-.sb-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sb-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 6px #34d399;
-  animation: sbPulse 1.6s infinite;
-}
-@keyframes sbPulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-.sb-right {
-  color: $muted;
-}
-
 .portal-layout {
   height: 100%;
+  min-height: 0;
+
+  :deep(.el-container) {
+    min-height: 0;
+  }
 }
 
 .portal-main {
@@ -201,6 +207,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 0;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
 }
 </style>

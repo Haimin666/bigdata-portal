@@ -121,7 +121,10 @@ export const menus: MenuItem[] = [
     title: '开发助手',
     name: 'devAssistant',
     icon: 'Robot',
-    kind: 'native'
+    kind: 'subapp',
+    // Datadeck Agent GoAI 入口:固定接入指定用户,由 Agent 自身管理登录/会话/历史。
+    url: 'http://10.25.100.126:8000/agent?user_id=1030437',
+    iframe: true
   },
   {
     path: '/sync',

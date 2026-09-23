@@ -15,7 +15,7 @@
 | 服务 | `server/auth.js` | 会话(portal_session cookie, 12h)、login/logout/me/init、角色守卫(requireAuth/requireAdmin)、登录 IP 限速 |
 | 服务 | `server/users.js` | UserStore:`data/users.json`(scrypt 加盐哈希)、角色 admin/dev/viewer、CRUD、唯一 admin 保护 |
 | 视图 | `src/views/LoginView.vue` | 登录/初始化双态(默认浅色,可切深色) |
-| 视图 | `src/views/admin/UserManageView.vue` | Vben 风格角色/用户管理表格、用户 CRUD + 模块授权 + 角色 |
+| 视图 | `src/views/admin/UserManageView.vue` | 统一桌面壳层的用户管理工作台:TableToolbar + 用户 CRUD 表格 + 模块授权 + 角色/数据库权限入口；表体在固定内容区内滚动 |
 | Store | `src/store/auth.ts` | 会话状态/角色/模块权限(登录后菜单按角色过滤) |
 | 工具 | `src/utils/theme.ts` | 深浅色切换(`getTheme/applyTheme/toggleTheme/initTheme`,html.dark class + localStorage) |
 | 前端模块 | `src/config/menu.ts` | 菜单、路由、组件与子应用地址的统一注册表 |
@@ -34,6 +34,8 @@
 - 密码 scrypt 加盐,不存明文;登录限速;弱密码校验
 - 模块权限由用户管理页统一维护；后端对执行接口、HTTP 子应用代理及 Stingray/Jupyter WebSocket 再次校验，不能仅依赖前端隐藏菜单。DolphinScheduler 完整 UI 要求 `ds`，移动 API 读取允许 `dsTask` 或 `ds`。
 - 深浅色切换存 localStorage(html.dark class),默认浅色
+- 用户管理与数据库权限矩阵的表体独立滚动，工具栏/Tab 保持固定，避免大数据量把整页向下撑开
+- 用户管理页与数据权限页复用 `TableToolbar` 的刷新/密度交互、主题 token 和 loading 状态；错误保留页内重试入口，不用整页遮罩
 - 会话 cookie httpOnly + sameSite=lax + 动态 secure(跟随 X-Forwarded-Proto)
 
 ## 6. 配置

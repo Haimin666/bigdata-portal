@@ -62,7 +62,7 @@ function nodeState(n: HdfsDataNodeInfo): string {
     <!-- DataNode 明细(默认收起) -->
     <el-collapse v-if="data?.nodes.length" class="node-collapse">
       <el-collapse-item title="DataNode 磁盘明细" name="nodes">
-        <el-table :data="data.nodes" border class="node-table" size="small">
+        <el-table :data="data.nodes" class="node-table" size="small">
           <el-table-column prop="host" label="节点" min-width="200" show-overflow-tooltip />
           <el-table-column label="磁盘使用" min-width="180">
             <template #default="{ row }">
@@ -103,10 +103,6 @@ function nodeState(n: HdfsDataNodeInfo): string {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
-  background: $panel;
-  border: 1px solid $border;
-  border-radius: 6px;
-  padding: 8px 12px;
 }
 
 .mini {
@@ -114,6 +110,12 @@ function nodeState(n: HdfsDataNodeInfo): string {
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  min-height: 76px;
+  padding: 12px 14px;
+  background: $panel;
+  border: 1px solid $border;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .mini-label {
@@ -142,7 +144,8 @@ function nodeState(n: HdfsDataNodeInfo): string {
 .node-collapse {
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 
   :deep(.el-collapse-item__header) {
     font-size: 13px;
@@ -153,6 +156,11 @@ function nodeState(n: HdfsDataNodeInfo): string {
 
   :deep(.el-collapse-item__content) {
     padding: 0 12px 10px;
+  }
+
+  :deep(.el-collapse-item__wrap) {
+    max-height: 240px;
+    overflow: auto;
   }
 }
 

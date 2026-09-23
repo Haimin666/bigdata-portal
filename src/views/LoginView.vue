@@ -31,7 +31,7 @@ onMounted(async () => {
   typeTitle()
 })
 
-/** 标题打字机(深空控制台风格) */
+/** 标题打字机(保留轻量进入动效) */
 let typeTimer: ReturnType<typeof setTimeout> | null = null
 function typeTitle() {
   const el = document.getElementById('loginTitle')
@@ -87,7 +87,9 @@ async function submit() {
     <!-- 顶部状态条 -->
     <div class="status-bar">
       <span class="status-left">
-        <span class="status-dot"></span>BIGDATA-PORTAL // NODE-AUTH-01 ONLINE
+        <span class="status-dot"></span>
+        <span>BIGDATA 门户</span>
+        <span class="status-online">在线</span>
       </span>
       <button class="theme-toggle" @click="toggleTheme()">
         {{ isDark ? '☀ 浅色' : '☾ 深色' }}
@@ -145,7 +147,7 @@ async function submit() {
   height: 100%;
   background: $bg;
   color: $text;
-  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-family: var(--bd-font);
   overflow: hidden;
 }
 
@@ -154,12 +156,7 @@ async function submit() {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background-image:
-    linear-gradient(var(--bd-grid-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--bd-grid-line) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse 90% 80% at 30% 40%, #000 20%, transparent 75%);
-  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 30% 40%, #000 20%, transparent 75%);
+  background: var(--bd-grid-line);
 }
 
 /* 顶部状态条 */
@@ -169,13 +166,12 @@ async function submit() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 26px;
-  font-size: 11px;
-  letter-spacing: 2px;
+  padding: 14px 26px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
   color: $muted;
   border-bottom: 1px solid var(--bd-border);
-  background: color-mix(in srgb, $bg 80%, transparent);
-  backdrop-filter: blur(8px);
+  background: $panel;
 }
 .status-left {
   display: flex;
@@ -186,31 +182,33 @@ async function submit() {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 8px #34d399;
-  animation: pulse 1.6s infinite;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #22c55e 16%, transparent);
 }
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
-  }
+.status-online {
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: $primary;
+  background: var(--bd-primary-soft);
+  font-size: 11px;
 }
 .theme-toggle {
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid var(--bd-border);
-  background: transparent;
-  color: $text;
+  border: 1px solid $border;
+  border-radius: 7px;
+  background: $panel;
+  color: $muted;
   font-family: inherit;
   font-size: 11px;
-  letter-spacing: 2px;
-  padding: 5px 12px;
+  letter-spacing: 0;
+  padding: 7px 12px;
   cursor: pointer;
   transition: background 0.25s, color 0.25s;
   &:hover {
-    background: $primary;
-    color: $bg;
+    background: var(--bd-primary-soft);
+    color: $primary;
   }
 }
 
@@ -226,15 +224,15 @@ async function submit() {
 .brand h1 {
   font-size: clamp(30px, 4.6vw, 58px);
   font-weight: 700;
-  letter-spacing: 6px;
+  letter-spacing: 0.02em;
   color: $text;
-  text-shadow: 0 0 24px color-mix(in srgb, $primary 35%, transparent);
+  text-shadow: none;
   min-height: 1.2em;
 }
 .brand .sub {
   margin-top: 18px;
   font-size: 13px;
-  letter-spacing: 4px;
+  letter-spacing: 0.04em;
   color: $muted;
   b {
     color: $primary;
@@ -244,12 +242,13 @@ async function submit() {
 .console {
   margin-top: 44px;
   border: 1px solid var(--bd-border);
-  background: color-mix(in srgb, $panel 55%, transparent);
+  background: $panel;
   padding: 18px 20px;
   font-size: 12px;
   line-height: 2.1;
   max-width: 460px;
-  box-shadow: 0 0 40px color-mix(in srgb, $primary 5%, transparent) inset;
+  border-radius: 10px;
+  box-shadow: var(--bd-shadow);
   .ln {
     color: $muted;
   }
@@ -276,12 +275,13 @@ async function submit() {
 .login-card {
   position: relative;
   border: 1px solid var(--bd-border);
-  background: linear-gradient(160deg, color-mix(in srgb, $panel 95%, transparent), color-mix(in srgb, $bg 90%, transparent));
+  background: $panel;
+  border-radius: 12px;
   padding: 44px 40px 36px;
   max-width: 400px;
   width: 100%;
   margin-left: auto;
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--bd-shadow);
   animation: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes rise {
@@ -300,36 +300,23 @@ async function submit() {
   top: -1px;
   left: -1px;
   right: -1px;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, $primary, transparent);
-  animation: scanline 3s linear infinite;
-}
-@keyframes scanline {
-  0% {
-    opacity: 0;
-  }
-  15% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-  85% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
+  height: 3px;
+  border-radius: 12px 12px 0 0;
+  background: $primary;
 }
 .card-title {
   font-size: 15px;
-  letter-spacing: 5px;
+  letter-spacing: 0.04em;
   color: $primary;
   display: flex;
   align-items: center;
   gap: 10px;
   &::before {
-    content: '▸';
+    content: '';
+    width: 4px;
+    height: 18px;
+    border-radius: 999px;
+    background: $primary;
   }
 }
 .card-tip {
@@ -343,14 +330,15 @@ async function submit() {
   label {
     display: block;
     font-size: 11px;
-    letter-spacing: 2px;
+    letter-spacing: 0.02em;
     color: $muted;
     margin-bottom: 8px;
   }
   input {
     width: 100%;
-    background: color-mix(in srgb, $bg 60%, transparent);
-    border: 1px solid color-mix(in srgb, $primary 30%, transparent);
+    background: $bg;
+    border: 1px solid $border;
+    border-radius: 8px;
     color: $text;
     font-family: inherit;
     font-size: 14px;
@@ -360,7 +348,7 @@ async function submit() {
     transition: border-color 0.25s, box-shadow 0.25s;
     &:focus {
       border-color: $primary;
-      box-shadow: 0 0 0 1px $primary, 0 0 18px color-mix(in srgb, $primary 18%, transparent);
+      box-shadow: 0 0 0 1px $primary;
     }
     &::placeholder {
       color: $muted;
@@ -372,17 +360,19 @@ async function submit() {
   width: 100%;
   margin-top: 10px;
   padding: 14px;
-  background: transparent;
+  background: $primary;
+  border-radius: 8px;
   border: 1px solid $primary;
-  color: $primary;
+  color: #fff;
   font-family: inherit;
   font-size: 13px;
-  letter-spacing: 6px;
+  letter-spacing: 0.12em;
   cursor: pointer;
-  transition: background 0.3s, color 0.3s;
+  transition: background 0.2s, color 0.2s, transform 0.2s;
   &:hover:not(:disabled) {
-    background: $primary;
-    color: $bg;
+    background: color-mix(in srgb, $primary 88%, #000);
+    color: #fff;
+    transform: translateY(-1px);
   }
   &:disabled {
     opacity: 0.6;

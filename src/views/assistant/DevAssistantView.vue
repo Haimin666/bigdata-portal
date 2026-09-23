@@ -1010,13 +1010,15 @@ onUnmounted(() => {
   flex-direction: column;
   border-right: 1px solid var(--bd-border);
   background: var(--bd-sidebar);
+  box-shadow: 2px 0 10px color-mix(in srgb, var(--bd-primary) 3%, transparent);
 }
 .da-brand {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 14px 12px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--bd-border);
+  background: var(--bd-panel);
 }
 .da-logo {
   width: 26px;
@@ -1027,8 +1029,9 @@ onUnmounted(() => {
   justify-content: center;
   font-weight: 700;
   font-size: 12px;
-  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
-  color: #fff;
+  background: var(--bd-primary-soft);
+  border: 1px solid color-mix(in srgb, var(--bd-primary) 24%, var(--bd-border));
+  color: var(--bd-primary);
   font-family: var(--bd-font);
 }
 .da-name {
@@ -1151,6 +1154,8 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 12px;
+  padding: 14px;
 }
 .da-welcome {
   flex: 1;
@@ -1160,6 +1165,10 @@ onUnmounted(() => {
   justify-content: center;
   gap: 8px;
   padding: 40px 20px;
+  border: 1px solid var(--bd-border);
+  border-radius: 12px;
+  background: var(--bd-panel);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--bd-primary) 4%, transparent);
   text-align: center;
 }
 .da-welcome__logo {
@@ -1171,10 +1180,10 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 22px;
   font-weight: 700;
-  background: linear-gradient(135deg, var(--bd-primary), #7c5cff);
-  color: #fff;
+  background: var(--bd-primary-soft);
+  border: 1px solid color-mix(in srgb, var(--bd-primary) 24%, var(--bd-border));
+  color: var(--bd-primary);
   font-family: var(--bd-font);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--bd-primary) 35%, transparent);
 }
 .da-welcome__title {
   margin: 8px 0 0;
@@ -1229,6 +1238,10 @@ onUnmounted(() => {
   min-height: 0;
   overflow-y: auto;
   padding: 26px 20px 10px;
+  border: 1px solid var(--bd-border);
+  border-radius: 12px;
+  background: var(--bd-panel);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--bd-primary) 4%, transparent);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1454,14 +1467,14 @@ onUnmounted(() => {
   border: 1px solid var(--bd-border);
   border-radius: 8px;
   overflow: hidden;
-  background: #0d1420;
+  background: var(--bd-panel-sub);
 }
 .da-md :deep(.md-codeblock__head) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px;
-  background: color-mix(in srgb, #0d1420 90%, var(--bd-primary) 8%);
+  background: var(--bd-table-header);
   border-bottom: 1px solid var(--bd-border);
   font-size: 11px;
   color: var(--bd-muted);
@@ -1488,12 +1501,12 @@ onUnmounted(() => {
   font-family: var(--bd-font);
   font-size: 12px;
   line-height: 1.6;
-  color: #d6e6f2;
+  color: var(--bd-text);
 }
 
 /* ── 输入区 ── */
 .da-composer-wrap {
-  padding: 10px 18px 14px;
+  padding: 0 0 0;
   position: relative;
 }
 .da-slash {
@@ -1544,13 +1557,13 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  max-width: 860px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   background: var(--bd-panel);
   border: 1px solid var(--bd-border);
   border-radius: 14px;
   padding: 8px 8px 8px 14px;
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--bd-border) 40%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--bd-primary) 4%, transparent);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 .da-composer:focus-within {
@@ -1564,8 +1577,8 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-width: 860px;
-  margin: 0 auto 6px;
+  max-width: none;
+  margin: 0 0 6px;
 }
 .da-file-chip {
   display: inline-flex;
@@ -1590,8 +1603,8 @@ onUnmounted(() => {
   color: #f56c6c;
 }
 .da-upload-msg {
-  max-width: 860px;
-  margin: 0 auto 6px;
+  max-width: none;
+  margin: 0 0 6px;
   font-size: 11px;
   color: var(--bd-primary);
 }

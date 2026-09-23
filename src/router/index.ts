@@ -60,11 +60,6 @@ const router = createRouter({
           component: () => import('@/views/dataleap/DataLeapView.vue')
         },
         {
-          path: 'assistant',
-          name: 'devAssistant',
-          component: () => import('@/views/assistant/DevAssistantView.vue')
-        },
-        {
           path: 'sync',
           name: 'sync',
           component: () => import('@/views/sync/SyncCodeView.vue')
@@ -91,11 +86,11 @@ router.beforeEach(async (to) => {
   if (!auth.loggedIn) {
     return to.path === '/login' ? true : '/login'
   }
-  /** 用户可访问的第一个 native 菜单页(登录落地/模块回退目标;无匹配回默认首页,后端 EXEC_GATES 门禁兜底) */
+  /** 用户可访问的第一个菜单页(登录落地/模块回退目标;无匹配回默认首页,后端 EXEC_GATES 门禁兜底) */
   const firstAllowedPath = (): string => {
     const mods = auth.modules
     if (!Array.isArray(mods) || mods.length === 0) return '/yarn'
-    const hit = menus.find((m) => m.kind === 'native' && mods.includes(m.name))
+    const hit = menus.find((m) => mods.includes(m.name))
     return hit ? hit.path : '/yarn'
   }
   if (to.path === '/login') return firstAllowedPath()

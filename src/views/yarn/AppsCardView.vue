@@ -4,6 +4,7 @@ import type { ColumnHeader, YarnApp } from '@/types/yarn'
 import AppInfoLine from './AppInfoLine.vue'
 import UrlFrameDialog from '@/components/UrlFrameDialog.vue'
 import { ROWS_PER_PAGE_OPTIONS } from '@/config/yarn'
+import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'AppsCardView' })
 
@@ -16,6 +17,7 @@ const props = defineProps<{
   resourceManager: string
   page: number
   rowsPerPage: number
+  killLoadingId: string
 }>()
 
 const emit = defineEmits<{
@@ -70,7 +72,7 @@ function onSizeChange(s: number) {
 
 <template>
   <div class="apps-card-view" v-loading="loading">
-    <el-row :gutter="16">
+    <el-row class="apps-card-grid" :gutter="16">
       <el-col v-for="app in paged" :key="app.id" :xs="24" :sm="12" :md="8" :lg="6">
         <el-card class="app-card" shadow="never">
           <div class="app-name" :title="app.name">{{ app.name }}</div>
@@ -92,14 +94,19 @@ function onSizeChange(s: number) {
             <el-button size="small" @click="openResource(app)">
               资源管理器
             </el-button>
-            <el-button size="small" type="danger" @click="emit('kill', app.id, app.name)">
+            <el-button
+              size="small"
+              type="danger"
+              :loading="killLoadingId === app.id"
+              @click="emit('kill', app.id, app.name)"
+            >
               终止
             </el-button>
           </div>
         </el-card>
       </el-col>
     </el-row>
-    <div v-if="rows.length === 0 && !loading" class="card-empty">无数据</div>
+    <StateView v-if="rows.length === 0 && !loading" mode="empty" compact description="当前筛选条件下暂无 YARN 应用" />
     <el-pagination
       class="apps-pagination"
       :current-page="page + 1"
@@ -118,11 +125,24 @@ function onSizeChange(s: number) {
 
 <style scoped lang="scss">
 .apps-card-view {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.apps-card-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  align-content: flex-start;
 }
 
 .app-card {
   margin-bottom: 16px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
 }
 
 .app-name {
@@ -171,6 +191,7 @@ function onSizeChange(s: number) {
 }
 
 .apps-pagination {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   align-items: center;

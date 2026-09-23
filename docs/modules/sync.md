@@ -8,7 +8,7 @@
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/sync/SyncCodeView.vue` | 输入表单、SQL/JSON 结果面板与复制操作 |
+| 视图 | `src/views/sync/SyncCodeView.vue` | TableToolbar 输入区、SQL/JSON 结果面板与复制操作 |
 | 路由 | `src/config/menu.ts` | `/sync` 原生模块入口，受 `enabledModules`/用户模块权限控制 |
 | 网关 | `/api/sync/db2hive` | 接收 `db_name`、`table_name` 并返回 SQL/JSON 代码 |
 
@@ -17,6 +17,7 @@
 - 桌面端表单为源库名、表名和生成操作的单行布局，生成结果为 SQL/JSON 双栏。
 - ≤640px 时两个输入控件各占半行并允许收缩，生成按钮占满一行；代码面板改为纵向排列，长 SQL/JSON 在面板内滚动。
 - 页面级别不得产生横向溢出，结果代码允许在各自代码框内横向滚动。
+- **视觉层**:输入区使用桌面统一工具栏;SQL/JSON 结果使用独立浅色面板、低饱和边界和主题变量,不重复显示页面标题。
 
 ## 4. 权限与测试限制
 

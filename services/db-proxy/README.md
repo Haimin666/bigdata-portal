@@ -1,7 +1,7 @@
 # db-proxy:数据库多引擎执行代理(客户机侧)
 
 > **定位(2026-08 权限策略调整后):零读写限制的"多引擎数据执行器"。**
-> db-proxy 自身不做任何读写权限判断(已移除库白名单/表白名单/只读保护/多语句拦截/
+> db-proxy 自身不做门户用户权限判断(库/表白名单与写门禁已移除;
 > Spark-Flink 写门禁),所有权限统一由**门户网关**管控。db-proxy 只做:
 > **X-DB-Token 鉴权 → 连库执行 → 资源护栏 → 审计**。
 
@@ -16,11 +16,11 @@
               db-proxy(本服务)
               ├─ require_auth(X-DB-Token 匹配 authToken)     ← 服务入口鉴权
               ├─ 资源护栏: 行数上限 / maxSqlLen / maxConcurrent / maxQps / 超时
-              ├─ 执行: MySQL(Doris)/Oracle / Spark / Flink / prejob
+              ├─ 执行: MySQL(Doris)/Oracle/Impala / Spark / Flink / prejob
               └─ 审计日志(时间/库/SQL/行数/耗时)
 ```
 
-> ⚠️ **安全边界**:db-proxy 对 `8756` 端口零读写限制——谁能持 `X-DB-Token`
+> ⚠️ **安全边界**:除显式配置 `readOnly: true` 的 Impala 数据源外,db-proxy 对 `8756` 端口零读写限制——谁能持 `X-DB-Token`
 > 谁就能任意读写/执行 pyspark。防护依赖两点:
 > 1. **防火墙只放行门户服务器 IP** 访问 8756(禁止内网其他机器直连);
 > 2. `authToken` 保密(与门户 `config.local.json` 的 `dbProxyToken` 一致)。
@@ -47,14 +47,23 @@
     { "name": "finance_order_trade", "type": "mysql", "host": "...", "port": 3343,
       "user": "...", "password": "...", "schema": "finance_order_trade" },
     { "name": "doris_cluster1", "type": "mysql", "host": "...", "port": 19030,
-      "user": "...", "password": "...", "schema": "default" }
+      "user": "...", "password": "...", "schema": "default" },
+    { "name": "impala_warehouse", "type": "impala", "hosts": ["host1", "host2"],
+      "port": 21050, "user": "...", "password": "...", "database": "default", "readOnly": true }
   ],
+  "impala": {
+    "typeCheck": { "enabled": true },
+    "aiFix": { "enabled": false, "baseUrl": "https://.../v1", "apiKey": "...", "model": "...", "maxAttempts": 2 }
+  },
   "spark": { "enabled": false },                  // 见「Spark 引擎」
   "flink": { "enabled": false }                   // 见「Flink 引擎」
 }
 ```
 
-- `type` 仅支持 `mysql`(含 Doris,走 mysql 协议)与 `oracle`
+- `type` 支持 `mysql`(含 Doris,走 mysql 协议)、`oracle` 与 `impala`
+- Impala 可配置多个 `hosts`,端口默认 `21050`;`typeCheck` 开启 sqlglot/Hive 方言校验和 DESCRIBE 驱动的类型修正
+- `impala.aiFix` 为可选 OpenAI-compatible 接口配置,密钥只放在客户机 `datasources.json`;仅语法/类型/表列名错误触发,修复 SQL 会重新校验为单条只读查询
+- Impala `readOnly: true` 会在 db-proxy 再次拒绝写语句;不配置时门户权限矩阵仍是用户侧主要读写授权点
 - oracle 连 11g 必须 `rowLimit: "rownum"` + `oracleClientLib`
 - `maxConcurrent/maxQps`、`maxSqlLen`(默认 32KB)在顶层配置
 - `allowWrite`/`writeToken`(spark/flink 段)已废弃,不再生效
@@ -65,13 +74,14 @@
 python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyflink
 ```
 
-## 请求执行生命周期(MySQL/Doris/Oracle)
+## 请求执行生命周期(MySQL/Doris/Oracle/Impala)
 
 ```
 请求 → require_auth(X-DB-Token) → 路由 → get_datasource(db)
   → _prepare_query: strip 注释/结尾分号 → is_select 判定(SELECT/SHOW/DESC/EXPLAIN/WITH)
   → 护栏: maxSqlLen / maxQps / maxConcurrent / 行数上限(maxLimit 超限 400)
   → SELECT/WITH 查询 → 追加行数限制 → 执行 → 行数截断 → 返回
+  → Impala:服务端 DESCRIBE/sqlglot 类型检查 → 查询;可修复错误调用可选 AI,执行日志随异步 job 状态返回
   → 写语句(INSERT/UPDATE/DELETE/DDL...) → 原样执行 → _write_audit 审计
 ```
 

@@ -7,6 +7,8 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, CopyDocument } from '@element-plus/icons-vue'
 import { copyText } from '@/utils/clipboard'
+import StateView from '@/components/StateView.vue'
+import TableToolbar from '@/components/TableToolbar.vue'
 
 interface SyncResult {
   sqlContent: string
@@ -17,6 +19,7 @@ const dbName = ref('')
 const tableName = ref('')
 const loading = ref(false)
 const result = ref<SyncResult | null>(null)
+const error = ref('')
 
 async function generate() {
   const db = dbName.value.trim()
@@ -27,6 +30,7 @@ async function generate() {
   }
   loading.value = true
   result.value = null
+  error.value = ''
   try {
     const res = await fetch('/api/sync/db2hive', {
       method: 'POST',
@@ -39,7 +43,8 @@ async function generate() {
     }
     result.value = body.data as SyncResult
   } catch (e) {
-    ElMessage.error(`生成失败:${e instanceof Error ? e.message : e}`)
+    error.value = e instanceof Error ? e.message : String(e)
+    ElMessage.error(`生成失败:${error.value}`)
   } finally {
     loading.value = false
   }
@@ -54,8 +59,7 @@ async function copy(text: string, label: string) {
 
 <template>
   <div class="sync-view">
-    <div class="sync-header">
-      <div class="sync-title">数据同步 <span class="sync-sub">db2hive 代码生成</span></div>
+    <TableToolbar :show-density="false" :show-refresh="false">
       <div class="sync-form">
         <el-input v-model="dbName" placeholder="库名,如 pangu" class="sync-input" clearable @keyup.enter="generate" />
         <span class="sync-dot">.</span>
@@ -64,9 +68,10 @@ async function copy(text: string, label: string) {
           <el-icon v-if="!loading"><Search /></el-icon> 生成
         </el-button>
       </div>
-    </div>
+    </TableToolbar>
 
-    <div v-loading="loading" class="sync-body">
+    <StateView v-if="error" mode="error" :description="error" @retry="generate" />
+    <div v-else v-loading="loading" class="sync-body">
       <template v-if="result">
         <div class="code-pane">
           <div class="pane-head">
@@ -97,29 +102,17 @@ async function copy(text: string, label: string) {
 <style scoped lang="scss">
 .sync-view {
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px 16px;
-}
-.sync-header {
-  flex-shrink: 0;
-  padding-bottom: 10px;
-}
-.sync-title {
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 10px;
-  .sync-sub {
-    font-size: 12px;
-    font-weight: 400;
-    color: $muted;
-    margin-left: 6px;
-  }
+  gap: 14px;
+  padding: 14px 16px;
 }
 .sync-form {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
 }
 .sync-input {
   width: 220px;
@@ -141,14 +134,16 @@ async function copy(text: string, label: string) {
   display: flex;
   flex-direction: column;
   border: 1px solid $border;
-  border-radius: 8px;
+  border-radius: 10px;
+  background: $panel;
+  box-shadow: 0 2px 8px color-mix(in srgb, $primary 4%, transparent);
   overflow: hidden;
 }
 .pane-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 10px;
+  padding: 8px 12px;
   background: var(--bd-table-header, #f7f8fa);
   border-bottom: 1px solid $border;
   flex-shrink: 0;
@@ -156,6 +151,8 @@ async function copy(text: string, label: string) {
 .pane-title {
   font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  color: $muted;
 }
 .code-box {
   flex: 1;
@@ -175,5 +172,9 @@ async function copy(text: string, label: string) {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 180px;
+  border: 1px dashed $border;
+  border-radius: 10px;
+  background: $panel;
 }
 </style>

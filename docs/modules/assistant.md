@@ -1,10 +1,21 @@
 # 开发助手(DevAssistant)模块
 
-> 位置:`src/views/assistant/DevAssistantView.vue` + `src/api/assistant.ts`
-> 网关:`server/routes/assistant.js`(项目/文件路由 + 8787 转发代理)+ `server/assistant-projects.js`(项目存储)
-> 后端:`Reasonix serve`(8787,`assistantUrl` 配置)
+> 当前门户入口直接嵌入 Datadeck Agent 页面:`http://10.25.100.126:8000/agent?user_id=1030437`。
+> 入口配置位于 `src/config/menu.ts`,由 `SubAppView` 作为跨源 iframe 常驻 tab 渲染。
 
-## 架构
+## 当前入口
+
+- 菜单项 `devAssistant` 使用 `kind: 'subapp'` + `iframe: true`,不再渲染门户内置 `DevAssistantView.vue`。
+- `user_id=1030437` 固定在入口 URL 中;Datadeck 负责该用户的登录交换、会话历史、消息流和 Agent 交互,门户不复制其会话协议。
+- iframe 为跨源直连,门户只负责 tab 生命周期和刷新;目标网络必须从浏览器可达,且 Datadeck 页面不能禁止被 iframe 嵌入(`X-Frame-Options`/CSP)。
+- 旧的 `/api/assistant/*` Reasonix 代理、项目文件路由和 `src/views/assistant/DevAssistantView.vue` 暂保留,作为后续切回或适配 Datadeck API 时的代码资产,当前入口不调用。
+
+## 视觉边界
+
+- Datadeck Agent 自己管理左侧历史对话、欢迎态、消息流和输入区,门户不在 iframe 外叠加项目、分享或新会话按钮。
+- 门户只提供统一的外层 tab、刷新和关闭能力;iframe 内部保持 Datadeck 原生交互状态。
+
+## 旧版 Reasonix 代理架构(保留,当前入口未使用)
 
 ```
 浏览器 ── /api/assistant/* ──▶ 门户网关(Node)

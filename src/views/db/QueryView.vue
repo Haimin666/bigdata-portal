@@ -17,7 +17,7 @@ defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
 const db = ref('')
 // Spark executor 数量设置(0=动态分配;5/10/15/20=固定常驻),仅 sparksql 引擎显示
 const sparkExecutors = ref(0)
@@ -336,8 +336,9 @@ async function onOpenTable(payload: { db: string; table: string }) {
   }
   const src = datasources.value.find((d) => d.name === payload.db)
   const isOracle = src?.type === 'oracle'
-  // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL 用 LIMIT;标识符按方言加引号)
-  engine.value = isOracle ? 'oracle' : 'mysql'
+  const isImpala = src?.type === 'impala'
+  // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL/Impala 用 LIMIT)
+  engine.value = isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
   db.value = payload.db
   const ident = isOracle ? `"${payload.table}"` : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
@@ -369,10 +370,10 @@ async function onOpenTable(payload: { db: string; table: string }) {
   // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
   const r = results.value[results.value.length - 1]
   if (r && !r.error && r.sql.trim() === sql.trim()) {
-    r.editable = true
+    r.editable = !isImpala
     r.db = payload.db
     r.table = payload.table
-    r.engine = isOracle ? 'oracle' : 'mysql'
+    r.engine = isImpala ? 'impala' : isOracle ? 'oracle' : 'mysql'
     r.pendingEdits = []
     void loadPreviewPk(r, payload.db, payload.table, isOracle)
   }
@@ -529,6 +530,7 @@ onUnmounted(() => {
 
 // ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
 const sparkLogText = ref('')
+const dbJobLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 const sparkLogBox = ref<HTMLElement | null>(null)
 /** Spark job/stage 进度(statusTracker,3s 与日志同节奏轮询) */
@@ -589,6 +591,9 @@ watch(sparkLogBox, (el) => {
 })
 // 日志内容增量/清空/裁剪时跟随最新(仅日志面板激活时)
 watch(sparkLogText, () => {
+  if (activePane.value === 0) scrollLogToBottom()
+})
+watch(dbJobLogText, () => {
   if (activePane.value === 0) scrollLogToBottom()
 })
 
@@ -700,8 +705,13 @@ async function clearSparkLogs() {
   sparkLogOffsets.value = { ...sparkLogFileSizes.value }
 }
 
+function clearDbJobLogs() {
+  dbJobLogText.value = ''
+}
+
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
 const logEmptyHint = computed(() => {
+  if (engine.value === 'impala') return loading.value ? '(等待 db-proxy 执行日志…)': '(Impala 本次查询暂无日志)'
   if (engine.value !== 'sparksql' && engine.value !== 'pyspark' && engine.value !== 'flinksql') {
     return '(该引擎不产生引擎日志)'
   }
@@ -842,7 +852,7 @@ function getSqlToRun(): string {
 /** JSON 复合值折叠查看(弹窗展示格式化文本) */
 
 const engineLabel = computed(() => {
-  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
+  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
   return m[engine.value] || engine.value || '—'
 })
 
@@ -875,7 +885,7 @@ function formatSql() {
   const s = editorRef.value.getValue().trim()
   if (!s) return
   try {
-    // 方言:Oracle 在 sql-formatter 中为 plsql、spark 覆盖 sparksql/flinksql
+    // 方言:Oracle 在 sql-formatter 中为 plsql、spark 覆盖 sparksql/flinksql;Impala 用兼容的 MySQL 格式化降级
     const lang: SqlLanguage =
       engine.value === 'oracle' ? 'plsql' : engine.value === 'sparksql' || engine.value === 'flinksql' ? 'spark' : 'mysql'
     // ${var} 非标准 token,先占位保护(防 sql-formatter 拆散/转义);格式化后还原
@@ -1007,8 +1017,8 @@ async function runExplain() {
     ElMessage.warning('请先选择数据库')
     return
   }
-  if (engine.value !== 'mysql' && engine.value !== 'oracle') {
-    ElMessage.warning('EXPLAIN 仅支持 MySQL / Oracle')
+  if (engine.value !== 'mysql' && engine.value !== 'oracle' && engine.value !== 'impala') {
+    ElMessage.warning('EXPLAIN 仅支持 MySQL / Oracle / Impala')
     return
   }
   const rawExplain = getExplainSql()
@@ -1027,7 +1037,7 @@ async function runExplain() {
     const data = await explainSql({ db: db.value, sql })
     if (data.kind === 'tree') explainTree.value = data.root
     else {
-      // MySQL 回退为普通行;Oracle 无列时是文本行列表,统一转成单列对象
+      // MySQL/Impala 回退为行;Oracle 无列时是文本行列表,统一转成单列对象
       const cols = data.columns?.length ? data.columns : ['line']
       const rows = (data.rows || []).map((r) =>
         r && typeof r === 'object' ? (r as Record<string, unknown>) : { line: String(r) }
@@ -1109,6 +1119,8 @@ const currentDbJobId = ref('')
  *  动机:慢查询/大查询同步挂起会撞公司网关 60s 超时 504。 */
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
   if (!ensureDb()) throw new Error('请先选择数据库')
+  dbJobLogText.value = ''
+  if (engine.value === 'impala') activePane.value = 0
   const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
     const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
     currentDbJobId.value = jid
@@ -1123,6 +1135,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
         throw new Error('已取消')
       }
       const j = await getDbJob(jid)
+      if (j.logs?.length) dbJobLogText.value = j.logs.join('\n')
       if (j.state === 'done') {
         currentDbJobId.value = ''
         return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
@@ -1186,6 +1199,7 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
       costMs: 0,
       truncated: false,
       running: false,
+      logs: engine.value === 'impala' && dbJobLogText.value ? dbJobLogText.value.split('\n') : undefined,
       error: e instanceof Error ? e.message : String(e)
     }
   } finally {
@@ -1472,9 +1486,9 @@ onMounted(async () => {
     datasources.value = await listDataSources()
     if (datasources.value.length) {
       const first = datasources.value.find(
-        (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'sparksql'
+        (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'impala' || d.type === 'sparksql'
       )
-      engine.value = first ? first.type as 'mysql' | 'oracle' | 'sparksql' | 'pyspark' | 'flinksql' : ''
+      engine.value = first ? first.type as 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
       ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
@@ -1527,9 +1541,11 @@ async function onSparkExecutorsChange(val: number) {
       <div class="db-right">
     <!-- 顶部工具条 -->
     <div class="toolbar">
+      <div class="toolbar-group toolbar-group-context">
       <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable @change="db = filteredDbs[0]?.name || ''">
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
+        <el-option label="Impala" value="impala" />
         <el-option label="SparkSQL" value="sparksql" />
         <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
@@ -1551,7 +1567,9 @@ async function onSparkExecutorsChange(val: number) {
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
+      </div>
       <div class="toolbar-spacer" />
+      <div class="toolbar-group toolbar-group-editor">
       <el-tooltip content="保存脚本(Cmd+S)" placement="top">
         <el-button
           :icon="DocumentChecked"
@@ -1566,7 +1584,9 @@ async function onSparkExecutorsChange(val: number) {
       <el-tooltip content="增大字号" placement="top">
         <el-button class="font-btn" text @click="adjustFont(1)">A+</el-button>
       </el-tooltip>
+      </div>
       <el-divider direction="vertical" />
+      <div class="toolbar-group toolbar-group-run">
       <template v-if="engine === 'flinksql'">
         <el-radio-group v-model="flinkMode" size="small" class="flink-mode">
           <el-radio-button value="batch">批</el-radio-button>
@@ -1576,16 +1596,19 @@ async function onSparkExecutorsChange(val: number) {
         <el-tooltip content="PreJob 提交/管理" placement="top"><el-button size="small" :icon="Promotion" @click="showFlinkPreJob = true" /></el-tooltip>
         <el-divider direction="vertical" />
       </template>
-      <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" @click="formatSql" /></el-tooltip>
-      <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" @click="runExplain" /></el-tooltip>
+      <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" :disabled="loading" @click="formatSql" /></el-tooltip>
+      <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" :loading="explainLoading" :disabled="loading" @click="runExplain" /></el-tooltip>
       <el-tooltip v-if="loading" content="停止" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery" /></el-tooltip>
-      <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" @click="runQuery" /></el-tooltip>
+      <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" :loading="loading" :disabled="loading" @click="runQuery" /></el-tooltip>
+      </div>
       <el-divider direction="vertical" />
+      <div class="toolbar-group toolbar-group-view">
       <el-tooltip :content="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" placement="top">
         <el-button class="theme-btn" text @click="toggleTheme">
           <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
         </el-button>
       </el-tooltip>
+      </div>
     </div>
 
     <!-- SQL 文件 tab 栏(最多 10 个) -->
@@ -1666,11 +1689,16 @@ async function onSparkExecutorsChange(val: number) {
           <div class="spark-logs-head">
             <span class="spark-logs-title"><el-icon><DocumentChecked /></el-icon> 引擎日志(最近一次查询)</span>
             <span class="spark-logs-actions">
-              <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
-              <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
+              <template v-if="engine === 'impala'">
+                <el-button text size="small" @click="clearDbJobLogs">清空</el-button>
+              </template>
+              <template v-else>
+                <el-button text size="small" @click="void pollSparkLogs()">刷新</el-button>
+                <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
+              </template>
             </span>
           </div>
-          <div v-if="sparkStageData.stages.length" class="spark-stages">
+          <div v-if="engine !== 'impala' && sparkStageData.stages.length" class="spark-stages">
             <div class="spark-stages-head">
               <span class="spark-stages-title">Stage 进度</span>
               <span v-if="sparkStageData.numActiveJobs" class="spark-stages-meta">
@@ -1692,7 +1720,7 @@ async function onSparkExecutorsChange(val: number) {
               />
             </div>
           </div>
-          <pre ref="sparkLogBox" class="spark-logs-body">{{ sparkLogText || logEmptyHint }}</pre>
+          <pre ref="sparkLogBox" class="spark-logs-body">{{ (engine === 'impala' ? dbJobLogText : sparkLogText) || logEmptyHint }}</pre>
         </div>
       </template>
     </QueryResults>
@@ -1763,11 +1791,12 @@ async function onSparkExecutorsChange(val: number) {
 
 <style scoped lang="scss">
 .db-query {
-  padding: 16px;
+  padding: 14px 16px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   height: 100%;
+  min-height: 0;
   box-sizing: border-box;
   overflow: hidden; /* 整体不滚:画布/结果区各自内滚 */
 }
@@ -1784,22 +1813,39 @@ async function onSparkExecutorsChange(val: number) {
   width: 240px;
   flex-shrink: 0;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 8px;
+  background: $panel;
+  box-shadow: 0 1px 2px color-mix(in srgb, $text 5%, transparent);
   overflow: hidden;
 }
 
 /* 拖拽条 */
 .db-resizer {
-  width: 4px;
+  width: 6px;
   cursor: col-resize;
   flex-shrink: 0;
   border-radius: 3px;
-  background: $border;
+  background: transparent;
   transition: background 0.15s;
 
+  &::after {
+    content: '';
+    display: block;
+    width: 2px;
+    height: 36px;
+    margin: auto;
+    border-radius: 2px;
+    background: $border;
+    transition: background 0.15s, height 0.15s;
+  }
+
   &:hover {
-    background: $primary;
-    opacity: 0.6;
+    background: var(--bd-table-hover);
+
+    &::after {
+      height: 54px;
+      background: $primary;
+    }
   }
 }
 
@@ -1822,33 +1868,42 @@ async function onSparkExecutorsChange(val: number) {
   display: flex;
   align-items: center;
   gap: 2px;
-  background: $panel;
+  background: var(--bd-panel-sub);
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 2px 4px;
+  border-radius: 8px;
+  padding: 3px 5px;
   flex-shrink: 0;
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .file-tab {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 10px;
+  position: relative;
+  padding: 5px 11px;
   font-size: 12px;
   color: $muted;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
 
   &.active {
-    background: var(--bd-table-hover);
+    background: $panel;
     color: $text;
     font-weight: 600;
+    box-shadow: 0 1px 2px color-mix(in srgb, $text 7%, transparent), inset 0 -2px 0 $primary;
   }
 
   &:hover {
+    background: var(--bd-table-hover);
     color: $primary;
+  }
+
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, $primary 55%, transparent);
+    outline-offset: -2px;
   }
 }
 
@@ -1868,6 +1923,13 @@ async function onSparkExecutorsChange(val: number) {
   border-radius: 3px;
   padding: 1px;
   cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+
+  .file-tab:hover &,
+  .file-tab.active & {
+    opacity: 1;
+  }
 
   &:hover {
     color: #f56c6c;
@@ -1891,12 +1953,13 @@ async function onSparkExecutorsChange(val: number) {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   background: $panel;
   border: 1px solid $border;
-  border-radius: 6px;
-  padding: 4px 6px;
+  border-radius: 8px;
+  padding: 5px 7px;
   flex-shrink: 0;
+  box-shadow: 0 1px 2px color-mix(in srgb, $text 5%, transparent);
 
   /* 按钮瘦身 */
   :deep(.el-button) {
@@ -1907,6 +1970,35 @@ async function onSparkExecutorsChange(val: number) {
     min-height: 28px;
     padding: 0 8px;
   }
+}
+
+.toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+
+  :deep(.el-button) {
+    min-width: 30px;
+  }
+}
+
+.toolbar-group-context {
+  gap: 5px;
+}
+
+.toolbar-group-run {
+  gap: 4px;
+}
+
+.toolbar-group-view {
+  gap: 2px;
+}
+
+:deep(.toolbar .el-divider--vertical) {
+  height: 20px;
+  margin: 0 3px;
+  border-color: color-mix(in srgb, $border 90%, transparent);
 }
 
 .engine-select {
@@ -1949,13 +2041,14 @@ async function onSparkExecutorsChange(val: number) {
 .sql-canvas {
   position: relative;
   display: flex;
-  background: #34373c;
+  background: var(--bd-panel-sub);
+  border: 1px solid $border;
   border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
 
   &.light {
-    background: #f7f8fa;
+    background: var(--bd-panel);
   }
 }
 .sql-editor {
@@ -1985,7 +2078,7 @@ async function onSparkExecutorsChange(val: number) {
   color: $muted;
   flex-shrink: 0;
   user-select: none;
-  background: $panel;
+  background: var(--bd-panel-sub);
   border-top: 1px solid $border;
   border-bottom: 1px solid $border;
   border-radius: 3px;
@@ -1993,6 +2086,11 @@ async function onSparkExecutorsChange(val: number) {
   &:hover {
     color: $primary;
     background: var(--bd-table-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, $primary 55%, transparent);
+    outline-offset: -2px;
   }
 }
 
@@ -2010,7 +2108,7 @@ async function onSparkExecutorsChange(val: number) {
   padding: 4px 10px;
   font-size: 12px;
   color: $muted;
-  background: $panel;
+  background: var(--bd-panel-sub);
   border-top: 1px solid $border;
   flex-shrink: 0;
 
@@ -2042,12 +2140,14 @@ async function onSparkExecutorsChange(val: number) {
   display: flex;
   align-items: center;
   gap: 14px;
-  height: 26px;
+  height: 28px;
   padding: 0 12px;
   font-size: 12px;
   color: $muted;
   background: $panel;
-  border-top: 1px solid $border;
+  border: 1px solid $border;
+  border-radius: 7px;
+  box-shadow: 0 1px 2px color-mix(in srgb, $text 4%, transparent);
   user-select: none;
 
   .sb-label {
@@ -2087,15 +2187,17 @@ async function onSparkExecutorsChange(val: number) {
   display: flex;
   flex-direction: column;
   min-height: 120px; /* 确保展开后可见,不被结果区挤没 */
-  border-top: 1px solid var(--el-border-color-lighter);
-  background: var(--el-bg-color);
+  border: 1px solid $border;
+  border-radius: 8px;
+  background: var(--bd-panel);
+  overflow: hidden;
 }
 .spark-logs-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 12px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
+  border-bottom: 1px solid $border;
   flex-shrink: 0;
 }
 .spark-logs-title {
@@ -2104,7 +2206,7 @@ async function onSparkExecutorsChange(val: number) {
   gap: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--el-text-color-primary);
+  color: $text;
 }
 .spark-logs-actions {
   display: flex;
@@ -2208,8 +2310,8 @@ async function onSparkExecutorsChange(val: number) {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
-  color: var(--el-text-color-regular);
-  background: var(--el-fill-color-light);
+  color: $text;
+  background: var(--bd-panel-sub);
 }
 
 /* ── EXPLAIN 面板 ─────────────────────────────────────── */
@@ -2254,8 +2356,9 @@ async function onSparkExecutorsChange(val: number) {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
-  color: var(--el-text-color-regular);
-  background: var(--el-fill-color-light);
+  color: $text;
+  background: var(--bd-panel-sub);
+  border: 1px solid $border;
   border-radius: 4px;
 }
 </style>
