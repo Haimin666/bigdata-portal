@@ -4,10 +4,11 @@
 
 `mobile/` 是大数据门户的独立移动端子工程，首期服务于 Android。它复用现有 Express 网关、用户权限和集群 API，不直连 YARN、DolphinScheduler、HDFS 或 db-proxy，也不在安装包中保存任何集群凭证。
 
-首期聚焦两个高频场景：
+移动端覆盖以下高频场景：
 
 - YARN：总览、应用筛选、详情与终止操作。
 - 离线开发：项目、全部工作流、工作流详情、近两天工作流/任务实例的移动只读浏览，以及工作流上线/下线、启动、定时上下线、实例停止/重跑和任务日志；下线工作流默认收起，操作入口保持直接展示；完整 DolphinScheduler 页面仍可通过全屏 WebView 入口访问。
+- 开发助手：使用专门的移动对话界面，展示历史会话和消息，发送后实时渲染 Datadeck Run SSE 内容；不嵌入桌面助手页面、不复制 Agent 运行逻辑。
 
 ## 2. 技术与目录
 
@@ -22,8 +23,8 @@ mobile/
 ├── src/
 │   ├── api/          # 复用现有网关契约的移动端请求封装
 │   ├── components/   # 移动端通用状态和操作组件
-│   ├── pages/        # 登录、首页、YARN、离线开发、我的
-│   ├── stores/       # 登录态与页面状态
+│   ├── pages/        # 登录、首页、YARN、离线开发、助手、我的
+│   ├── stores/       # 登录态、助手与页面状态
 │   └── theme/        # 独立移动主题
 ├── android/          # Capacitor 生成的 Android 工程
 └── capacitor.config.ts
@@ -34,8 +35,9 @@ mobile/
 ## 3. 访问与认证
 
 - 本地开发：Vite 将 `/api`、`/hadoopapi`、`/apps`、`/dolphinscheduler` 等路径代理到现有网关，沿用 `portal_session` Cookie。
+- 助手 API 通过门户受控前缀 `/api/mobile/assistant/*` 转发到 Datadeck；固定使用 `user_id=1030437` 交换 Datadeck bearer token，后续会话、历史、Run 创建/取消和 SSE 请求经网关代理，Android 不直连 Datadeck 端口。
 - Android 生产地址固定为 `https://bigdata-portal.corp.shiqiao.com/mobile/`。用户先连接企业 VPN/零信任，Android 容器再加载该同源 HTTPS 页面；`/api`、`/hadoopapi`、`/dolphinscheduler` 与移动页面共享门户域和 `portal_session` Cookie。VPN 未连接时直接显示网络不可达，不回退公网地址，也不关闭 TLS 校验。
-- 首期沿用现有 Cookie 会话，不新增或复制子系统账号。后续若引入移动 Token，网关必须将 Cookie/Bearer 统一归一为同一个调用用户与模块权限上下文。
+- 门户 API 沿用现有 Cookie 会话；Datadeck 助手在服务端受控代理下固定交换用户 `1030437` 的短期 bearer token，并仅在页面内存中使用。移动端不保存集群或 Datadeck 长期凭证。
 - DolphinScheduler API 读取允许具有 `dsTask` 或 `ds` 任一模块权限的已登录用户访问；完整页面入口仍归 `ds` 模块。门户不保存或注入用户密码。
 
 ## 4. 页面与操作边界
@@ -45,6 +47,7 @@ mobile/
 | 首页 | YARN 与当日任务摘要、失败/运行状态、快捷入口 |
 | YARN | RM 选择、状态筛选、搜索、刷新、应用详情、终止应用 |
 | 离线开发 | 仅保留项目、工作流两个一级 tab；展示全部工作流，下线工作流默认收起，操作入口保持直接展示；工作流行内展开近两天工作流实例和任务实例；工作流上线/下线和手动启动；定时列表及上下线；实例停止/重跑；任务日志分页查看/刷新/复制；打开完整 DolphinScheduler |
+| 开发助手 | 固定 Agent；最近会话、新会话、历史消息、流式回答、停止生成、失败重试；输入区适配键盘并自动滚动；不承载 Web 桌面侧栏/项目管理等复杂功能 |
 | 我的 | 当前用户、角色、授权模块、门户连接信息、退出登录 |
 
 危险操作（终止 YARN 应用、工作流/定时上下线、启动工作流、停止/重跑实例）必须满足：

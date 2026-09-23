@@ -5,7 +5,7 @@
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/dataleap',
-  '/api/assistant', '/api/sync', '/api/mail',
+  '/api/assistant', '/api/mobile/assistant', '/api/sync', '/api/mail',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
   '/webhdfs', '/dolphinscheduler', '/static', '/agent'
 ]
@@ -15,7 +15,7 @@ const MODULE_PREFIXES = [
   { module: 'dsTask', prefixes: ['/api/ds-deps'] },
   { module: 'dataleap', prefixes: ['/api/dataleap'] },
   { module: 'yarn', prefixes: ['/yarniframe', '/hadoopapi', '/api/iframe-proxy'] },
-  { module: 'devAssistant', prefixes: ['/api/assistant'] },
+  { module: 'devAssistant', prefixes: ['/api/assistant', '/api/mobile/assistant'] },
   { module: 'sync', prefixes: ['/api/sync'] },
   { module: 'hdfs', prefixes: ['/apps/hdfs', '/static', '/webhdfs'] },
   { module: 'ds', prefixes: ['/apps/dsweb'] },

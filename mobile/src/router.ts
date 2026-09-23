@@ -13,6 +13,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'home', component: () => import('@/pages/HomePage.vue') },
       { path: 'yarn', component: () => import('@/pages/YarnPage.vue') },
       { path: 'offline', component: () => import('@/pages/OfflinePage.vue') },
+      { path: 'assistant', component: () => import('@/pages/AssistantPage.vue') },
       { path: 'profile', component: () => import('@/pages/ProfilePage.vue') }
     ]
   }
@@ -30,6 +31,7 @@ router.beforeEach(async (to: RouteLocationNormalized) => {
     }
   }
   if (to.meta.public) return auth.loggedIn || auth.authDisabled ? '/app/home' : true
+  if (to.path === '/app/assistant' && !auth.canAccess('devAssistant')) return '/app/home'
   return auth.loggedIn || auth.authDisabled ? true : '/login'
 })
 

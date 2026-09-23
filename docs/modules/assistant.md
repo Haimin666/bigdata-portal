@@ -1,19 +1,22 @@
 # 开发助手(DevAssistant)模块
 
-> 当前门户入口直接嵌入 Datadeck Agent 页面:`http://10.25.100.126:8000/agent?user_id=1030437`。
-> 入口配置位于 `src/config/menu.ts`,由 `SubAppView` 作为跨源 iframe 常驻 tab 渲染。
+> Web 桌面端使用门户同源 `/agent?user_id=1030437` 嵌入 Datadeck Agent。Android APK 使用专门的移动对话界面，经门户受控 API 代理复用 Datadeck 的 Agent、会话、Run 和 SSE 流。
 
 ## 当前入口
 
-- 菜单项 `devAssistant` 使用 `kind: 'subapp'` + `iframe: true`,不再渲染门户内置 `DevAssistantView.vue`。
-- `user_id=1030437` 固定在入口 URL 中;Datadeck 负责该用户的登录交换、会话历史、消息流和 Agent 交互,门户不复制其会话协议。
-- iframe 为跨源直连,门户只负责 tab 生命周期和刷新;目标网络必须从浏览器可达,且 Datadeck 页面不能禁止被 iframe 嵌入(`X-Frame-Options`/CSP)。
+- Web 菜单项 `devAssistant` 使用 `kind: 'subapp'` + `iframe: true`,不再渲染门户内置 `DevAssistantView.vue`；APK 有独立原生聊天页面，不嵌套桌面 UI。
+- Web 页面用 `user_id=1030437` 完成 Datadeck 登录交换；APK 由门户移动助手代理固定该用户身份进行 token 交换，token 只保存在移动页面内存中，并随后续受限 API 请求发送。
+- Web iframe 为同源反向代理,门户控制登录与模块访问;Datadeck 页面负责 Web 端完整会话和消息体验。APK 调用同一 Datadeck 服务端 API,由门户受控代理保护访问,用 Datadeck Run SSE 增量更新手机消息气泡。
 - 旧的 `/api/assistant/*` Reasonix 代理、项目文件路由和 `src/views/assistant/DevAssistantView.vue` 暂保留,作为后续切回或适配 Datadeck API 时的代码资产,当前入口不调用。
 
 ## 视觉边界
 
-- Datadeck Agent 自己管理左侧历史对话、欢迎态、消息流和输入区,门户不在 iframe 外叠加项目、分享或新会话按钮。
-- 门户只提供统一的外层 tab、刷新和关闭能力;iframe 内部保持 Datadeck 原生交互状态。
+- Web 端 Datadeck Agent 自己管理历史对话、欢迎态、消息流和输入区。
+- APK 使用独立移动聊天界面：底部固定输入栏、流式消息、最近会话抽屉、停止/重试和键盘适配；复杂工具审批提示用户转到 Web 助手处理。对话能力调用同一 Datadeck API，不嵌套桌面 UI。
+
+## Android API 代理
+
+`/api/mobile/assistant/*` 只允许门户已登录且有 `devAssistant` 模块权限的用户访问。网关固定映射到 Datadeck GoAI 用户 `1030437`，并对白名单 API 做路径和 HTTP 方法限制：默认 Agent、会话列表/创建、历史、Run 创建/查询/取消和 SSE 事件流。任意管理 API、文件 API 不通过该入口暴露。SSE 响应由代理直接流式转发，移动端解析 `messages` 增量并恢复到当前回答气泡。
 
 ## 旧版 Reasonix 代理架构(保留,当前入口未使用)
 

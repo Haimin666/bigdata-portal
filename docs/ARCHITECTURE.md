@@ -55,7 +55,7 @@ src/
 - **表格工具栏**:`TableToolbar` 统一刷新、表格密度和筛选/操作插槽;密度偏好按页面保存在 localStorage,列显隐仍由业务页面维护
 - **自建页面滚动契约**:原生页面根节点固定在 `TabStage` 内容区内并使用 `min-height:0; overflow:hidden`;表格、结果集、文件列表、消息流等长内容由自身容器 `flex:1; overflow:auto` 承担滚动,工具栏和分页不随数据行数下移
 - **tab 刷新策略**:标签页上下文刷新只递增当前 tab 的 `refreshKey`;常驻池继续使用 `v-show`,不会因为切换丢失页面状态。打开 tab 路径按用户写入 `sessionStorage`,浏览器刷新后恢复顺序,不同用户使用不同键
-- **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;开发助手作为跨源 iframe 子应用嵌入 Datadeck Agent,固定使用受控入口用户
+- **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;Web 开发助手复用门户同源 `/agent?user_id=1030437`,Android 使用原生移动对话界面,经门户受控代理调用同一 Datadeck 会话与 SSE Run API
 - **危险操作反馈**:工作流实例、任务节点、YARN 应用和同步生成等异步操作必须在目标按钮上显示 loading,成功后刷新或展示结果,失败保留可重试入口;不得用全局遮罩阻塞无关页面操作
 - **桌面端视觉层**:桌面壳采用低饱和蓝灰中性色、系统无衬线字体和语义主题变量;侧栏/标签页统一使用轻量层级和明确 hover/active/focus 状态,不改变业务页面的宽表格、SQL 画布和内容区尺寸。侧栏折叠入口固定在顶部壳层左侧,使用 `Fold/Expand` 图标切换 220px/64px 宽度;深浅主题入口固定在顶部操作区,切换状态持久化到 `localStorage` 并同步 `html.dark`
 - **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
@@ -84,7 +84,7 @@ src/
 | `routes/spark.js` | Spark SQL:query/jobs/logs/status/config/stages/cancel；用户访问由模块与数据权限矩阵控制 |
 | `routes/flink.js` | Flink SQL:交互查询/async/连接器/DDL 生成/jobs/PreJob 全套路由 |
 | `routes/dbquery.js` | MySQL/Oracle 同步查询 `/api/dbquery/query`(写检测 + 权限矩阵) |
-| `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 Reasonix 代理;Datadeck Agent `/agent` iframe/API/资源同源代理 |
+| `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 Reasonix 代理;Datadeck Web `/agent` 页面代理与 APK `/api/mobile/assistant/*` 固定用户/白名单 API+SSE 流代理 |
 | `routes/portal.js` | 门户配置下发:`/api/config/modules` + `/api/config`(白名单字段,不泄露敏感配置) |
 | `routes/ws-proxy.js` | WebSocket 代理(stingray/jupyter)+ upgrade 登录鉴权 |
 | `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
@@ -173,7 +173,7 @@ QueryView.vue
 
 仓库新增独立 `mobile/` 子工程（Vue 3 + Ionic Vue + Capacitor）。移动端复用 Express 网关的认证、模块权限和 YARN/DolphinScheduler API，不直连集群，也不持有 `dsToken`、`dbProxyToken` 等服务凭证。
 
-- YARN 与离线开发使用专门的移动页面；离线开发原生覆盖项目、工作流/详情、近两天工作流/任务实例及常用受控操作，避免复用桌面大表格、G6 和 Monaco。
+- YARN、离线开发、开发助手使用专门的移动页面；离线开发原生覆盖项目、工作流/详情、近两天工作流/任务实例及常用受控操作，开发助手原生呈现会话列表、消息流与输入操作，通过门户同源 API 代理复用 Datadeck Web 后端和流式 Run SSE，不嵌入桌面页面。
 - 完整“离线开发”继续通过网关的 `/apps/dsweb/ui/#/home` 代理入口访问，在 Android 全屏 WebView 容器中运行。
 - 本地开发由移动 Vite 服务代理到网关并沿用 `portal_session` Cookie。生产 Android 在企业 VPN/零信任网络内加载 `https://bigdata-portal.corp.shiqiao.com/mobile/`；网关从独立 `mobile/dist/` 托管该路径，桌面 Web 仍使用根路径 `/` 和 `dist/`。两端共享 HTTPS 域名、`portal_session` Cookie、API 与权限体系。
 - 移动端危险操作继续由网关角色/模块门禁兜底，前端必须增加目标确认与重复提交保护；DolphinScheduler 门禁覆盖工作流发布/启动、定时上下线和实例执行类接口。

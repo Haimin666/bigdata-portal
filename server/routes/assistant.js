@@ -7,6 +7,25 @@ import config from '../config.js'
 import { createAssistantProjectsRoutes } from '../assistant-projects.js'
 import { datadeckPath, isDatadeckIframeRequest } from '../utils/datadeck-proxy.js'
 
+function mobileAssistantTarget(path, method) {
+  const queryIndex = path.indexOf('?')
+  const pathname = queryIndex < 0 ? path : path.slice(0, queryIndex)
+  const query = queryIndex < 0 ? '' : path.slice(queryIndex)
+  const thread = /^\/threads\/([a-zA-Z0-9_-]{1,128})\/(history|active-run)$/.exec(pathname)
+  const run = /^\/runs\/([a-zA-Z0-9_-]{1,128})(?:\/(events|cancel))?$/.exec(pathname)
+
+  if (method === 'GET' && pathname === '/auth/goai') return '/api/auth/goai?user_id=1030437'
+  if (method === 'GET' && pathname === '/agent/default') return `/api/agent/default${query}`
+  if (method === 'GET' && pathname === '/threads') return `/api/chat/threads${query}`
+  if (method === 'POST' && pathname === '/threads') return '/api/chat/thread'
+  if (thread && method === 'GET') return `/api/chat/thread/${thread[1]}/${thread[2]}${query}`
+  if (method === 'POST' && pathname === '/runs') return '/api/agent/runs'
+  if (run && run[2] === 'events' && method === 'GET') return `/api/agent/runs/${run[1]}/events${query}`
+  if (run && run[2] === 'cancel' && method === 'POST') return `/api/agent/runs/${run[1]}/cancel`
+  if (run && !run[2] && method === 'GET') return `/api/agent/runs/${run[1]}${query}`
+  return null
+}
+
 export function setupAssistant(app, auth) {
   const datadeckProxy = (pathRewrite) => createProxyMiddleware({
     target: config.datadeckUrl,
@@ -42,6 +61,16 @@ export function setupAssistant(app, auth) {
   app.use('/agent', (req, res, next) => {
     if (!requireDatadeckAccess(req, res)) return
     datadeckPageProxy(req, res, next)
+  })
+
+  // 移动端使用原生聊天 UI，只开放 Datadeck 对话必需的 API，不暴露管理/文件等任意接口。
+  const mobileAssistantProxy = datadeckProxy((path, req) => mobileAssistantTarget(path, req.method) || path)
+  app.use('/api/mobile/assistant', (req, res, next) => {
+    if (!requireDatadeckAccess(req, res)) return
+    if (!mobileAssistantTarget(req.url, req.method)) {
+      return res.status(404).json({ code: 404, msg: '移动助手接口不存在' })
+    }
+    mobileAssistantProxy(req, res, next)
   })
 
   // Datadeck 使用根路径静态资源。门户 dist 优先提供自己的文件,未命中才落到这里。
