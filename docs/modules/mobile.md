@@ -35,7 +35,7 @@ mobile/
 ## 3. 访问与认证
 
 - 本地开发：Vite 将 `/api`、`/hadoopapi`、`/apps`、`/dolphinscheduler` 等路径代理到现有网关，沿用 `portal_session` Cookie。
-- 助手 API 通过门户受控前缀 `/api/mobile/assistant/*` 转发到 Datadeck；固定使用 `user_id=1030437` 交换 Datadeck bearer token，后续会话、历史、Run 创建/取消和 SSE 请求经网关代理，Android 不直连 Datadeck 端口。
+- 助手 API 通过门户受控前缀 `/api/mobile/assistant/*` 转发到 Datadeck；固定使用 `user_id=1030437` 交换 Datadeck bearer token，移动端使用普通用户被分配的内置 `operations-agent`（而不是管理员默认 `default-chatbot`），后续会话、历史、Run 创建/取消和 SSE 请求经现有网关白名单代理，Android 不直连 Datadeck 端口。
 - Android 生产地址固定为 `https://bigdata-portal.corp.shiqiao.com/mobile/`。用户先连接企业 VPN/零信任，Android 容器再加载该同源 HTTPS 页面；`/api`、`/hadoopapi`、`/dolphinscheduler` 与移动页面共享门户域和 `portal_session` Cookie。VPN 未连接时直接显示网络不可达，不回退公网地址，也不关闭 TLS 校验。
 - 门户 API 沿用现有 Cookie 会话；Datadeck 助手在服务端受控代理下固定交换用户 `1030437` 的短期 bearer token，并仅在页面内存中使用。移动端不保存集群或 Datadeck 长期凭证。
 - DolphinScheduler API 读取允许具有 `dsTask` 或 `ds` 任一模块权限的已登录用户访问；完整页面入口仍归 `ds` 模块。门户不保存或注入用户密码。
@@ -83,6 +83,8 @@ npm run type-check
 npm run build
 npx cap sync android
 ```
+
+本机需要生成可安装 APK 时，在仓库根目录运行 `./scripts/build-android-apk.sh`。该脚本检查 Node.js 22+、JDK 17+ 与 Android SDK，完成移动端构建、Capacitor 同步及 Gradle `assembleDebug`；产物位于 `mobile/android/app/build/outputs/apk/debug/app-debug.apk`。首次缺少 `mobile/node_modules` 时会执行 `npm ci`。APK 使用当前 Capacitor 配置加载门户 HTTPS 地址，移动 Web 代码仍需部署门户服务端才能更新。
 
 涉及危险操作时，只校验请求构造与确认流程，不使用真实应用或实例 ID。
 

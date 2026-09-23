@@ -106,7 +106,7 @@ import {
 } from 'ionicons/icons'
 import {
   bootstrapAssistant, cancelAssistantRun, createAssistantRun, createAssistantThread,
-  getAssistantHistory, getDefaultAssistant, listAssistantThreads, streamAssistantRun
+  getAssistantHistory, getMobileAssistantAgent, listAssistantThreads, streamAssistantRun
 } from '@/api/assistant'
 import type { AssistantAgent, AssistantMessage, AssistantThread } from '@/api/assistant'
 
@@ -144,7 +144,7 @@ async function initialize() {
   try {
     const session = await bootstrapAssistant()
     token.value = session.access_token
-    agent.value = await getDefaultAssistant(token.value)
+    agent.value = getMobileAssistantAgent()
     threads.value = await listAssistantThreads(token.value, agent.value.id)
     const previousId = localStorage.getItem('mobile-assistant-thread')
     const selected = threads.value.find((thread) => thread.id === previousId) || threads.value[0]

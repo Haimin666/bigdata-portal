@@ -44,9 +44,9 @@ export async function bootstrapAssistant(): Promise<AssistantToken> {
   return assistantRequest<AssistantToken>(`/auth/goai?user_id=${assistantUserId}`)
 }
 
-export async function getDefaultAssistant(token: string): Promise<AssistantAgent> {
-  const response = await assistantRequest<{ agent: AssistantAgent }>('/agent/default', token)
-  return response.agent
+export function getMobileAssistantAgent(): AssistantAgent {
+  // GoAI 固定身份是 Datadeck 普通用户；该角色被分配 operations-agent，不能运行 default-chatbot。
+  return { id: 'operations-agent', slug: 'operations-agent', name: '运营助手' }
 }
 
 export async function listAssistantThreads(token: string, agentId: string): Promise<AssistantThread[]> {

@@ -55,7 +55,7 @@ src/
 - **表格工具栏**:`TableToolbar` 统一刷新、表格密度和筛选/操作插槽;密度偏好按页面保存在 localStorage,列显隐仍由业务页面维护
 - **自建页面滚动契约**:原生页面根节点固定在 `TabStage` 内容区内并使用 `min-height:0; overflow:hidden`;表格、结果集、文件列表、消息流等长内容由自身容器 `flex:1; overflow:auto` 承担滚动,工具栏和分页不随数据行数下移
 - **tab 刷新策略**:标签页上下文刷新只递增当前 tab 的 `refreshKey`;常驻池继续使用 `v-show`,不会因为切换丢失页面状态。打开 tab 路径按用户写入 `sessionStorage`,浏览器刷新后恢复顺序,不同用户使用不同键
-- **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;Web 开发助手复用门户同源 `/agent?user_id=1030437`,Android 使用原生移动对话界面,经门户受控代理调用同一 Datadeck 会话与 SSE Run API
+- **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;Web 开发助手复用门户同源 `/agent?user_id=1030437`,Android 使用原生移动对话界面,固定普通用户选择其被分配的 `operations-agent`,并经现有门户白名单代理调用 Datadeck 会话与 SSE Run API
 - **危险操作反馈**:工作流实例、任务节点、YARN 应用和同步生成等异步操作必须在目标按钮上显示 loading,成功后刷新或展示结果,失败保留可重试入口;不得用全局遮罩阻塞无关页面操作
 - **桌面端视觉层**:桌面壳采用低饱和蓝灰中性色、系统无衬线字体和语义主题变量;侧栏/标签页统一使用轻量层级和明确 hover/active/focus 状态,不改变业务页面的宽表格、SQL 画布和内容区尺寸。侧栏折叠入口固定在顶部壳层左侧,使用 `Fold/Expand` 图标切换 220px/64px 宽度;深浅主题入口固定在顶部操作区,切换状态持久化到 `localStorage` 并同步 `html.dark`
 - **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
