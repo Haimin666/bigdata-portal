@@ -483,7 +483,17 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
             etype = "ConnectError"
         elif "parseexception" in lower or "syntax" in lower:
             etype = "SyntaxError"
-        elif "type mismatch" in lower or "incompatible types" in lower or "cannot resolve" in lower:
+        elif any(
+            marker in lower
+            for marker in (
+                "type mismatch",
+                "incompatible types",
+                "operands of type",
+                "not comparable",
+                "cannot implicitly convert",
+                "incompatible operand",
+            )
+        ):
             etype = "TypeMismatch"
         elif "analysisexception" in lower or "column not found" in lower:
             etype = "ColumnNotFound"
@@ -524,7 +534,15 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: 
     return ds, clean_sql, is_select, limit, q_timeout, time.time()
 
 
-def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: int, start: float) -> Dict[str, Any]:
+def _execute_query(
+    ds: Any,
+    conn: Any,
+    clean_sql: str,
+    is_select: bool,
+    limit: int,
+    start: float,
+    job_logs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """在已建立的连接上执行(连接由调用方管理,以便异步 job 取消时 close 中断)。"""
     if is_select:
         # 查询类:仅 SELECT/WITH 查询追加行数限制(SHOW/DESC/EXPLAIN 不追加,
@@ -534,7 +552,11 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
         if SELECT_ONLY_RE.match(clean_sql) and not LIMIT_RE.search(clean_sql):
             clean_sql = append_row_limit(clean_sql, limit, row_mode)
         cur = conn.cursor()
+        if ds.type == "impala" and job_logs is not None:
+            job_logs.append("【Impala 进度】已提交 SQL，正在等待 Impala 执行完成。")
         cur.execute(clean_sql)
+        if ds.type == "impala" and job_logs is not None:
+            job_logs.append("【Impala 进度】SQL 执行完成，正在读取查询结果。")
         if ds.type == "mysql":
             rows = cur.fetchall()  # DictCursor → list[dict]
             truncated = len(rows) > limit
@@ -546,6 +568,8 @@ def _execute_query(ds: Any, conn: Any, clean_sql: str, is_select: bool, limit: i
             description = list(cur.description or [])
             columns = [str(d[0]).lower() for d in description]
             rows = _rows_to_dicts(fetched[:limit], description)
+            if ds.type == "impala" and job_logs is not None:
+                job_logs.append("【Impala 进度】结果读取完成：%d 行、%d 列。" % (len(rows), len(columns)))
         cur.close()
         return {
             "columns": columns,
@@ -596,7 +620,7 @@ def _execute_database(
     run_sql = clean_sql
     schema_summary = None
     if ds.type == "impala" and ds.read_only and not is_select:
-        logs.append("[guard] write rejected: Impala datasource is read-only")
+        logs.append("【安全拦截】当前 Impala 数据源为只读模式，已拒绝写入操作。")
         raise DbError(ds.type, "ReadOnly", None, "Impala datasource is configured read-only", logs)
     if ds.type == "impala" and is_select:
         schema_conn = None
@@ -606,9 +630,9 @@ def _execute_database(
                 schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
                 run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(schema_conn, run_sql, logs)
             elif IMPALA_ENGINE.type_check_enabled:
-                logs.append("[type-check] skipped: sqlglot is not installed")
+                logs.append("【类型校验】未安装 sqlglot，本次跳过类型校验。")
         except Exception as exc:
-            logs.append("[type-check] skipped: %s" % (str(exc) or exc.__class__.__name__))
+            logs.append("【类型校验】准备校验时发生错误，继续执行原 SQL：%s。" % (str(exc) or exc.__class__.__name__))
         finally:
             if schema_conn is not None:
                 try:
@@ -617,11 +641,15 @@ def _execute_database(
                     pass
     ai_attempt = 0
     while True:
-        logs.append("[execute] attempt %d" % (ai_attempt + 1))
+        logs.append("【执行】开始执行 SQL（第 %d 次）。" % (ai_attempt + 1))
+        if ai_attempt:
+            logs.append("【AI 修正后实际执行 SQL】\n" + run_sql)
         try:
-            result = _execute_query(ds, conn, run_sql, is_select, limit, start)
             if ds.type == "impala":
-                logs.append("[execute] completed in %sms" % result.get("costMs", 0))
+                logs.append("【Impala 进度】类型校验完成，准备提交 SQL。")
+            result = _execute_query(ds, conn, run_sql, is_select, limit, start, logs)
+            if ds.type == "impala":
+                logs.append("【执行成功】耗时 %s 毫秒。" % result.get("costMs", 0))
                 result["engine"] = "impala"
                 result["executedSql"] = run_sql
                 result["logs"] = logs
@@ -633,9 +661,17 @@ def _execute_database(
                 raise de
             de = _extract_sql_error(exc, ds.type)
             if de.error_type not in ("SyntaxError", "TypeMismatch", "ColumnNotFound", "TableNotFound"):
-                logs.append("[ai-fix] skipped for %s" % de.error_type)
+                logs.append("【AI 修复】错误类型为 %s，当前不自动修复。" % de.error_type)
                 de.logs = logs
                 raise de
+            error_labels = {
+                "SyntaxError": "SQL 语法错误",
+                "TypeMismatch": "字段类型不匹配",
+                "ColumnNotFound": "字段或表引用无法识别",
+                "TableNotFound": "数据表不存在",
+            }
+            logs.append("【执行失败】错误类型：%s（%s）。" % (error_labels.get(de.error_type, de.error_type), de.error_type))
+            logs.append("【执行失败】数据库详情：%s" % de.message)
             ai_attempt += 1
             new_sql = IMPALA_ENGINE.rewrite_sql(
                 run_sql,
@@ -645,11 +681,13 @@ def _execute_database(
                 ai_attempt,
             )
             if not new_sql:
+                if not IMPALA_ENGINE.ai.enabled:
+                    logs.append("【AI 修复】未启用 AI 修复，结束自动重试。")
                 de = _extract_sql_error(exc, ds.type)
                 de.logs = logs
                 raise de
             if not _impala_read_only(new_sql):
-                logs.append("[ai-fix] rejected: rewritten SQL is not read-only")
+                logs.append("【安全校验】AI 返回的 SQL 不是只读查询，已拒绝执行。")
                 de = _extract_sql_error(exc, ds.type)
                 de.logs = logs
                 raise de
@@ -661,7 +699,7 @@ def _execute_database(
                 finally:
                     schema_conn.close()
             except Exception as type_exc:
-                logs.append("[type-check] retry skipped: %s" % (str(type_exc) or type_exc.__class__.__name__))
+                logs.append("【类型校验】AI 修复后的 SQL 未能完成字段校验，继续尝试执行：%s。" % (str(type_exc) or type_exc.__class__.__name__))
 
 
 def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync") -> Dict[str, Any]:
@@ -787,8 +825,12 @@ class DbJobManager:
         try:
             # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
             ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"], source="async")
+            if ds.type == "impala":
+                j["logs"].append("【Impala 进度】任务已启动，正在连接数据源。")
             conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
             j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
+            if ds.type == "impala":
+                j["logs"].append("【Impala 进度】数据源连接成功，开始 SQL 类型校验。")
             try:
                 result = _execute_database(ds, conn, clean_sql, is_select, limit, start, j["logs"], q_timeout)
             finally:
