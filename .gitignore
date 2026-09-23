@@ -34,6 +34,8 @@ demo-proto/
 # flink 测试脚本目录(含真实连接串,不入库)
 flink-demo/
 services/db-proxy/datasources.json
+services/db-proxy/data/impala-schema-cache.json
+services/db-proxy/data/.impala-schema-cache-*.tmp
 mysql_online_conns.json
 tmp/
 
@@ -45,6 +47,9 @@ tmp/
 .dsh/
 # 本地 UI demo(可敲定参考,非交付物)
 demo-query-ui/
+# 本地克隆参考项目与文档目录(不跟踪新增文件)
+.clone-ui/
+docs/
 # MCP 本地配置(含本机绝对路径)
 .mcp.json
 # Python 编译缓存与虚拟环境

@@ -9,7 +9,8 @@
 - 查询工作台采用 Soybean 风格的低对比度分层:页面背景、面板、次级面板和边框统一使用门户主题 token(`--bd-*`),浅色/深色主题均保持足够文字对比度;不在模块内引入独立颜色体系。
 - 顶部工具条按「数据源上下文 / 编辑器 / 执行与诊断 / 视图」分组,通过紧凑间距、分隔线、Tooltip 和明确的 loading/disabled 状态表达操作上下文;现有按钮、快捷键和弹窗入口不减少。
 - 脚本 Tab、结果 Tab、左侧目录 Tab 使用同一套 active/hover/focus 反馈;结果表格、日志、脚本树和历史列表继续在各自容器内滚动,查询页面根节点不产生整页滚动。
-- 本轮仅调整布局层级、主题色、边框/阴影、焦点反馈和状态呈现,不改变查询 API、执行顺序、结果分页、日志轮询、复制导出、行内编辑、EXPLAIN、历史收藏、Flink 连接器/PreJob 管理等既有能力。
+- 查询日志与结果区始终受工作台固定高度约束;引擎日志仅在日志面板内部滚动,不得撑开查询页或遮挡底部状态栏。
+- Oracle `BEGIN/DECLARE` 匿名 PL/SQL 块和 `CREATE ... PROCEDURE/FUNCTION/PACKAGE/TRIGGER` 按一个执行单元提交,保留块内及结尾分号;兼容 SQL*Plus 独立 `/` 结束行(提交前移除);不影响普通 SQL 按分号批执行。
 
 ## 2. 涉及文件
 
@@ -48,7 +49,7 @@
 - 标题策略:数据库查询页不重复展示“数据库查询”标题,侧栏与 Tab 负责导航标识,工作台状态由引擎/库/结果状态栏承载。
 
 - **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink` 取消当前引擎 job
-- **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab
+- **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab。MySQL/Oracle 异步 job 的状态只保存在 db-proxy 进程内存,完成/失败状态保留 1 小时;页面轮询遇到临时网络错误应重试,但浏览器刷新会丢失 jobId,db-proxy 重启会丢失任务状态。
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化**:el-table `@header-dragend` 按 库.表(或 SQL 前 40 字符)签名写入 localStorage,刷新保留。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
@@ -67,7 +68,7 @@
 - **历史与收藏**:QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history:<用户名>`(**按用户隔离**,同一浏览器多账号互不可见;认证关闭落到 `default`;**上限 20 条循环缓存**:新在前、同 sql 去重、超出删最旧);侧栏「历史」tab 星标收藏写入 `db-query-favorites:<用户名>`(上限 50);**点击历史/收藏条目只回填编辑器不自动执行**(历史是缓存,用户按 Cmd+Enter 自行运行);**结果快照随历史缓存**(2026-08)——执行成功时把该 SQL 的列+前 100 行快照写入条目(序列化 >200KB 不缓存),点击带快照的条目除回填编辑器外直接开一个「缓存」标记的结果 tab 免重查展示,历史/收藏列表以「结果」小徽标标识
 - **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档(Monaco model 池,2026-08)**:每个 tab 一个 ITextModel(SqlEditor 内部 `modelId→model` 池,`editor.setModel` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;切 tab 不触发 change 事件,参数行由 showTabInEditor 重建,内容快照由 change 事件回调写回(`t.content = editor.getValue()`),自动保存只读活跃 tab 实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
 - **Spark Stage 进度**:spark 查询执行中,日志面板顶部按 3s 节奏轮询 `/spark/stages`(后端 `sparkContext.statusTracker()` 聚合活跃 job/stage:任务数/已完成/失败/状态),每条 stage 一个 el-progress 进度条,RUNNING 蓝 / SUCCEEDED 绿 / FAILED 红;local 模式或 statusTracker 不可用时自动降级为空
-- **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数,密钥不下发浏览器。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
+- **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。Impala 表名列表和表字段结构缓存到 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用;类型检查、`/tables`、`/fields`、`/schema` 共用缓存,缓存缺表/缺结构时按需 DESCRIBE 并持久化。查询返回字段/表引用无法识别错误时强制刷新 SQL 涉及表的结构,更新持久化缓存后再进入 AI 修复流程。缓存按数据源连接指纹与库隔离,不包含密码;数据源结构变化后通过下一次相关错误触发刷新。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数,密钥不下发浏览器。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
 
 ## 5. 数据源
 

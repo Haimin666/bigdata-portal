@@ -9,11 +9,17 @@ diagnostics with the query result.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import random
 import re
+import tempfile
+import threading
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+log = logging.getLogger("db-proxy.impala")
 
 try:
     import sqlglot
@@ -76,6 +82,94 @@ class AiConfig:
     timeout: int = 60
     max_attempts: int = 3
 
+
+class ImpalaSchemaCache:
+    """Small persistent cache for Impala table names and column types."""
+
+    VERSION = 1
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = threading.RLock()
+        self._tables: Dict[str, List[str]] = {}
+        self._databases: Dict[str, List[str]] = {}
+        self._load()
+
+    @staticmethod
+    def _key(*parts: str) -> str:
+        return json.dumps([str(x or "").strip().lower() for x in parts], ensure_ascii=False)
+
+    def _load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("version") != self.VERSION:
+                return
+            self._tables = data.get("tables", {}) if isinstance(data.get("tables"), dict) else {}
+            self._databases = data.get("databases", {}) if isinstance(data.get("databases"), dict) else {}
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            # A damaged cache is disposable; the database remains authoritative.
+            log.warning("ignoring invalid Impala schema cache %s: %s", self.path, exc)
+            return
+
+    def _save(self) -> None:
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, exist_ok=True)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=directory, prefix=".impala-schema-cache-", suffix=".tmp", delete=False
+            ) as f:
+                temp_path = f.name
+                json.dump(
+                    {"version": self.VERSION, "tables": self._tables, "databases": self._databases},
+                    f,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            os.replace(temp_path, self.path)
+        except OSError as exc:
+            log.warning("could not persist Impala schema cache %s: %s", self.path, exc)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def get_table(self, datasource: str, db: str, table: str) -> Optional[Dict[str, str]]:
+        key = self._key(datasource, db, table)
+        with self._lock:
+            value = self._tables.get(key)
+            return dict(value) if isinstance(value, dict) else None
+
+    def put_table(self, datasource: str, db: str, table: str, columns: Dict[str, str]) -> None:
+        key = self._key(datasource, db, table)
+        normalized = {str(name): str(typ) for name, typ in columns.items() if name and typ}
+        if not normalized:
+            return
+        with self._lock:
+            self._tables[key] = normalized
+            self._save()
+
+    def put_schema(self, datasource: str, db: str, schema: Dict[str, Dict[str, str]]) -> None:
+        with self._lock:
+            for table, columns in schema.items():
+                normalized = {str(name): str(typ) for name, typ in columns.items() if name and typ}
+                if normalized:
+                    self._tables[self._key(datasource, db, table)] = normalized
+            self._save()
+
+    def get_tables(self, datasource: str, db: str) -> Optional[List[str]]:
+        key = self._key(datasource, db)
+        with self._lock:
+            value = self._databases.get(key)
+            return list(value) if isinstance(value, list) else None
+
+    def put_tables(self, datasource: str, db: str, tables: List[str]) -> None:
+        key = self._key(datasource, db)
+        with self._lock:
+            self._databases[key] = list(dict.fromkeys(str(x) for x in tables if x))
+            self._save()
 
 def _bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -197,7 +291,14 @@ def describe_table(conn: Any, db: str, table: str) -> Optional[Dict[str, str]]:
     return cols
 
 
-def fetch_schema(conn: Any, sql: str, logs: List[str]) -> Dict[Tuple[str, str], Dict[str, str]]:
+def fetch_schema(
+    conn: Any,
+    sql: str,
+    logs: List[str],
+    cache: Optional[ImpalaSchemaCache] = None,
+    datasource: str = "",
+    default_db: str = "",
+) -> Dict[Tuple[str, str], Dict[str, str]]:
     schema: Dict[Tuple[str, str], Dict[str, str]] = {}
     tables = extract_tables(sql)
     logs.append("【类型校验】识别到待检查的表：%s。" % ("、".join((db + "." if db else "") + table for db, table in tables) or "无"))
@@ -206,7 +307,15 @@ def fetch_schema(conn: Any, sql: str, logs: List[str]) -> Dict[Tuple[str, str], 
     for db, table in tables:
         target = (db + "." if db else "") + table
         try:
-            cols = describe_table(conn, db, table)
+            cache_db = db or default_db
+            cols = cache.get_table(datasource, cache_db, table) if cache and datasource else None
+            if cols is not None:
+                logs.append("【类型校验】使用本地缓存表结构：%s（%d 个字段）。" % (target, len(cols)))
+            else:
+                cols = describe_table(conn, db, table)
+                if cols and cache and datasource:
+                    cache.put_table(datasource, cache_db, table, cols)
+                    logs.append("【类型校验】表结构已写入本地缓存：%s。" % target)
         except Exception as exc:
             logs.append("【类型校验】读取表结构失败：%s；原因：%s。" % (target, str(exc) or exc.__class__.__name__))
             continue
@@ -411,10 +520,11 @@ def _extract_sql(text: str) -> Optional[str]:
 
 
 class ImpalaEngine:
-    def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, cfg: Optional[Dict[str, Any]] = None, schema_cache: Optional[ImpalaSchemaCache] = None) -> None:
         self.cfg = cfg or {}
         self.type_check_enabled = _bool((self.cfg.get("typeCheck") or {}).get("enabled"), True)
         self.ai = _ai_config(self.cfg)
+        self.schema_cache = schema_cache
 
     @property
     def available(self) -> bool:
@@ -440,11 +550,18 @@ class ImpalaEngine:
             auth_mechanism=str(self.cfg.get("authMechanism", "PLAIN")),
         )
 
-    def prepare_sql(self, conn: Any, sql: str, logs: List[str]) -> Tuple[str, Optional[str]]:
+    def prepare_sql(
+        self,
+        conn: Any,
+        sql: str,
+        logs: List[str],
+        datasource: str = "",
+        default_db: str = "",
+    ) -> Tuple[str, Optional[str]]:
         if not self.type_check_enabled:
             logs.append("【类型校验】已根据数据源配置关闭。")
             return sql, None
-        schema = fetch_schema(conn, sql, logs)
+        schema = fetch_schema(conn, sql, logs, self.schema_cache, datasource, default_db)
         summary = schema_summary(schema) or None
         result = fix_sql_types(sql, schema, logs)
         logs.extend("【类型校验提示】" + x for x in result.warnings)
@@ -453,6 +570,61 @@ class ImpalaEngine:
             logs.append("【类型校验修复后 SQL】\n" + result.fixed_sql)
             return result.fixed_sql, summary
         return sql, summary
+
+    def list_tables(self, conn: Any, datasource: str, db: str, refresh: bool = False) -> List[str]:
+        cached = self.schema_cache.get_tables(datasource, db) if self.schema_cache and not refresh else None
+        if cached is not None:
+            return cached
+        cur = conn.cursor()
+        try:
+            cur.execute("SHOW TABLES")
+            tables = [str(row[0]) for row in cur.fetchall() if row and row[0]]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if self.schema_cache:
+            self.schema_cache.put_tables(datasource, db, tables)
+        return tables
+
+    def table_columns(
+        self,
+        conn: Any,
+        datasource: str,
+        db: str,
+        table: str,
+        refresh: bool = False,
+        persist: bool = True,
+        describe_db: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        cached = self.schema_cache.get_table(datasource, db, table) if self.schema_cache and not refresh else None
+        if cached is not None:
+            return cached
+        columns = describe_table(conn, db if describe_db is None else describe_db, table)
+        if columns and self.schema_cache and persist:
+            self.schema_cache.put_table(datasource, db, table, columns)
+        return columns
+
+    def refresh_sql_schema(
+        self, conn: Any, sql: str, logs: List[str], datasource: str, default_db: str
+    ) -> Dict[Tuple[str, str], Dict[str, str]]:
+        schema: Dict[Tuple[str, str], Dict[str, str]] = {}
+        tables = extract_tables(sql)
+        for db, table in tables:
+            target = (db + "." if db else "") + table
+            try:
+                columns = self.table_columns(
+                    conn, datasource, db or default_db, table, refresh=True, describe_db=db
+                )
+                if columns:
+                    schema[(db, table)] = columns
+                    logs.append("【元数据刷新】已重新读取并持久化表结构：%s（%d 个字段）。" % (target, len(columns)))
+                else:
+                    logs.append("【元数据刷新】未读取到表字段：%s。" % target)
+            except Exception as exc:
+                logs.append("【元数据刷新】读取表结构失败：%s；原因：%s。" % (target, str(exc) or exc.__class__.__name__))
+        return schema
 
     def is_read_only_sql(self, sql: str) -> bool:
         if sqlglot is None or sg_exp is None:

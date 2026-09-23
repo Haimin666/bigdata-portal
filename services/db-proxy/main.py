@@ -37,6 +37,7 @@ import secrets
 import collections
 import datetime
 import threading
+import hashlib
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -97,7 +98,7 @@ log = logging.getLogger("db-proxy")
 
 # Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
 from spark_engine import init_engine  # noqa: E402
-from impala_engine import ImpalaEngine  # noqa: E402
+from impala_engine import ImpalaEngine, ImpalaSchemaCache, schema_summary as _impala_schema_summary  # noqa: E402
 
 SPARK_CFG = CONFIG.get("spark") or {}
 SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -136,7 +137,10 @@ if FLINK_PREJOB.enabled:
 # Impala 引擎(可选):impyla 未安装时不影响 MySQL/Oracle/Spark/Flink 启动;
 # 仅在 datasources.json 声明 type=impala 的数据源时实际连接。
 IMPALA_CFG = CONFIG.get("impala") or {}
-IMPALA_ENGINE = ImpalaEngine(IMPALA_CFG)
+IMPALA_SCHEMA_CACHE = ImpalaSchemaCache(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "impala-schema-cache.json")
+)
+IMPALA_ENGINE = ImpalaEngine(IMPALA_CFG, IMPALA_SCHEMA_CACHE)
 if any(str(x.get("type", "")).lower() == "impala" for x in CONFIG.get("datasources", [])):
     log.info("impala engine configured (driver=%s, typeCheck=%s, aiFix=%s)",
              IMPALA_ENGINE.available, IMPALA_ENGINE.type_check_enabled, IMPALA_ENGINE.ai.enabled)
@@ -310,6 +314,11 @@ def get_datasource(db: str) -> DataSource:
     return ds
 
 
+def _impala_cache_namespace(ds: DataSource) -> str:
+    identity = json.dumps([ds.name, ds.host, ds.port, ds.user, ds.service], ensure_ascii=False)
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 # ── 安全工具 ──────────────────────────────────────────────────
 def require_auth(x_db_token: Optional[str]) -> None:
     """鉴权:配置了 authToken 则必须匹配。"""
@@ -326,6 +335,10 @@ READ_ONLY_SQL_RE = re.compile(
 SELECT_ONLY_RE = re.compile(
     r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(?:SELECT|WITH)\b",
     re.IGNORECASE | re.DOTALL,
+)
+ORACLE_PLSQL_START_RE = re.compile(
+    r"^\s*(?:DECLARE\b|BEGIN\b|CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER)\b)",
+    re.IGNORECASE,
 )
 
 
@@ -509,7 +522,9 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: 
     """解析/校验 SQL,返回 (ds, clean_sql, is_select, limit, q_timeout, start)。
     供 fetch(同步)与 DbJobManager(异步,需持有连接才能取消)共用。"""
     ds = get_datasource(db)
-    clean_sql = sql.strip().rstrip(";").strip()
+    clean_sql = sql.strip()
+    if ds.type != "oracle" or not ORACLE_PLSQL_START_RE.match(clean_sql):
+        clean_sql = clean_sql.rstrip(";").strip()
     # 查询类(可追加行数限制)vs 写语句
     is_select = bool(READ_ONLY_SQL_RE.match(clean_sql))
     # WITH 前缀的 CTE-DML(WITH cte AS (...) INSERT/UPDATE/DELETE ...)不是只读,防绕过只读保护。
@@ -628,7 +643,9 @@ def _execute_database(
             # Impyla cursors share a Thrift transport/session; isolate DESCRIBE from query execution.
             if IMPALA_ENGINE.type_check_available:
                 schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
-                run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(schema_conn, run_sql, logs)
+                run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(
+                    schema_conn, run_sql, logs, _impala_cache_namespace(ds), ds.service
+                )
             elif IMPALA_ENGINE.type_check_enabled:
                 logs.append("【类型校验】未安装 sqlglot，本次跳过类型校验。")
         except Exception as exc:
@@ -672,6 +689,28 @@ def _execute_database(
             }
             logs.append("【执行失败】错误类型：%s（%s）。" % (error_labels.get(de.error_type, de.error_type), de.error_type))
             logs.append("【执行失败】数据库详情：%s" % de.message)
+            if de.error_type in ("ColumnNotFound", "TableNotFound", "TypeMismatch"):
+                schema_conn = None
+                try:
+                    schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
+                    if de.error_type == "TableNotFound":
+                        refreshed_tables = IMPALA_ENGINE.list_tables(
+                            schema_conn, _impala_cache_namespace(ds), ds.service, refresh=True
+                        )
+                        logs.append("【元数据刷新】已更新表清单（%d 张表）。" % len(refreshed_tables))
+                    refreshed_schema = IMPALA_ENGINE.refresh_sql_schema(
+                        schema_conn, run_sql, logs, _impala_cache_namespace(ds), ds.service
+                    )
+                    if refreshed_schema:
+                        schema_summary = _impala_schema_summary(refreshed_schema)
+                except Exception as refresh_exc:
+                    logs.append("【元数据刷新】刷新失败，继续处理原始错误：%s。" % (str(refresh_exc) or refresh_exc.__class__.__name__))
+                finally:
+                    if schema_conn is not None:
+                        try:
+                            schema_conn.close()
+                        except Exception:
+                            pass
             ai_attempt += 1
             new_sql = IMPALA_ENGINE.rewrite_sql(
                 run_sql,
@@ -695,7 +734,9 @@ def _execute_database(
             try:
                 schema_conn = ds.connect(DB_CONNECT_TIMEOUT, query_timeout or QUERY_TIMEOUT)
                 try:
-                    run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(schema_conn, run_sql, logs)
+                    run_sql, schema_summary = IMPALA_ENGINE.prepare_sql(
+                        schema_conn, run_sql, logs, _impala_cache_namespace(ds), ds.service
+                    )
                 finally:
                     schema_conn.close()
             except Exception as type_exc:
@@ -1938,6 +1979,12 @@ def tables(
     """表列表。detail=1 时返回 [{name, comment}](含表注释),否则保持 string[] 兼容旧调用。"""
     require_auth(x_db_token)
     ds = get_datasource(db)
+    cache_namespace = _impala_cache_namespace(ds) if ds.type == "impala" else ""
+    if ds.type == "impala":
+        cached_tables = IMPALA_SCHEMA_CACHE.get_tables(cache_namespace, ds.service)
+        if cached_tables is not None:
+            items = [{"name": name, "comment": ""} for name in cached_tables]
+            return {"code": 0, "data": items if detail else [item["name"] for item in items]}
     q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
@@ -1956,8 +2003,8 @@ def tables(
                 for d in rows
             ]
         elif ds.type == "impala":
-            cur.execute("SHOW TABLES")
-            items = [{"name": str(r[0]), "comment": ""} for r in cur.fetchall()]
+            names = IMPALA_ENGINE.list_tables(conn, cache_namespace, ds.service)
+            items = [{"name": name, "comment": ""} for name in names]
         else:
             # 当前用户 schema 下表 + 注释(Oracle 注释可为 NULL → 空串)
             cur.execute(
@@ -1990,6 +2037,15 @@ def fields(
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
+    cache_namespace = _impala_cache_namespace(ds) if ds.type == "impala" else ""
+    if ds.type == "impala":
+        cached_columns = IMPALA_SCHEMA_CACHE.get_table(cache_namespace, ds.service, table)
+        if cached_columns is not None:
+            cols = [
+                {"name": name, "type": typ, **({"comment": "", "nullable": True, "key": ""} if detail else {})}
+                for name, typ in cached_columns.items()
+            ]
+            return {"code": 0, "data": cols}
     q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
@@ -2015,15 +2071,13 @@ def fields(
                     )
                 cols.append(base)
         elif ds.type == "impala":
-            cur.execute("DESCRIBE " + _impala_ident(table))
-            cols = []
-            for row in cur.fetchall():
-                if not row or not row[0] or str(row[0]).startswith("#"):
-                    continue
-                base = {"name": str(row[0]), "type": str(row[1] or "") if len(row) > 1 else ""}
-                if detail:
-                    base.update({"comment": str(row[2] or "") if len(row) > 2 else "", "nullable": True, "key": ""})
-                cols.append(base)
+            columns = IMPALA_ENGINE.table_columns(
+                conn, cache_namespace, ds.service, table, describe_db=""
+            ) or {}
+            cols = [
+                {"name": name, "type": typ, **({"comment": "", "nullable": True, "key": ""} if detail else {})}
+                for name, typ in columns.items()
+            ]
         else:
             # 主键列集合(约束型 P)
             pk_set = set()
@@ -2135,11 +2189,34 @@ def schema(
     表数 > 800 只返回前 800 张并在 data.truncated=true。"""
     require_auth(x_db_token)
     ds = get_datasource(db)
+    cache_namespace = _impala_cache_namespace(ds) if ds.type == "impala" else ""
+    if ds.type == "impala":
+        cached_names = IMPALA_SCHEMA_CACHE.get_tables(cache_namespace, ds.service)
+        if cached_names is not None:
+            cached_names = cached_names[:SCHEMA_MAX_TABLES]
+            cached_schema = [
+                IMPALA_SCHEMA_CACHE.get_table(cache_namespace, ds.service, name)
+                for name in cached_names
+            ]
+            if all(columns is not None for columns in cached_schema):
+                tables = [
+                    {
+                        "name": name,
+                        "comment": "",
+                        "columns": [{"name": col, "type": typ} for col, typ in (columns or {}).items()],
+                    }
+                    for name, columns in zip(cached_names, cached_schema)
+                ]
+                return {
+                    "code": 0,
+                    "data": {"tables": tables, "truncated": len(IMPALA_SCHEMA_CACHE.get_tables(cache_namespace, ds.service) or []) > SCHEMA_MAX_TABLES, "engine": ds.type},
+                }
     q_timeout = max(1, int(timeoutMs / 1000)) if timeoutMs else QUERY_TIMEOUT
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
+    schema_truncated = False
     try:
         cur = conn.cursor()
         if ds.type == "mysql":
@@ -2175,14 +2252,21 @@ def schema(
                         {"name": str(d.get("column_name") or ""), "type": str(d.get("column_type") or "")}
                     )
         elif ds.type == "impala":
-            cur.execute("SHOW TABLES")
-            table_rows = cur.fetchall()
-            tables = [{"name": str(r[0] or ""), "comment": "", "columns": []} for r in table_rows]
-            for table_meta in tables[:SCHEMA_MAX_TABLES]:
-                cur.execute("DESCRIBE " + _impala_ident(table_meta["name"]))
-                for col in cur.fetchall():
-                    if col and col[0] and not str(col[0]).startswith("#"):
-                        table_meta["columns"].append({"name": str(col[0]), "type": str(col[1] or "")})
+            table_names = IMPALA_ENGINE.list_tables(conn, cache_namespace, ds.service)
+            tables = []
+            schema_to_cache = {}
+            for name in table_names[:SCHEMA_MAX_TABLES]:
+                columns = IMPALA_ENGINE.table_columns(
+                    conn, cache_namespace, ds.service, name, persist=False, describe_db=""
+                ) or {}
+                schema_to_cache[name] = columns
+                tables.append({
+                    "name": name,
+                    "comment": "",
+                    "columns": [{"name": col, "type": typ} for col, typ in columns.items()],
+                })
+            IMPALA_SCHEMA_CACHE.put_schema(cache_namespace, ds.service, schema_to_cache)
+            schema_truncated = len(table_names) > SCHEMA_MAX_TABLES
         else:
             cur.execute(
                 "SELECT t.table_name, c.comments FROM all_tables t "
@@ -2209,7 +2293,7 @@ def schema(
         raise HTTPException(status_code=502, detail=f"failed to load schema: {de.message}")
     finally:
         conn.close()
-    truncated = len(tables) > SCHEMA_MAX_TABLES
+    truncated = schema_truncated if ds.type == "impala" else len(tables) > SCHEMA_MAX_TABLES
     if truncated:
         tables = tables[:SCHEMA_MAX_TABLES]
     return {"code": 0, "data": {"tables": tables, "truncated": truncated, "engine": ds.type}}

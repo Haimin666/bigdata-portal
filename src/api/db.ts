@@ -52,7 +52,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* 忽略非 JSON */
     }
-    throw new Error(msg)
+    const error = new Error(msg) as Error & { status?: number }
+    error.status = res.status
+    throw error
   }
   const body = (await res.json()) as ApiResponse<T>
   if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '请求失败')
@@ -135,7 +137,9 @@ export async function getDbJob(jobId: string): Promise<SparkJobInfo> {
     } catch {
       /* 忽略 */
     }
-    throw new Error(msg)
+    const error = new Error(msg) as Error & { status?: number }
+    error.status = res.status
+    throw error
   }
   const body = (await res.json()) as ApiResponse<SparkJobInfo>
   if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '查询失败')

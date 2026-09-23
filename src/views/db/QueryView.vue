@@ -751,8 +751,15 @@ function getSql(): string {
 }
 
 /** 按分号切分 SQL 段(跳过字符串/反引号/注释/q-引号内的分号) */
+function isOraclePlsqlBlock(text: string): boolean {
+  return /^\s*(?:DECLARE\b|BEGIN\b|CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER)\b)/i.test(text)
+}
+
 function splitSqlSegments(text: string): { start: number; end: number; sql: string }[] {
   const segs: { start: number; end: number; sql: string }[] = []
+  const oraclePlsql = engine.value === 'oracle' && isOraclePlsqlBlock(text)
+  let plsqlStarted = false
+  let plsqlDepth = 0
   let segStart = 0
   let i = 0
   let inSingle = false
@@ -810,15 +817,45 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
         inDouble = true
       } else if (ch === '`') {
         inBacktick = true
+      } else if (oraclePlsql && /[A-Za-z_]/.test(ch)) {
+        const wordEnd = i + 1
+        let end = wordEnd
+        while (end < text.length && /[A-Za-z0-9_$#]/.test(text[end])) end++
+        const word = text.slice(i, end).toUpperCase()
+        if (word === 'BEGIN') {
+          plsqlStarted = true
+          plsqlDepth++
+        } else if (word === 'END') {
+          const nextWord = text.slice(end).match(/^\s*([A-Za-z_][A-Za-z0-9_$#]*)/)?.[1]?.toUpperCase()
+          if (!['IF', 'CASE', 'LOOP'].includes(nextWord || '')) plsqlDepth = Math.max(0, plsqlDepth - 1)
+        }
+        i = end - 1
       } else if (ch === ';') {
-        segs.push({ start: segStart, end: i + 1, sql: text.slice(segStart, i + 1) })
-        segStart = i + 1
+        if (!oraclePlsql || (plsqlStarted && plsqlDepth === 0)) {
+          segs.push({ start: segStart, end: i + 1, sql: text.slice(segStart, i + 1) })
+          segStart = i + 1
+          plsqlStarted = false
+          plsqlDepth = 0
+        }
       }
     }
     i++
   }
   if (segStart < text.length) {
     segs.push({ start: segStart, end: text.length, sql: text.slice(segStart) })
+  }
+  if (oraclePlsql) {
+    // SQL*Plus 用独立的 `/` 行提交 PL/SQL 块;它不是 Oracle SQL 语法,不能传给 oracledb。
+    for (let index = 0; index < segs.length; index++) {
+      const seg = segs[index]
+      if (/^\s*\/\s*$/.test(seg.sql) && index > 0) {
+        segs[index - 1].end = seg.end
+        segs.splice(index, 1)
+        index--
+      } else {
+        seg.sql = seg.sql.replace(/\r?\n\s*\/\s*$/, '')
+      }
+    }
   }
   return segs
 }
@@ -1125,6 +1162,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
     const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
     currentDbJobId.value = jid
     const deadline = Date.now() + 3600000 // 上限 1 小时
+    let statusFailures = 0
     while (Date.now() < deadline) {
       if (batchCancelled) {
         try {
@@ -1134,7 +1172,23 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
         }
         throw new Error('已取消')
       }
-      const j = await getDbJob(jid)
+      let j: Awaited<ReturnType<typeof getDbJob>>
+      try {
+        j = await getDbJob(jid)
+      } catch (e) {
+        const status = (e as Error & { status?: number }).status
+        if (status && status < 500) throw e
+        statusFailures += 1
+        if (statusFailures === 1 || statusFailures % 20 === 0) {
+          dbJobLogText.value = [
+            dbJobLogText.value,
+            `任务仍在后台执行，状态查询暂时失败（${statusFailures} 次），将自动重试：${e instanceof Error ? e.message : String(e)}`
+          ].filter(Boolean).join('\n')
+        }
+        await new Promise((r) => setTimeout(r, 3000))
+        continue
+      }
+      statusFailures = 0
       if (j.logs?.length) dbJobLogText.value = j.logs.join('\n')
       if (j.state === 'done') {
         currentDbJobId.value = ''
@@ -1161,6 +1215,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   try {
     return await run()
   } catch (e) {
+    currentDbJobId.value = ''
     // 写权限密码验证已移除,不再有解锁重试;错误直接上抛(库未授权/资源护栏等)
     throw e
   }
@@ -1854,7 +1909,9 @@ async function onSparkExecutorsChange(val: number) {
   flex-direction: column;
   flex: 1;
   min-width: 0;
+  min-height: 0;
   gap: 6px;
+  overflow: hidden;
 }
 
 .save-btn {
