@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { UserStore } from './users.js'
+import { isDatadeckIframeRequest } from './utils/datadeck-proxy.js'
 
 export function setupAuth(app, config) {
   const dataDir = path.join(import.meta.dirname, '../data')
@@ -179,7 +180,9 @@ export function setupAuth(app, config) {
     res.json({ code: 0, data: { ok: true } })
   })
 
-  app.get('/api/auth/me', (req, res) => {
+  app.get('/api/auth/me', (req, res, next) => {
+    // Datadeck iframe 自己也使用 /api/auth/me;交给其同源代理,门户页面仍走本路由。
+    if (isDatadeckIframeRequest(req)) return next('route')
     if (!enabled) {
       return res.json({ code: 0, data: { authDisabled: true, username: null, role: null, modules: null } })
     }

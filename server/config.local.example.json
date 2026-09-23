@@ -21,5 +21,7 @@
   "_assistant说明": "开发助手:转发到本地 Reasonix serve(8787)。assistantToken 与 8787 的 REASONIX_SERVE_TOKEN 一致;assistantWorkspace 为门户可写的 workspace 宿主目录(生产:门户容器挂载 8787 的 workspace 卷后填容器内路径,如 /app/assistant-workspace;本地非 docker:填 8787 挂载的宿主目录)。不配 assistantWorkspace 时新建项目/上传会降级为 503 提示,agent 按注入指令自建目录。",
   "assistantUrl": "http://host.docker.internal:8787",
   "assistantToken": "",
-  "assistantWorkspace": ""
+  "assistantWorkspace": "",
+  "_datadeck说明": "Datadeck Agent 同源反向代理目标;门户 Docker 使用 host.docker.internal 访问同机映射的 8000 端口。",
+  "datadeckUrl": "http://host.docker.internal:8000"
 }

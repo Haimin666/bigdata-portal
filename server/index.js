@@ -15,6 +15,7 @@ import { createAuthGate, createModuleGate } from './middleware/auth-gate.js'
 import { createExecGate } from './middleware/exec-gate.js'
 import { jsonNotFound, errorHandler } from './middleware/error-handler.js'
 import { setupAssistant } from './routes/assistant.js'
+import { isDatadeckIframeRequest } from './utils/datadeck-proxy.js'
 import { setupYarnProxy } from './routes/yarn-proxy.js'
 import { setupSubappsProxy } from './routes/subapps-proxy.js'
 import { setupPortal } from './routes/portal.js'
@@ -47,9 +48,9 @@ app.use(express.static(DIST_DIR))
 // 代理路径不解析请求体:express.json() 会消费 stream 导致 http-proxy-middleware
 // 转发时 Content-Length 与实际数据不匹配,下游(海豚登录/YARN kill 等)挂起超时。
 // 注意:'/api/db/' 带尾斜杠,避免误匹配 /api/dbquery/query(否则 express.json 被跳过,body 丢失)
-const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db/', '/api/assistant']
+const PROXY_PATHS = ['/apps', '/dolphinscheduler', '/static', '/webhdfs', '/stingray-static', '/__/', '/hadoopapi', '/api/db/', '/api/assistant', '/agent']
 app.use((req, res, next) => {
-  if (PROXY_PATHS.some((p) => req.path.startsWith(p))) return next()
+  if (PROXY_PATHS.some((p) => req.path.startsWith(p)) || isDatadeckIframeRequest(req)) return next()
   express.json({ limit: '20mb' })(req, res, next)
 })
 
@@ -65,7 +66,7 @@ app.use(createModuleGate(auth))
 app.use(createExecGate(auth))
 
 // ── 各业务路由模块(注册顺序与拆分前的单文件完全一致)────────────
-setupAssistant(app) // /api/assistant:项目路由 + 8787 代理(代理在项目路由之后挂载,前缀精确转发)
+setupAssistant(app, auth) // /api/assistant:Reasonix 项目路由/8787 代理;Datadeck /agent 同源代理
 setupYarnProxy(app) // YARN:hadoopapi 动态代理 + yarniframe HTML 重写 + iframe-proxy
 setupSubappsProxy(app) // 子应用 iframe:HDFS/DS Web/Jupyter/DolphinScheduler/Stingray
 setupPortal(app) // 门户配置下发:/api/config/modules + /api/config

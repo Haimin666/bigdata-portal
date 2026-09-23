@@ -84,7 +84,7 @@ src/
 | `routes/spark.js` | Spark SQL:query/jobs/logs/status/config/stages/cancel；用户访问由模块与数据权限矩阵控制 |
 | `routes/flink.js` | Flink SQL:交互查询/async/连接器/DDL 生成/jobs/PreJob 全套路由 |
 | `routes/dbquery.js` | MySQL/Oracle 同步查询 `/api/dbquery/query`(写检测 + 权限矩阵) |
-| `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 代理 |
+| `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 Reasonix 代理;Datadeck Agent `/agent` iframe/API/资源同源代理 |
 | `routes/portal.js` | 门户配置下发:`/api/config/modules` + `/api/config`(白名单字段,不泄露敏感配置) |
 | `routes/ws-proxy.js` | WebSocket 代理(stingray/jupyter)+ upgrade 登录鉴权 |
 | `auth.js` | 认证:会话 cookie(12h)、登录/登出/me/init、角色守卫、登录限速 |
@@ -146,6 +146,7 @@ QueryView.vue
 唯一来源 `server/config.local.json`(不入 git,样例 `config.local.example.json`),`config.js` 缺省回退环境变量。**配置文件 JSON 非法(如布尔误写 `True`/`False`)时启动即报错退出**,避免配置静默失效。
 
 - 服务:`port`(默认 3000)、`enabledModules`(空=全量)
+- 开发助手:`assistantUrl`/`assistantToken`/`assistantWorkspace`(Reasonix);`datadeckUrl`(Datadeck Agent,默认 Docker 宿主机映射 `http://host.docker.internal:8000`)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`
 - 数据:`dbProxyUrl`/`dbProxyToken`、`dbScriptsDir`、`dsDepsCacheFile`
 - 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`trustProxy`(反代层数,直连部署保持 0);~~loginTlsInsecure/accounts.*~~ 已随子应用自动登录移除(2026-08,多用户体系)

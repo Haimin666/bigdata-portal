@@ -7,7 +7,7 @@ const PROTECTED_PREFIXES = [
   '/api/ds-deps', '/api/scripts', '/api/config', '/api/dataleap',
   '/api/assistant', '/api/sync', '/api/mail',
   '/apps', '/yarniframe', '/hadoopapi', '/api/iframe-proxy', '/__/', '/stingray-static',
-  '/webhdfs', '/dolphinscheduler', '/static'
+  '/webhdfs', '/dolphinscheduler', '/static', '/agent'
 ]
 
 const MODULE_PREFIXES = [
@@ -23,7 +23,8 @@ const MODULE_PREFIXES = [
   { modules: ['dsTask', 'ds'], prefixes: ['/dolphinscheduler'] },
   { module: 'jupyter', prefixes: ['/apps/jupyter'] },
   { module: 'mail', prefixes: ['/apps/mail', '/api/mail'] },
-  { module: 'stingray', prefixes: ['/apps/stingray', '/stingray-static', '/__/stingray'] }
+  { module: 'stingray', prefixes: ['/apps/stingray', '/stingray-static', '/__/stingray'] },
+  { module: 'devAssistant', prefixes: ['/agent'] }
 ]
 
 function pathMatches(pathname, prefix) {

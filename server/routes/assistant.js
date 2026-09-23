@@ -5,8 +5,63 @@ import express from 'express'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import config from '../config.js'
 import { createAssistantProjectsRoutes } from '../assistant-projects.js'
+import { datadeckPath, isDatadeckIframeRequest } from '../utils/datadeck-proxy.js'
 
-export function setupAssistant(app) {
+export function setupAssistant(app, auth) {
+  const datadeckProxy = (pathRewrite) => createProxyMiddleware({
+    target: config.datadeckUrl,
+    changeOrigin: true,
+    ws: true,
+    ...(pathRewrite ? { pathRewrite } : {}),
+    on: {
+      proxyRes(_proxyRes, _req, res) {
+        // 浏览器同源请求需保留 iframe 页面路径,供下方 API 代理区分 Datadeck 与门户请求。
+        res.setHeader('Referrer-Policy', 'same-origin')
+      }
+    }
+  })
+  const requireDatadeckAccess = (req, res) => {
+    if (!auth?.enabled) return true
+    const user = auth.currentUser(req)
+    if (!user) {
+      res.status(401).json({ code: 401, msg: '未登录或会话已过期' })
+      return false
+    }
+    if (user.role !== 'admin') {
+      const modules = auth.users.modulesOf(user)
+      if (Array.isArray(modules) && modules.length > 0 && !modules.includes('devAssistant')) {
+        res.status(403).json({ code: 403, msg: '无开发助手模块权限' })
+        return false
+      }
+    }
+    return true
+  }
+
+  // Datadeck 页面位于同源 /agent,将 Express 挂载剥掉的路径前缀补回上游。
+  const datadeckPageProxy = datadeckProxy((path) => datadeckPath('/agent', path))
+  app.use('/agent', (req, res, next) => {
+    if (!requireDatadeckAccess(req, res)) return
+    datadeckPageProxy(req, res, next)
+  })
+
+  // Datadeck 使用根路径静态资源。门户 dist 优先提供自己的文件,未命中才落到这里。
+  for (const prefix of ['/assets', '/uploads']) {
+    const resourceProxy = datadeckProxy((path) => datadeckPath(prefix, path))
+    app.use(prefix, (req, res, next) => {
+      if (!requireDatadeckAccess(req, res)) return
+      resourceProxy(req, res, next)
+    })
+  }
+
+  // 同源 iframe 的 API 仍请求 /api/*;以 Referer 的 /agent 页面路径区分,不改写 Datadeck 前端,
+  // 也不接管门户其他页面发起的 API。/api/auth/me 在 setupAuth 路由中会先 next('route')。
+  const datadeckApiProxy = datadeckProxy()
+  app.use((req, res, next) => {
+    if (!isDatadeckIframeRequest(req) || !req.path.startsWith('/api/')) return next()
+    if (!requireDatadeckAccess(req, res)) return
+    datadeckApiProxy(req, res, next)
+  })
+
   const assistantProjects = createAssistantProjectsRoutes({ workspaceRoot: config.assistantWorkspace })
   app.get('/api/assistant/projects', (req, res) => res.json(assistantProjects.list()))
   app.post('/api/assistant/projects', express.json(), (req, res) => {

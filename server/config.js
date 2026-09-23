@@ -87,6 +87,7 @@ export default {
   assistantUrl: pick(fileCfg.assistantUrl, 'ASSISTANT_URL', 'http://127.0.0.1:8787'),
   assistantToken: pick(fileCfg.assistantToken, 'ASSISTANT_TOKEN', ''),
   assistantWorkspace: pick(fileCfg.assistantWorkspace, 'ASSISTANT_WORKSPACE', ''),
+  datadeckUrl: pick(fileCfg.datadeckUrl, 'DATADECK_URL', 'http://host.docker.internal:8000'),
   // db-proxy 写解锁共享密钥:与客户机 datasources.json 的 spark.writeToken 一致。
   // 门户在写操作解锁后附加 X-Spark-Write 头,db-proxy 侧校验后才放行写(双保险)。
   dbProxyWriteToken: pick(fileCfg.dbProxyWriteToken, 'DB_PROXY_WRITE_TOKEN', ''),
