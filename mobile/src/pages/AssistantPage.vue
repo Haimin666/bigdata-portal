@@ -72,7 +72,7 @@
             <ion-button v-if="streaming" class="send-button stop-button" aria-label="停止生成" :disabled="!runId" @click="stopGeneration">
           <ion-icon :icon="stopOutline" />
         </ion-button>
-        <ion-button v-else class="send-button" aria-label="发送消息" :disabled="!draft.trim() || loading" @click="send">
+        <ion-button v-else class="send-button" aria-label="发送消息" :disabled="!draft.trim() || loading" @click="send()">
           <ion-icon :icon="sendOutline" />
         </ion-button>
       </div>
@@ -277,7 +277,7 @@ async function send(text = draft.value) {
       const thread = await createAssistantThread(token.value, agent.value.id, query.slice(0, 48) || '新的对话')
       activeThread.value = thread
       localStorage.setItem('mobile-assistant-thread', thread.id)
-      await refreshThreads()
+      threads.value = [thread, ...threads.value.filter((item) => item.id !== thread.id)]
     }
     const run = await createAssistantRun(token.value, activeThread.value.id, agent.value.slug, query)
     runId.value = run.run_id
@@ -286,7 +286,11 @@ async function send(text = draft.value) {
     if (reply.streaming && !streamController.signal.aborted) {
       throw new Error('流式连接意外结束，可重新尝试。')
     }
-    await refreshThreads()
+    try {
+      await refreshThreads()
+    } catch {
+      // 会话列表刷新失败不应把已经完成的回复误判为失败；打开历史时会再次刷新。
+    }
   } catch (cause) {
     if (!streamController?.signal.aborted) {
       reply.streaming = false
@@ -310,18 +314,24 @@ async function retry(query: string) {
 }
 
 async function stopGeneration() {
-  if (!runId.value || !token.value) return
+  const targetRunId = runId.value
+  if (!targetRunId || !token.value) return
+  const controller = streamController
+  const reply = [...messages.value].reverse().find((message) => message.role === 'assistant' && message.streaming)
+  const cancellation = cancelAssistantRun(token.value, targetRunId)
+  if (reply) {
+    reply.streaming = false
+    reply.status = '正在停止…'
+  }
+  controller?.abort()
   try {
-    await cancelAssistantRun(token.value, runId.value)
+    await cancellation
+    if (reply) reply.status = '已停止'
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '停止请求失败'
-  } finally {
-    const reply = [...messages.value].reverse().find((message) => message.role === 'assistant' && message.streaming)
     if (reply) {
-      reply.streaming = false
-      reply.status = '已停止'
+      reply.status = '停止请求失败'
+      reply.error = cause instanceof Error ? cause.message : '服务端停止请求失败，生成可能仍在继续。'
     }
-    streamController?.abort()
   }
 }
 
