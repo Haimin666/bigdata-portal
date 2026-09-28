@@ -7,11 +7,11 @@
 //   version: 2,
 //   userRules: [{
 //     user: 'bob',
-//     engineRules: [                 // mysql/oracle 类引擎规则
-//       { engine: 'mysql'|'oracle'|'*', db: 'xxx', tables: ['t1'] | null(全部),
+//     engineRules: [                 // MySQL/Oracle/Impala 数据源规则
+//       { engine: 'mysql'|'oracle'|'impala'|'*', db: 'xxx', tables: ['t1'] | null(全部),
 //         read: true, write: false }
 //     ],
-//     spark: { read: true, write: false } | null(无 Spark 权限),
+//     spark: { read: true, write: false, writeDbs?: string[] } | null(无 Spark 权限),
 //     flink: { enabled: true } | null(无 Flink 权限)
 //   }],
 //   roleRules: [ 同构, key 为 role ]
@@ -20,6 +20,7 @@
 // 可读可写;spark/flink 保持旧版可用,由管理员后续收紧)。
 import fs from 'node:fs'
 import path from 'node:path'
+import { DB_QUERY_API_ROLE } from './utils/db-query-api-policy.js'
 
 const PERMS_FILE = path.join(import.meta.dirname, '../data', 'db-permissions.json')
 
@@ -115,6 +116,63 @@ function deny(msg) {
   throw err
 }
 
+export function apiTokenRoleRule(perms) {
+  if (!perms || perms.broken) return null
+  return (Array.isArray(perms.roleRules) ? perms.roleRules : [])
+    .find((rule) => rule && String(rule.role) === DB_QUERY_API_ROLE) || null
+}
+
+export function apiTokenAllowsImpalaDatabase(perms, dbName) {
+  const rule = apiTokenRoleRule(perms)
+  if (!rule) return false
+  const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
+  const matched = engineRules.find((entry) =>
+    entry && (entry.engine === '*' || entry.engine === 'impala') &&
+      (entry.db === '*' || String(entry.db) === String(dbName))
+  )
+  return matched?.read === true
+}
+
+export function checkDbRuleAccess(rule, dbName, opts = {}) {
+  const { engine = '', write = false, tables = null, requireWholeDatabase = false, subject = 'API Token' } = opts
+  if (!rule) deny(`未配置 ${subject} 的数据库权限`)
+  const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
+  const matched = engineRules.find(
+    (entry) => entry && (entry.db === '*' || String(entry.db) === dbName) &&
+      (!engine || entry.engine === '*' || entry.engine === engine)
+  )
+  if (!matched) deny(`数据库 '${dbName}' 未授权给 ${subject}`)
+  if (write && matched.write !== true) deny(`数据库 '${dbName}' 未授予 ${subject} 写权限`)
+  if (!write && matched.read !== true) deny(`数据库 '${dbName}' 未授予 ${subject} 读权限`)
+  if (requireWholeDatabase && Array.isArray(matched.tables)) {
+    deny(`${subject} 的 Impala 元数据接口要求配置整库读取权限`)
+  }
+  if (Array.isArray(tables) && tables.length && Array.isArray(matched.tables)) {
+    const allowed = new Set(matched.tables.map((table) => String(table)))
+    const denied = tables.filter((table) => !allowed.has(String(table)))
+    if (denied.length) deny(`表未授权: ${denied.join(', ')}`)
+  }
+}
+
+export function checkSparkRuleAccess(rule, write = false, database = '', { requireWriteDbList = false, subject = '用户' } = {}) {
+  const spark = rule?.spark
+  if (!spark || typeof spark !== 'object') deny(`${subject}未授权使用 Spark`)
+  if (write && spark.write !== true) deny('Spark 未授予写权限')
+  if (!write && spark.read !== true) deny('Spark 未授予读权限')
+  if (!write) return
+
+  const writeDbs = spark.writeDbs
+  if (requireWriteDbList && !Array.isArray(writeDbs)) deny('API Token 未配置 Spark 可写数据库')
+  if (Array.isArray(writeDbs)) {
+    const allowed = writeDbs.some((name) => {
+      const normalized = String(name).trim().toLowerCase()
+      if (requireWriteDbList && normalized === '*') return false
+      return normalized === '*' || normalized === String(database || '').trim().toLowerCase()
+    })
+    if (!allowed) deny(`Spark 库 '${database || '(未指定)'}' 未授予写权限`)
+  }
+}
+
 function checkBroken(perms) {
   if (perms.broken) {
     deny('数据权限规则文件损坏,请联系管理员修复(server/data/db-permissions.json)')
@@ -122,7 +180,7 @@ function checkBroken(perms) {
 }
 
 /**
- * MySQL/Oracle 引擎访问校验:
+ * MySQL/Oracle/Impala 引擎访问校验:
  *  - 命中规则 → 按 engine+db 匹配 engineRules:读需 read=true,写需 write=true,
  *    tables 非空时请求引用的表必须 ⊆ 允许表;
  *  - 无规则 → defaultDeny 开启时拒绝(未授权),否则放行(db-proxy 全局白名单兜底);
@@ -131,6 +189,12 @@ function checkBroken(perms) {
 export function checkDbAccess(req, dbName, opts = {}) {
   const { engine = '', write = false, tables = null } = opts
   if (typeof dbName !== 'string' || dbName.trim() === '') return
+  if (req?.dbQueryApiPrincipal) {
+    if (engine !== 'impala' || write) deny('数据库查询 API Token 仅允许 Impala 只读访问')
+    const perms = loadPerms()
+    checkBroken(perms)
+    return checkDbRuleAccess(apiTokenRoleRule(perms), dbName, { ...opts, subject: '数据库查询 API Token' })
+  }
   if (isAdmin(req)) return
   const perms = loadPerms()
   checkBroken(perms)
@@ -142,22 +206,19 @@ export function checkDbAccess(req, dbName, opts = {}) {
     if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
     return
   }
-  const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
-  const matched = engineRules.find(
-    (r) => r && (r.db === '*' || String(r.db) === dbName) && (!engine || r.engine === '*' || r.engine === engine)
-  )
-  if (!matched) deny(`数据库 '${dbName}' 未授权给用户 '${username}'`)
-  if (write && matched.write !== true) deny(`数据库 '${dbName}' 未授予写权限`)
-  if (!write && matched.read !== true) deny(`数据库 '${dbName}' 未授予读权限`)
-  if (Array.isArray(tables) && tables.length && Array.isArray(matched.tables)) {
-    const allowed = new Set(matched.tables.map((t) => String(t)))
-    const denied = tables.filter((t) => !allowed.has(String(t)))
-    if (denied.length) deny(`表未授权: ${denied.join(', ')}`)
-  }
+  return checkDbRuleAccess(rule, dbName, { ...opts, subject: `用户 '${username}'` })
 }
 
 /** Spark 访问校验:规则命中时需 spark.{read|write};admin 放行;无规则按 defaultDeny 决定 */
-export function checkSparkAccess(req, write = false) {
+export function checkSparkAccess(req, write = false, database = '') {
+  if (req?.dbQueryApiPrincipal) {
+    const perms = loadPerms()
+    checkBroken(perms)
+    return checkSparkRuleAccess(apiTokenRoleRule(perms), write, database, {
+      requireWriteDbList: true,
+      subject: '数据库查询 API Token'
+    })
+  }
   if (isAdmin(req)) return
   const perms = loadPerms()
   checkBroken(perms)
@@ -169,10 +230,7 @@ export function checkSparkAccess(req, write = false) {
     if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
     return
   }
-  const sp = rule.spark
-  if (!sp || typeof sp !== 'object') deny('未授权使用 Spark')
-  if (write && sp.write !== true) deny('Spark 未授予写权限')
-  if (!write && sp.read !== true) deny('Spark 未授予读权限')
+  return checkSparkRuleAccess(rule, write, database, { subject: `用户 '${username}'` })
 }
 
 /** Flink 使用校验:规则命中时需 flink.enabled === true;admin 放行;无规则按 defaultDeny 决定 */

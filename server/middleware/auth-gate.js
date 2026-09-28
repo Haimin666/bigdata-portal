@@ -1,6 +1,8 @@
 // 登录门禁(从 index.js 拆出):受保护路径未登录一律 401(除 /api/auth/* 与静态资源/SPA 页面,
 // 由前端路由守卫拦截);未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
 // 由 index.js 在 setupAuth 之后挂载:app.use(createAuthGate(auth))
+import { timingSafeEqual } from 'node:crypto'
+import { DB_QUERY_API_ROLE, dbQueryApiRouteScope } from '../utils/db-query-api-policy.js'
 
 const PROTECTED_PREFIXES = [
   '/api/db', '/api/dbquery', '/api/spark', '/api/flink', '/api/users',
@@ -31,8 +33,27 @@ function pathMatches(pathname, prefix) {
   return pathname === prefix || pathname.startsWith(`${prefix}/`)
 }
 
+function tokenMatches(received, expected) {
+  if (typeof received !== 'string' || typeof expected !== 'string' || !expected) return false
+  const actualBytes = Buffer.from(received)
+  const expectedBytes = Buffer.from(expected)
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
+}
+
 export function createAuthGate(auth, options = {}) {
   return (req, res, next) => {
+    const suppliedToken = req.headers['x-api-token']
+    if (options.dbQueryApiToken && tokenMatches(suppliedToken, options.dbQueryApiToken)) {
+      const scope = dbQueryApiRouteScope(req.method, req.path)
+      if (!scope) return res.status(403).json({ code: 403, msg: '该接口不允许使用数据库查询 API Token' })
+      req.dbQueryApiPrincipal = {
+        id: 'db-query-api',
+        role: DB_QUERY_API_ROLE,
+        routeScope: scope
+      }
+      req.apiTokenAuthenticated = true
+      return next()
+    }
     if (!auth.enabled) return next()
     // Express 4 路由默认大小写不敏感,保护前缀必须统一用小写匹配,否则 /API/... 变体绕过门禁
     const p = req.path.toLowerCase()

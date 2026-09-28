@@ -77,7 +77,18 @@
 - 库别名:oracle 连接串可配置别名,未配置显示库名
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句
 
-## 6. 已知限制
+## 6. 外部 API Token（网关侧）
+
+- 与数据同步 `syncApiToken` 分离，调用方通过 `X-API-Token` 访问门户网关；不向浏览器配置接口回显，不转发给 db-proxy；未配置时保持 Cookie 登录方式。
+- token 专用主体仅允许 Impala 与 Spark 路由，库权限由 `db-permissions` 矩阵的 `db-query-api` 虚拟角色授权。Impala 所有 SQL 限制为只读；MySQL、Oracle、Doris、Flink、脚本管理及权限管理接口拒绝 token。
+- Impala 查询可按角色规则限制到表；表目录/字段/DDL/整库 Schema 元数据接口仅在该库配置整库读取时开放，避免表级规则下泄露其他表名和结构。
+- Spark token 仅允许 Spark SQL（禁止 PySpark）；读取按只读语句白名单执行。虚拟角色中的 Spark `writeDbs` 配置写库名单，仅允许 `INSERT INTO` / `INSERT OVERWRITE` 写入名单内库；写请求须提供 `db`，且 SQL 中目标库必须显式限定并与 `db` 一致。`CREATE`、`DROP`、`ALTER`、`USE`、多语句等拒绝。
+- API 主体不映射为 admin/dev/viewer 用户，使用权限矩阵中的虚拟角色 `db-query-api` 控制库权限；未配置该角色规则时数据库访问默认拒绝。网关仍硬限制路由和 SQL 能力；权限失败 fail-closed。异步状态/取消只允许访问由该 API 主体提交并登记的 Impala/Spark job。
+- Token 设置仅影响门户服务端 `config.local.json` / 环境变量；请求头仅使用 HTTPS。服务端日志不得记录 token 原文。
+
+配置项仅保留服务端密钥 `dbQueryApiToken`；Impala/Spark 库读写权限统一在用户管理 → 数据权限中的 `db-query-api` 虚拟角色配置，Spark 写库范围使用 `writeDbs`。
+
+## 7. 已知限制
 
 - db-proxy Oracle thin 模式对旧版本(11g)支持受限(需 thick 模式)
 - Spark 首次建 session 需 30~90s(懒加载);session 常驻,跨语句保留临时视图

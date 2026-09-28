@@ -907,14 +907,14 @@ export interface DbEngRule {
 export interface DbUserRule {
   user: string
   engineRules?: DbEngRule[]
-  spark?: { read: boolean; write: boolean } | null
+  spark?: { read: boolean; write: boolean; writeDbs?: string[] } | null
   flink?: { enabled: boolean } | null
 }
 
 export interface DbRoleRule {
   role: string
   engineRules?: DbEngRule[]
-  spark?: { read: boolean; write: boolean } | null
+  spark?: { read: boolean; write: boolean; writeDbs?: string[] } | null
   flink?: { enabled: boolean } | null
 }
 

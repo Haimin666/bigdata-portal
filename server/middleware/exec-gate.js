@@ -29,6 +29,9 @@ export function createExecGate(auth) {
       (g) => g.re.test(p) && (g.onlyWrite ? !['GET', 'HEAD'].includes(req.method) : true)
     )
     if (!gate) return next()
+    // 数据库查询 API token 在认证门禁中已完成精确路由白名单校验;
+    // 引擎、SQL 类型与库范围由对应路由继续校验,不映射为 portal user/role。
+    if (req.dbQueryApiPrincipal) return next()
     const user = req.user || auth.currentUser(req)
     if (!user) return res.status(401).json({ code: 401, msg: '未登录或会话已过期' })
     if (user.role === 'viewer') {

@@ -2,12 +2,12 @@
 import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
-import { listTables } from '@/api/db'
+import { listSparkDatabases, listTables } from '@/api/db'
 
 /** v2 规则对象(与 db-permissions.json 一致) */
 export interface DbRuleV2 {
   engineRules: Array<{ engine: string; db: string; tables: string[] | null; read: boolean; write: boolean }>
-  spark: { read: boolean; write: boolean } | null
+  spark: { read: boolean; write: boolean; writeDbs?: string[] } | null
   flink: { enabled: boolean } | null
 }
 
@@ -41,18 +41,23 @@ const ENGINE_OPTIONS = [
   { value: 'impala', label: 'Impala' },
   { value: '*', label: '全部引擎' }
 ]
+const DB_QUERY_API_ROLE = 'db-query-api'
 
 const form = reactive<{
   engineRules: EngRuleRow[]
   sparkOn: boolean
   sparkRead: boolean
   sparkWrite: boolean
+  sparkWriteDbs: string[]
+  sparkDbOptions: string[]
   flinkOn: boolean
 }>({
   engineRules: [],
   sparkOn: false,
   sparkRead: true,
   sparkWrite: false,
+  sparkWriteDbs: [],
+  sparkDbOptions: [],
   flinkOn: false
 })
 
@@ -67,13 +72,13 @@ watch(
     }
   }
 )
+watch([selectedSubject, () => props.modelValue], ([subject, visible]) => {
+  if (visible && props.subjectKind === 'role' && subject === DB_QUERY_API_ROLE) void loadSparkDatabases()
+})
 
 function init() {
   const r = props.initial
-  form.engineRules = (r?.engineRules?.length
-    ? r.engineRules
-    : [{ engine: 'mysql', db: '', tables: [], read: true, write: false }]
-  ).map((x) => ({
+  form.engineRules = (r?.engineRules || []).map((x) => ({
     engine: x.engine || 'mysql',
     db: x.db || '',
     tables: [...(x.tables || [])],
@@ -85,7 +90,16 @@ function init() {
   form.sparkOn = !!r?.spark
   form.sparkRead = r?.spark?.read ?? true
   form.sparkWrite = r?.spark?.write ?? false
+  form.sparkWriteDbs = Array.isArray(r?.spark?.writeDbs) ? [...r.spark.writeDbs] : []
   form.flinkOn = !!r?.flink
+}
+
+async function loadSparkDatabases() {
+  try {
+    form.sparkDbOptions = await listSparkDatabases()
+  } catch {
+    form.sparkDbOptions = []
+  }
 }
 
 function addEngRule() {
@@ -122,6 +136,11 @@ function save() {
     if (!er.db) return ElMessage.warning('引擎规则需选择数据库')
     if (!er.read && !er.write) return ElMessage.warning(`数据库「${er.db}」需至少勾选读或写`)
   }
+  const isApiTokenRole = props.subjectKind === 'role' && subject === DB_QUERY_API_ROLE
+  if (isApiTokenRole && form.sparkOn && form.sparkWrite &&
+      (!form.sparkWriteDbs.length || form.sparkWriteDbs.includes('*'))) {
+    return ElMessage.warning('请至少选择一个 Spark 可写库；该 Token 不支持“所有库”写入')
+  }
   emit('save', subject, {
     engineRules: form.engineRules.map((er) => ({
       engine: er.engine,
@@ -130,7 +149,13 @@ function save() {
       read: er.read,
       write: er.write
     })),
-    spark: form.sparkOn ? { read: form.sparkRead, write: form.sparkWrite } : null,
+    spark: form.sparkOn
+      ? {
+          read: form.sparkRead,
+          write: form.sparkWrite,
+          ...(isApiTokenRole ? { writeDbs: form.sparkWriteDbs.filter((db) => db !== '*') } : {})
+        }
+      : null,
     flink: form.flinkOn ? { enabled: true } : null
   })
 }
@@ -155,7 +180,7 @@ function save() {
       <!-- 引擎规则(mysql/oracle:库+表+读写) -->
       <div class="rule-section">
         <div class="rule-section-head">
-          <span class="rule-section-title">引擎规则(MySQL / Oracle)</span>
+          <span class="rule-section-title">引擎规则(MySQL / Oracle / Impala)</span>
           <el-button size="small" text type="primary" :icon="Plus" @click="addEngRule">加一条</el-button>
         </div>
         <div v-for="(er, i) in form.engineRules" :key="i" class="eng-rule-row">
@@ -188,7 +213,7 @@ function save() {
           </el-select>
           <el-checkbox v-model="er.read" class="rw-cb">读</el-checkbox>
           <el-checkbox v-model="er.write" class="rw-cb">写</el-checkbox>
-          <el-button size="small" text type="danger" :icon="Delete" :disabled="form.engineRules.length <= 1" @click="removeEngRule(i)" />
+          <el-button size="small" text type="danger" :icon="Delete" @click="removeEngRule(i)" />
         </div>
         <div class="rule-tip">表留空 = 该库全部表;选「所有库」= 不限库(含后续新增库);勾「写」允许 INSERT/UPDATE/DELETE/DDL。</div>
       </div>
@@ -201,7 +226,25 @@ function save() {
         </div>
         <template v-if="form.sparkOn">
           <el-checkbox v-model="form.sparkRead" class="rw-cb">允许只读查询</el-checkbox>
-          <el-checkbox v-model="form.sparkWrite" class="rw-cb">允许写操作 / PySpark 代码</el-checkbox>
+          <el-checkbox v-model="form.sparkWrite" class="rw-cb">
+            {{ subjectKind === 'role' && selectedSubject === DB_QUERY_API_ROLE ? '允许 SQL 写操作' : '允许写操作 / PySpark 代码' }}
+          </el-checkbox>
+          <div v-if="subjectKind === 'role' && selectedSubject === DB_QUERY_API_ROLE" class="spark-write-dbs">
+            <span class="rule-tip">API Token 仅允许 SQL 写入，选择可写库：</span>
+            <el-select
+              v-model="form.sparkWriteDbs"
+              size="small"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              :disabled="!form.sparkWrite"
+              style="width: 100%"
+              placeholder="选择或输入 Spark 数据库名"
+            >
+              <el-option v-for="db in form.sparkDbOptions" :key="db" :label="db" :value="db" />
+            </el-select>
+          </div>
         </template>
         <div v-else class="rule-tip">未启用:该用户不可使用 Spark 引擎(admin 不受限)。</div>
       </div>

@@ -7,6 +7,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import config from '../config.js'
 import { isSparkWriteSql } from '../utils/sql-write-detect.js'
+import { isSparkApiSqlShapeAllowed } from '../utils/db-query-api-policy.js'
+import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { checkSparkAccess } from '../db-permissions.js'
 import {
   query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus,
@@ -92,12 +94,17 @@ export function setupSpark(app) {
         if (!sql || !String(sql).trim()) {
           return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
         }
+        if (req.dbQueryApiPrincipal && (
+          k !== 'sql' || !isSparkApiSqlShapeAllowed(sql, req.body?.db)
+        )) {
+          return res.status(403).json({ code: 403, msg: 'API Token 仅允许 Spark 只读 SQL，或配置库内的 INSERT 写入' })
+        }
         // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
-        checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql)))
+        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql))
+        checkSparkAccess(req, isWrite, req.body?.db)
         // 写操作(db-proxy 侧 writeUnlocked 语义):已通过权限矩阵即视为解锁 — 门户放行后
         // 透传 writeUnlocked=true 并附加 X-Spark-Write 共享密钥,db-proxy 才放行写语句。
         // 读查询保持 false,db-proxy 对所有写语句强制该标记,堵死直连伪造。
-        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql))
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
         const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
@@ -117,9 +124,13 @@ export function setupSpark(app) {
       (fn) =>
       async (req, res) => {
         try {
+          if (req.dbQueryApiPrincipal) checkSparkAccess(req, false)
           const data = await fn(req)
           res.json({ code: 0, data })
         } catch (e) {
+          if (e?.statusCode === 403) {
+            return res.status(403).json({ code: 403, msg: e.message })
+          }
           if (e?.statusCode === 503) {
             return res.status(503).json({ code: 503, msg: e.message })
           }
@@ -140,14 +151,20 @@ export function setupSpark(app) {
         const k = kind === 'pyspark' ? 'pyspark' : 'sql'
         const body = String(k === 'pyspark' ? code : sql || '')
         if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
+        if (req.dbQueryApiPrincipal && (
+          k !== 'sql' || !isSparkApiSqlShapeAllowed(body, req.body?.db)
+        )) {
+          return res.status(403).json({ code: 403, msg: 'API Token 仅允许 Spark 只读 SQL，或配置库内的 INSERT 写入' })
+        }
         // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
-        checkSparkAccess(req, k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body)))
+        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body))
+        checkSparkAccess(req, isWrite, req.body?.db)
         // 写操作透传 writeUnlocked=true(与 /api/spark/query 一致):权限矩阵放行即解锁,
         // 附加 X-Spark-Write 头交由 db-proxy 物理校验;读查询保持 false。
-        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body))
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
         const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
+        if (req.dbQueryApiPrincipal && data?.jobId) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
         res.json({ code: 0, data })
       } catch (e) {
         if (e?.statusCode === 403) {
@@ -161,6 +178,9 @@ export function setupSpark(app) {
 
     app.get('/api/spark/jobs/:jobId', async (req, res) => {
       try {
+        if (req.dbQueryApiPrincipal && !dbQueryApiJobs.has('spark', req.params.jobId)) {
+          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Spark 任务' })
+        }
         const data = await sparkJobStatus(String(req.params.jobId))
         res.json({ code: 0, data })
       } catch (e) {
@@ -171,6 +191,9 @@ export function setupSpark(app) {
 
     app.post('/api/spark/jobs/:jobId/cancel', async (req, res) => {
       try {
+        if (req.dbQueryApiPrincipal && !dbQueryApiJobs.has('spark', req.params.jobId)) {
+          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Spark 任务' })
+        }
         const data = await sparkCancelJob(String(req.params.jobId))
         res.json({ code: 0, data })
       } catch (e) {

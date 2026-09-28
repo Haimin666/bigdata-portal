@@ -108,8 +108,9 @@ src/
 - 会话:`portal_session` cookie(httpOnly),`requireAuth`/`requireAdmin` 守卫;`PROTECTED_PREFIXES` 内未登录一律 401
 - **WebSocket 鉴权**:upgrade 请求不经过 Express 中间件,网关在 `server.on('upgrade')` 手动解析 `portal_session` cookie 并校验 Stingray/Jupyter 模块权限；未登录、未授权或未初始化一律断开。
 - **写操作权限**:独立 `X-Spark-Token` 解锁已移除；Spark/Flink/MySQL/Oracle 写操作由模块权限、数据权限矩阵、数据源 `readOnly` 与 db-proxy 资源护栏共同控制，写 SQL 继续执行语句检测与审计。
-- **MySQL/Oracle 防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` 与数据权限校验；db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线)；`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束，GET 状态查询放行。
-- **数据权限矩阵(用户/角色→库)**:`server/data/db-permissions.json`(userRules/roleRules,不存在即无规则不拦截);带 `db` 参数的 MySQL/Oracle 访问接口(query/jobs/explain 路由内 + tables/fields/ddl/schema GET 前置中间件)按调用者校验,不在其 dbs → 403;**admin 一律放行**,无规则回退 db-proxy 全局白名单;管理 API `GET/PUT /api/db-perms`(admin only)。详见 `docs/modules/db-permissions.md`
+- **数据库查询 API Token**:独立于数据同步 token，仅在网关侧开放 Impala 只读与 Spark SQL 只读/授权库写入；token 使用专用虚拟角色 `db-query-api` 和接口白名单，不伪装 admin、不透传到 db-proxy。服务端配置只保存 Token 密钥；数据库权限从 `db-permissions.json` 角色规则读取，缺少虚拟角色规则时拒绝访问。Spark 写库默认无权限，仅开放 `INSERT INTO/OVERWRITE`，PySpark/DDL/Flink/其他引擎拒绝。
+- **MySQL/Oracle/Impala 防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做 `isSparkWriteSql` 与数据权限校验；db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线)；`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束，GET 状态查询放行。
+- **数据权限矩阵(用户/角色→库)**:`server/data/db-permissions.json`(userRules/roleRules,不存在即无规则不拦截);带 `db` 参数的 MySQL/Oracle/Impala 访问接口(query/jobs/explain 路由内 + tables/fields/ddl/schema GET 前置中间件)按调用者校验,不在其 dbs → 403;**admin 一律放行**,无规则回退 db-proxy 全局白名单;API Token 的虚拟角色缺省则 fail-closed;管理 API `GET/PUT /api/db-perms`(admin only)。详见 `docs/modules/db-permissions.md`
 
 ## 4. db-proxy(数据服务,Python FastAPI)
 
@@ -150,7 +151,7 @@ QueryView.vue
 - 开发助手:`assistantUrl`/`assistantToken`/`assistantWorkspace`(Reasonix);`datadeckUrl`(Datadeck Agent,默认 Docker 宿主机映射 `http://host.docker.internal:8000`)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`
 - 数据:`dbProxyUrl`/`dbProxyToken`、`dbScriptsDir`、`dsDepsCacheFile`
-- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`trustProxy`(反代层数,直连部署保持 0);~~loginTlsInsecure/accounts.*~~ 已随子应用自动登录移除(2026-08,多用户体系)
+- 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`dbQueryApiToken`、`trustProxy`(反代层数,直连部署保持 0);~~loginTlsInsecure/accounts.*~~ 已随子应用自动登录移除(2026-08,多用户体系)
 
 ## 7. 部署拓扑
 

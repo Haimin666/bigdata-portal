@@ -61,7 +61,10 @@ const auth = setupAuth(app, config)
 
 // 登录门禁(PROTECTED_PREFIXES)与执行门禁(EXEC_GATES)顺次挂载;
 // 未初始化(无任何用户)时,除初始化接口外一律 503,避免门户裸奔。
-app.use(createAuthGate(auth, { syncApiToken: config.syncApiToken }))
+app.use(createAuthGate(auth, {
+  syncApiToken: config.syncApiToken,
+  dbQueryApiToken: config.dbQueryApiToken
+}))
 app.use(createModuleGate(auth))
 app.use(createExecGate(auth))
 

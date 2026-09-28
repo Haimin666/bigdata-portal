@@ -24,7 +24,7 @@
 }
 ```
 
-- **v2 规则形状**:`{user|role, engineRules[], spark?, flink?}`;`engineRules` 每条 `{engine: 'mysql'|'oracle'|'*', db, tables: string[]|null, read, write}`。
+- **v2 规则形状**:`{user|role, engineRules[], spark?, flink?}`;`engineRules` 每条 `{engine: 'mysql'|'oracle'|'impala'|'*', db, tables: string[]|null, read, write}`。
 - **`db: "*"` = 所有库**(2026-08):执行校验(`checkDbAccess`)与 ACL 库下拉过滤(`allowedDbsFor`)均识别通配;旧 `dbs:["*"]`/`dbs:[...]`(v1)加载时自动迁移为 v2(全部引擎读写 + spark/flink 全开)。
 - 匹配规则：**先查 userRules（精确用户名），命中即用（覆盖角色规则，不再回退）**；未命中再用 roleRules（该用户的角色）。**匹配规则后**，若请求的 db 不在其 dbs/engineRules → 403。
 - **defaultDeny 开关**（2026-08）：规则文件 `"defaultDeny": true` 时，**未配置任何规则的用户/角色一律拒绝**（DB/Spark/Flink 403、ACL 下拉为空）；false/缺省则无规则放行（仅受全局白名单兜底）。管理页头部可切换（开启有确认弹窗）。
@@ -34,7 +34,7 @@
 
 ## 校验点（网关 `server/middleware/exec-gate.js` + 各 `server/routes/*.js` / `db-permissions.js`）
 
-带 `db` 参数的 MySQL/Oracle 访问接口，执行前校验：
+带 `db` 参数的 MySQL/Oracle/Impala 访问接口，执行前校验：
 
 | 接口 | db 参数位置 | 校验方式 |
 |---|---|---|
@@ -44,7 +44,15 @@
 | `GET /api/db/tables`、`/fields`、`/ddl`、`/schema` | query | `app.use('/api/db', ...)` 前置中间件（仅处理 GET+query.db，其余 next） |
 | `GET /api/db/search/tables` | query.keyword | 返回结果按当前用户允许的数据库过滤 |
 
-spark/flink 引擎查询不在本矩阵范围（引擎侧库概念不同）。
+Spark/Flink 常规权限继续使用各自规则；Spark 可选 `writeDbs: string[]` 限制写入目标库。字段缺省保持旧规则行为（有写权限即不限制库），显式空数组表示禁止 Spark 写库。
+
+### 数据库查询 API Token
+
+- 唯一 Token 密钥放在门户服务端 `config.local.json` 的 `dbQueryApiToken`；数据库名单不再重复配置。
+- API Token 映射到权限矩阵中的虚拟角色 `db-query-api`。该角色不对应登录账号，角色规则在用户管理 → 数据权限中单独展示和编辑；没有该角色规则时 API Token 的数据库访问默认拒绝，不受 `defaultDeny=false` 的无规则放行影响。
+- 通过 `engineRules` 配置 `{engine:"impala", db:"库名", read:true, write:false}` 控制 Impala；通过 Spark 规则 `{read:true, write:true, writeDbs:["目标库"]}` 控制 Spark 读和可写库。Token 本身仍被网关硬限制为 Impala/Spark 路由、Impala 只读、Spark SQL（不含 PySpark）及 `INSERT INTO` / `INSERT OVERWRITE`；Spark 写 SQL 必须全限定目标库并与请求 `db` 相同。
+- Impala 表级规则仍约束查询引用表；表目录/字段/DDL/整库 Schema 元数据接口要求库规则为整库读取（`tables: null`），以免受限表名或结构通过元数据接口泄露。
+- `dbQueryApiToken` 只认证身份，所有库权限均由上述权限矩阵决定；db-proxy 不参与门户用户/Token 授权。
 
 ## 管理 API（admin only）
 
@@ -57,7 +65,7 @@ spark/flink 引擎查询不在本矩阵范围（引擎侧库概念不同）。
 - `src/views/admin/DbPermView.vue`（内嵌「用户管理」页「数据权限」tab，对标 `UserManageView.vue`）：
   - 两个 tab：用户规则 / 角色规则
   - **角色规则表预设角色全量展示**（2026-08）：未配置的角色也列出（带「未配置」标记），点编辑即创建；已配置但不在预设中的自定义角色追加在后
-  - 规则编辑：`DbRuleEditor`（引擎/库/表/读写 + Spark + Flink；库支持「所有库」`*`）
+  - 规则编辑：`DbRuleEditor`（引擎/库/表/读写 + Spark 读写库范围 + Flink；库支持「所有库」`*`）；虚拟角色 `db-query-api` 固定可选
   - 头部「默认拒绝」开关（defaultDeny，开启需确认）；顶部说明匹配顺序与当前模式
 
 ## 文档与代码冲突

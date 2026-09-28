@@ -92,7 +92,13 @@ function openDbPerm(u: UserInfo) {
   editingInitial.value = rule
     ? {
         engineRules: (rule.engineRules || []).map((er) => ({ ...er, tables: er.tables ? [...er.tables] : null })),
-        spark: rule.spark ? { read: rule.spark.read === true, write: rule.spark.write === true } : null,
+        spark: rule.spark
+          ? {
+              read: rule.spark.read === true,
+              write: rule.spark.write === true,
+              ...(Array.isArray(rule.spark.writeDbs) ? { writeDbs: [...rule.spark.writeDbs] } : {})
+            }
+          : null,
         flink: rule.flink ? { enabled: rule.flink.enabled === true } : null
       }
     : null

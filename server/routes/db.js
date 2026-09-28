@@ -4,8 +4,10 @@ import express from 'express'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import config from '../config.js'
 import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
+import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
+import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { dbEngine, refreshEngineMap } from '../engine-map.js'
-import { loadPerms, savePerms, checkDbAccess, allowedDbsFor } from '../db-permissions.js'
+import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsImpalaDatabase } from '../db-permissions.js'
 
 export function setupDb(app, auth) {
   // ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
@@ -16,7 +18,11 @@ export function setupDb(app, auth) {
     if (req.method !== 'GET' || !req.query.db) return next()
     if (!/^\/(tables|fields|ddl|schema)(\/|$)/i.test(req.path)) return next()
     try {
-      checkDbAccess(req, String(req.query.db))
+      const dbName = String(req.query.db)
+      checkDbAccess(req, dbName, {
+        engine: dbEngine(dbName),
+        requireWholeDatabase: !!req.dbQueryApiPrincipal
+      })
       next()
     } catch (e) {
       if (e?.statusCode === 403) {
@@ -43,6 +49,15 @@ export function setupDb(app, auth) {
       const datasources = Array.isArray(data.datasources) ? data.datasources : []
       // 刷新库→引擎映射(引擎级规则校验用)
       refreshEngineMap(datasources)
+      if (req.dbQueryApiPrincipal) {
+        const perms = loadPerms()
+        data.datasources = datasources.filter((d) =>
+          d && String(d.type || '').toLowerCase() === 'impala' &&
+            apiTokenAllowsImpalaDatabase(perms, String(d.name || ''))
+        )
+        data.allowedDbs = data.datasources.map((d) => String(d.name))
+        return res.json({ code: 0, data })
+      }
       const user = req?.user || {}
       if (user.role !== 'admin') {
         const perms = loadPerms()
@@ -110,12 +125,17 @@ export function setupDb(app, auth) {
     const validEngRule = (e) =>
       !!e && typeof e === 'object' && typeof e.db === 'string' && e.db.length > 0 &&
       typeof e.engine === 'string' && (e.tables == null || Array.isArray(e.tables))
+    const validSparkRule = (spark) =>
+      spark == null || (
+        typeof spark === 'object' && typeof spark.read === 'boolean' && typeof spark.write === 'boolean' &&
+        (spark.writeDbs == null || (Array.isArray(spark.writeDbs) && spark.writeDbs.every((db) => typeof db === 'string')))
+      )
     const validRule = (r, key) =>
       !!r && typeof r[key] === 'string' && r[key].length > 0 &&
       (Array.isArray(r.dbs) ? r.dbs.every((d) => typeof d === 'string') : true) &&
       (r.engineRules != null
         ? Array.isArray(r.engineRules) && r.engineRules.every(validEngRule)
-        : true)
+        : true) && validSparkRule(r.spark)
     if (!userRules.every((r) => validRule(r, 'user')) || !roleRules.every((r) => validRule(r, 'role'))) {
       return res.status(400).json({ code: 400, msg: '每条规则须为 {user|role: 非空字符串, dbs/engineRules: 合法数组}' })
     }
@@ -136,6 +156,9 @@ export function setupDb(app, auth) {
     const dbName = String(req.body?.db || '').trim()
     if (!dbName) {
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+    }
+    if (req.dbQueryApiPrincipal && (dbEngine(dbName) !== 'impala' || !isDbQueryApiReadSql(sql))) {
+      return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala 只读 SQL' })
     }
     // 数据权限矩阵 v2:按 引擎+库+读写+表 校验
     try {
@@ -168,6 +191,9 @@ export function setupDb(app, auth) {
         err.status = r.status
         throw err
       }
+      if (req.dbQueryApiPrincipal && body.data?.jobId) {
+        dbQueryApiJobs.register('impala', body.data.jobId, dbName)
+      }
       res.json({ code: 0, data: body.data })
     } catch (e) {
       console.error('[db/jobs]', e instanceof Error ? e.message : e)
@@ -188,9 +214,15 @@ export function setupDb(app, auth) {
     if (!dbName) {
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
     }
+    if (req.dbQueryApiPrincipal && (dbEngine(dbName) !== 'impala' || !isDbQueryApiReadSql(sql))) {
+      return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala 只读 SQL' })
+    }
     // 数据权限矩阵:按用户/角色校验库访问权(explain 为只读计划,仍需库级授权)
     try {
-      checkDbAccess(req, dbName)
+      checkDbAccess(req, dbName, {
+        engine: dbEngine(dbName),
+        tables: req.dbQueryApiPrincipal ? extractTables(sql) : null
+      })
     } catch (e) {
       if (e?.statusCode === 403) {
         return res.status(403).json({ code: 403, msg: e.message })
@@ -233,6 +265,12 @@ export function setupDb(app, auth) {
       }
     })
     app.use('/api/db', (req, res, next) => {
+      if (req.dbQueryApiPrincipal) {
+        const jobMatch = req.path.match(/^\/jobs\/([a-z0-9_-]+)(?:\/cancel)?$/i)
+        if (jobMatch && !dbQueryApiJobs.has('impala', jobMatch[1])) {
+          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Impala 任务' })
+        }
+      }
       // 敏感路径不走透传:
       //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
       //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过

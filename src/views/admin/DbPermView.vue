@@ -24,6 +24,7 @@ const loading = ref(false)
 const saving = ref(false)
 const loadFailed = ref(false)
 const tableDensity = ref<'large' | 'default' | 'small'>('small')
+const DB_QUERY_API_ROLE = 'db-query-api'
 
 // ── 加载 ─────────────────────────────────────────────────
 async function load() {
@@ -48,6 +49,7 @@ async function load() {
 }
 
 async function loadUsersAndRoles() {
+  roleOptions.value = []
   try {
     const data = await userApi.list()
     users.value = data.users.map((u) => u.username)
@@ -57,8 +59,10 @@ async function loadUsersAndRoles() {
       .filter(([k]) => k !== 'admin')
       .map(([k, v]) => ({ key: k, title: v.title || k }))
   } catch {
-    // 用户/角色列表不可用:保持空选项,弹窗 allow-create 仍可手动输入
+    // 用户/角色列表不可用:仍保留 API Token 虚拟角色,其他角色可手动输入
   }
+  roleOptions.value = roleOptions.value.filter((option) => option.key !== DB_QUERY_API_ROLE)
+  roleOptions.value.push({ key: DB_QUERY_API_ROLE, title: '数据库查询 API Token' })
 }
 
 onMounted(load)
@@ -93,7 +97,13 @@ function openEdit(kind: RuleKind, rule: DbUserRule | DbRoleRule) {
   editingSubject.value = kind === 'user' ? (rule as DbUserRule).user : (rule as DbRoleRule).role
   editingInitial.value = {
     engineRules: (rule.engineRules || []).map((er) => ({ ...er, tables: er.tables ? [...er.tables] : null })),
-    spark: rule.spark ? { read: rule.spark.read === true, write: rule.spark.write === true } : null,
+    spark: rule.spark
+      ? {
+          read: rule.spark.read === true,
+          write: rule.spark.write === true,
+          ...(Array.isArray(rule.spark.writeDbs) ? { writeDbs: [...rule.spark.writeDbs] } : {})
+        }
+      : null,
     flink: rule.flink ? { enabled: rule.flink.enabled === true } : null
   }
   showEditor.value = true
@@ -175,7 +185,9 @@ function engDesc(rule: DbUserRule | DbRoleRule): string {
 
 function sparkDesc(rule: DbUserRule | DbRoleRule): string {
   if (!rule.spark) return '未启用'
-  return `读${rule.spark.read ? '✓' : '✗'} 写${rule.spark.write ? '✓' : '✗'}`
+  const writeDbs = rule.spark.writeDbs
+  const dbs = Array.isArray(writeDbs) ? `(${writeDbs.length}个可写库)` : ''
+  return `读${rule.spark.read ? '✓' : '✗'} 写${rule.spark.write ? '✓' : '✗'}${dbs}`
 }
 
 function flinkDesc(rule: DbUserRule | DbRoleRule): string {

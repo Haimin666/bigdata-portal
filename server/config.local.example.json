@@ -10,6 +10,8 @@
   "dsToken": "",
   "dbProxyUrl": "http://10.25.15.106:8756",
   "dbProxyToken": "",
+  "_dbQueryApi说明": "外部数据库查询 API Token(请求头 X-API-Token)。此项只认证身份；Impala/Spark 库权限在门户用户管理→数据权限中的 db-query-api 虚拟角色设置。留空即不开启 Token。",
+  "dbQueryApiToken": "",
   "_spark说明": "Spark 引擎由 db-proxy 集成(自建网关,弃用 Livy)。写操作仍需 sparkWritePassword 在门户解锁;db-proxy 侧 datasources.json 的 spark.allowWrite 为第二道防线。",
   "sparkWritePassword": "",
   "dbScriptsDir": "",
