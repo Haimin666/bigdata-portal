@@ -528,6 +528,7 @@ function registerProvider(language: 'sql' | 'python'): void {
         const wordPrefix = (m ? (m[1].includes('.') ? m[1].split('.').pop()! : m[1]) : '').toLowerCase()
         if (wordPrefix) {
           for (const w of docWords(model, wordPrefix)) {
+            if (w.toLowerCase() === wordPrefix) continue // 不提示正在输入的词本身,避免 Tab 接受无变化候选
             if (suggestions.some((s) => s.label === w)) continue
             suggestions.push({ label: w, kind: monaco.languages.CompletionItemKind.Text, insertText: w, range: rngAt(position.column - wordPrefix.length) })
             if (suggestions.length >= MAX_SUGGEST) break
@@ -849,7 +850,8 @@ onMounted(() => {
     autoClosingBrackets: 'always',
     autoClosingQuotes: 'always',
     bracketPairColorization: { enabled: true },
-    suggest: { showWords: false }, // 禁用默认词补全,使用自实现 provider;候选虚拟滚动,无需截断配置
+    wordBasedSuggestions: 'off', // 禁用默认词源,保留自实现 provider 的 Text 候选
+    suggest: { showWords: true },
     quickSuggestions: false, // 自动提示由 onDidChangeContent 的上下文判断统一触发,避免 Monaco 内置触发失效/重复弹出
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnEnter: 'on',

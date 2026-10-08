@@ -42,6 +42,9 @@
 
 ## 4. 核心机制
 
+- **Monaco 补全组件加载**:`editor.api` 仅提供基础编辑器 API；`monaco-setup.ts` 必须显式加载 `contrib/suggest/browser/suggestController`，注册补全弹窗、触发命令与 snippet 接受能力，否则 provider 有候选也无法显示提示。验证需覆盖浏览器实际打字自动弹出和 Tab 接受，不能仅依赖类型检查/构建。
+- **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
+
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
 - **页面生命周期**:查询页接收 TabStage 的 `active` 状态;隐藏时暂停 Spark 日志轮询,重新激活后恢复必要轮询

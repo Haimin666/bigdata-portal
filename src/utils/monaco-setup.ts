@@ -3,6 +3,8 @@
  * 只负责"环境",不承载业务补全逻辑(见 SqlEditor.vue)。
  */
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
+// editor.api 不包含补全 UI；加载控制器以注册弹窗、触发命令和 snippet 接受能力。
+import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController'
 // 只带 SQL / Python 两种 Monarch 高亮(basic-languages 其余语言不打包,控制体积)
 import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution'
 import 'monaco-editor/esm/vs/basic-languages/python/python.contribution'
