@@ -12,6 +12,13 @@
  */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { monaco, definePortalThemes, editorUri } from '@/utils/monaco-setup'
+import {
+  filterSqlStringValues,
+  getSingleQuotedPrefix,
+  isSqlCommentPosition,
+  scanSqlStringLine,
+  shouldAutoTriggerSqlCompletion
+} from '@/utils/sql-editor-completions'
 
 // ── Props / Emits ────────────────────────────────────────────
 interface SchemaMeta {
@@ -47,6 +54,7 @@ const emit = defineEmits<{
 // ── 常量 ─────────────────────────────────────────────────────
 const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE', 'SET', 'VALUES', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'BETWEEN', 'LIKE']
 const MAX_SUGGEST = 120 // 候选上限(截断;Monaco 虚拟滚动无 DOM 压力,控制提示质量)
+const AUTO_SUGGEST_DELAY = 80
 const WORD_RE = /[A-Za-z_][A-Za-z0-9_$]{2,}/g // 文中词(长度≥3,过滤单双字母噪声)
 
 // ── 内置函数(聚合/字符串/数学/日期/流程/窗口;detail 显示签名,插入带参数占位)
@@ -128,6 +136,7 @@ const SNIPPETS: Array<{ label: string; detail: string; insertText: string }> = [
 const containerRef = ref<HTMLElement>()
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 let modelChangeDisposable: monaco.IDisposable | null = null
+let autoSuggestTimer: number | null = null
 /** 程序性 setValue(silent)抑制 emit('change') —— 历史回填/表预览等程序写入不标记 dirty、不触发自动保存(等价旧 CM 的 change.origin==='setValue') */
 let suppressChangeEmit = false
 /** model 池:modelId → ITextModel(每个 tab 独立文档/撤销历史/光标),等价旧 CM swapDoc */
@@ -144,8 +153,16 @@ const schemaInflight = new Map<string, Promise<SchemaMeta | null>>()
  *  needsRebuild: 行数变化(Enter 拆行/粘贴/删除)导致行号偏移,标整表重建(低频一次,防行号错位计数漂移) */
 const byLineWords = new Map<string, Map<number, Set<string>>>()
 const wordCounts = new Map<string, Map<string, number>>()
+const wordPrefixBuckets = new Map<string, Map<string, Set<string>>>()
 const dirtyLines = new Map<string, Set<number>>()
 const needsRebuild = new Map<string, boolean>()
+/** SQL 字符串值索引按 model/行增量维护,避免自动补全时扫描整个脚本。 */
+const stringValuesByLine = new Map<string, Map<number, Set<string>>>()
+const stringValueCounts = new Map<string, Map<string, number>>()
+const stringPrefixBuckets = new Map<string, Map<string, Set<string>>>()
+const stringBlockStates = new Map<string, Map<number, boolean>>()
+const dirtyStringLines = new Map<string, Set<number>>()
+const stringNeedsRebuild = new Map<string, boolean>()
 
 definePortalThemes() // 幂等定义(模块内 flag 防重复)
 monaco.editor.setTheme(props.themeMode === 'dark' ? 'portal-dark' : 'portal-light')
@@ -171,6 +188,16 @@ function rebuildModelIndex(model: monaco.editor.ITextModel): void {
   }
   byLineWords.set(id, byLine)
   wordCounts.set(id, counts)
+  const buckets = new Map<string, Set<string>>()
+  for (const word of counts.keys()) {
+    for (let length = 1; length <= Math.min(3, word.length); length++) {
+      const prefix = word.slice(0, length).toLowerCase()
+      let bucket = buckets.get(prefix)
+      if (!bucket) buckets.set(prefix, (bucket = new Set()))
+      bucket.add(word)
+    }
+  }
+  wordPrefixBuckets.set(id, buckets)
   dirtyLines.set(id, new Set())
   needsRebuild.delete(id)
 }
@@ -180,11 +207,18 @@ function rebuildModelIndex(model: monaco.editor.ITextModel): void {
 function markIndexDirty(model: monaco.editor.ITextModel, changes: monaco.editor.IModelContentChange[]): void {
   const id = model.id
   for (const ch of changes) {
+    let stringDirty = dirtyStringLines.get(id)
+    if (!stringDirty) {
+      stringDirty = new Set()
+      dirtyStringLines.set(id, stringDirty)
+    }
     const sameLine = ch.range.startLineNumber === ch.range.endLineNumber && !ch.text.includes('\n')
     if (!sameLine) {
       needsRebuild.set(id, true)
+      stringNeedsRebuild.set(id, true)
       return
     }
+    stringDirty.add(ch.range.startLineNumber)
     let d = dirtyLines.get(id)
     if (!d) {
       d = new Set()
@@ -196,7 +230,7 @@ function markIndexDirty(model: monaco.editor.ITextModel, changes: monaco.editor.
 
 /** 取全部文中词(触发时机=补全请求):先重建脏行/整表,再返回词表。
  *  打字每键只重建光标行 1 行;Enter/粘贴/删除等低频率操作才整表重建。 */
-function docWords(model: monaco.editor.ITextModel): Set<string> {
+function docWords(model: monaco.editor.ITextModel, prefix: string): Set<string> {
   const id = model.id
   if (needsRebuild.get(id)) rebuildModelIndex(model)
   if (!wordCounts.has(id)) rebuildModelIndex(model)
@@ -209,7 +243,16 @@ function docWords(model: monaco.editor.ITextModel): Set<string> {
       if (oldWs) {
         for (const w of oldWs) {
           const c = (counts.get(w) ?? 0) - 1
-          if (c <= 0) counts.delete(w)
+          if (c <= 0) {
+            counts.delete(w)
+            const buckets = wordPrefixBuckets.get(id)!
+            for (let length = 1; length <= Math.min(3, w.length); length++) {
+              const key = w.slice(0, length).toLowerCase()
+              const bucket = buckets.get(key)
+              bucket?.delete(w)
+              if (bucket?.size === 0) buckets.delete(key)
+            }
+          }
           else counts.set(w, c)
         }
       }
@@ -219,11 +262,133 @@ function docWords(model: monaco.editor.ITextModel): Set<string> {
       }
       const newWs = extractWords(model.getLineContent(l))
       byLine.set(l, newWs)
-      for (const w of newWs) counts.set(w, (counts.get(w) ?? 0) + 1)
+      for (const w of newWs) {
+        const oldCount = counts.get(w) ?? 0
+        counts.set(w, oldCount + 1)
+        if (oldCount === 0) {
+          const buckets = wordPrefixBuckets.get(id)!
+          for (let length = 1; length <= Math.min(3, w.length); length++) {
+            const key = w.slice(0, length).toLowerCase()
+            let bucket = buckets.get(key)
+            if (!bucket) buckets.set(key, (bucket = new Set()))
+            bucket.add(w)
+          }
+        }
+      }
     }
     dirty.clear()
   }
-  return new Set(wordCounts.get(id)!.keys())
+  const normalized = prefix.toLowerCase()
+  const key = normalized.slice(0, Math.min(normalized.length, 3))
+  const bucket = wordPrefixBuckets.get(id)?.get(key)
+  if (!bucket) return new Set()
+  const words = new Set<string>()
+  for (const word of bucket) {
+    if (!word.toLowerCase().startsWith(normalized)) continue
+    words.add(word)
+    if (words.size >= MAX_SUGGEST) break
+  }
+  return words
+}
+
+function changeStringValueCount(id: string, value: string, delta: 1 | -1): void {
+  const counts = stringValueCounts.get(id)!
+  const count = (counts.get(value) ?? 0) + delta
+  if (count > 0) {
+    counts.set(value, count)
+    if (delta > 0 && count === 1) {
+      const buckets = stringPrefixBuckets.get(id)!
+      for (let length = 1; length <= Math.min(3, value.length); length++) {
+        const prefix = value.slice(0, length)
+        let bucket = buckets.get(prefix)
+        if (!bucket) buckets.set(prefix, (bucket = new Set()))
+        bucket.add(value)
+      }
+    }
+    return
+  }
+  counts.delete(value)
+  const buckets = stringPrefixBuckets.get(id)!
+  for (let length = 1; length <= Math.min(3, value.length); length++) {
+    const prefix = value.slice(0, length)
+    const bucket = buckets.get(prefix)
+    bucket?.delete(value)
+    if (bucket?.size === 0) buckets.delete(prefix)
+  }
+}
+
+function rebuildStringIndex(model: monaco.editor.ITextModel): void {
+  const id = model.id
+  const byLine = new Map<number, Set<string>>()
+  const counts = new Map<string, number>()
+  const buckets = new Map<string, Set<string>>()
+  const blockStates = new Map<number, boolean>()
+  let inBlockComment = false
+  for (let line = 1; line <= model.getLineCount(); line++) {
+    const parsed = scanSqlStringLine(model.getLineContent(line), inBlockComment)
+    const values = new Set(parsed.values)
+    byLine.set(line, values)
+    for (const value of values) {
+      counts.set(value, (counts.get(value) ?? 0) + 1)
+      for (let length = 1; length <= Math.min(3, value.length); length++) {
+        const prefix = value.slice(0, length)
+        let bucket = buckets.get(prefix)
+        if (!bucket) buckets.set(prefix, (bucket = new Set()))
+        bucket.add(value)
+      }
+    }
+    inBlockComment = parsed.inBlockComment
+    blockStates.set(line, inBlockComment)
+  }
+  stringValuesByLine.set(id, byLine)
+  stringValueCounts.set(id, counts)
+  stringPrefixBuckets.set(id, buckets)
+  stringBlockStates.set(id, blockStates)
+  dirtyStringLines.set(id, new Set())
+  stringNeedsRebuild.delete(id)
+}
+
+function updateStringIndexLine(model: monaco.editor.ITextModel, line: number): boolean {
+  const id = model.id
+  const byLine = stringValuesByLine.get(id)!
+  const blockStates = stringBlockStates.get(id)!
+  const oldEndState = blockStates.get(line) ?? false
+  for (const value of byLine.get(line) ?? []) changeStringValueCount(id, value, -1)
+
+  const initialState = line > 1 ? blockStates.get(line - 1) ?? false : false
+  const parsed = scanSqlStringLine(model.getLineContent(line), initialState)
+  const values = new Set(parsed.values)
+  byLine.set(line, values)
+  for (const value of values) changeStringValueCount(id, value, 1)
+  blockStates.set(line, parsed.inBlockComment)
+  return oldEndState !== parsed.inBlockComment
+}
+
+function refreshDocStringIndex(model: monaco.editor.ITextModel): void {
+  const id = model.id
+  if (!stringValuesByLine.has(id)) rebuildStringIndex(model)
+  if (stringNeedsRebuild.get(id)) rebuildStringIndex(model)
+  const dirty = dirtyStringLines.get(id)
+  if (dirty?.size) {
+    for (const line of [...dirty].sort((a, b) => a - b)) {
+      const stateChanged = updateStringIndexLine(model, line)
+      if (stateChanged) {
+        for (let next = line + 1; next <= model.getLineCount(); next++) {
+          const changed = updateStringIndexLine(model, next)
+          if (!changed) break
+        }
+      }
+    }
+    dirty.clear()
+  }
+}
+
+function docStringValues(model: monaco.editor.ITextModel, prefix: string): string[] {
+  refreshDocStringIndex(model)
+  const id = model.id
+  const key = prefix.slice(0, Math.min(prefix.length, 3))
+  const bucket = stringPrefixBuckets.get(id)?.get(key)
+  return bucket ? filterSqlStringValues(bucket, prefix, 30) : []
 }
 
 // ── schema(带缓存 + in-flight 去重,失败静默)──────────────
@@ -252,8 +417,8 @@ async function loadSchema(dbName: string): Promise<SchemaMeta | null> {
 function registerProvider(language: 'sql' | 'python'): void {
   const provider: monaco.languages.CompletionItemProvider = {
     triggerCharacters: ['.'],
-    provideCompletionItems: async (model, position) => {
-      if (model.uri.scheme !== 'portal-sql') return { suggestions: [] }
+    provideCompletionItems: (model, position) => {
+      if (model.uri.scheme !== 'portal-sql' || model.getLanguageId() !== language) return { suggestions: [] }
       const line = model.getLineContent(position.lineNumber)
       const before = line.slice(0, position.column - 1)
       const m = before.match(/([A-Za-z0-9_$]+(\.[A-Za-z0-9_$]*)?)$/)
@@ -266,7 +431,27 @@ function registerProvider(language: 'sql' | 'python'): void {
       })
       const suggestions: monaco.languages.CompletionItem[] = []
       if (language === 'sql') {
-        const meta = await loadSchema(props.currentDb)
+        refreshDocStringIndex(model)
+        const initialBlockComment = stringBlockStates.get(model.id)?.get(position.lineNumber - 1) ?? false
+        if (isSqlCommentPosition(line, position.column, initialBlockComment)) return { suggestions }
+        const stringPrefix = getSingleQuotedPrefix(line, position.column, initialBlockComment)
+        if (stringPrefix) {
+          if (stringPrefix.prefix) {
+            for (const value of docStringValues(model, stringPrefix.prefix)) {
+              suggestions.push({
+                label: value,
+                kind: monaco.languages.CompletionItemKind.Value,
+                insertText: value.replace(/'/g, "''"),
+                range: rngAt(stringPrefix.startColumn)
+              })
+            }
+          }
+          return { suggestions }
+        }
+
+        // Schema is prefetched on database change. Never hold local suggestions behind a cold network request.
+        if (props.currentDb && !schemaCache.has(props.currentDb)) void loadSchema(props.currentDb)
+        const meta = schemaCache.get(props.currentDb) ?? null
         if (m) {
           const full = m[1]
           const dotIdx = full.lastIndexOf('.')
@@ -287,7 +472,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                 })
                 if (suggestions.length >= MAX_SUGGEST) break
               }
-              return { suggestions }
+              return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
             }
           } else if (dotIdx < 0) {
             // 标识符:关键字 + 表名(点号前缀不匹配表时跳过,等价旧逻辑)
@@ -307,7 +492,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                   detail: t.comment || '表',
                   range: rngAt(startCol)
                 })
-                if (suggestions.length >= MAX_SUGGEST) return { suggestions }
+                if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
               }
             }
             // 内置函数:插入带参数占位(snippet),光标落在括号内
@@ -322,7 +507,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                 detail: f.sig,
                 range: rngAt(startCol)
               })
-              if (suggestions.length >= MAX_SUGGEST) return { suggestions }
+              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
             }
             // SQL snippet:缩写字触发常用模板
             for (const s of SNIPPETS) {
@@ -335,16 +520,15 @@ function registerProvider(language: 'sql' | 'python'): void {
                 detail: s.detail,
                 range: rngAt(startCol)
               })
-              if (suggestions.length >= MAX_SUGGEST) return { suggestions }
+              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
             }
           }
         }
         // 文中词(仅光标前有标识符前缀时补充,等价旧"输入过即提示")
         const wordPrefix = (m ? (m[1].includes('.') ? m[1].split('.').pop()! : m[1]) : '').toLowerCase()
         if (wordPrefix) {
-          for (const w of docWords(model)) {
+          for (const w of docWords(model, wordPrefix)) {
             if (suggestions.some((s) => s.label === w)) continue
-            if (!w.toLowerCase().startsWith(wordPrefix)) continue
             suggestions.push({ label: w, kind: monaco.languages.CompletionItemKind.Text, insertText: w, range: rngAt(position.column - wordPrefix.length) })
             if (suggestions.length >= MAX_SUGGEST) break
           }
@@ -358,15 +542,14 @@ function registerProvider(language: 'sql' | 'python'): void {
           if (k.toLowerCase().startsWith(wordPrefix)) suggestions.push({ label: k, kind: monaco.languages.CompletionItemKind.Keyword, insertText: k, range: rngAt(kwStart) })
         }
         if (wordPrefix) {
-          for (const w of docWords(model)) {
+          for (const w of docWords(model, wordPrefix)) {
             if (suggestions.some((s) => s.label === w)) continue
-            if (!w.toLowerCase().startsWith(wordPrefix)) continue
             suggestions.push({ label: w, kind: monaco.languages.CompletionItemKind.Text, insertText: w, range: rngAt(kwStart) })
             if (suggestions.length >= MAX_SUGGEST) break
           }
         }
       }
-      return { suggestions }
+      return { suggestions, incomplete: language === 'sql' && !!props.currentDb && !schemaCache.has(props.currentDb) }
     }
   }
   providers.push(monaco.languages.registerCompletionItemProvider(language, provider))
@@ -384,14 +567,45 @@ function ensureModel(id: string, initial = props.value): monaco.editor.ITextMode
   return model
 }
 
+function scheduleAutoSuggest(model: monaco.editor.ITextModel, changes: monaco.editor.IModelContentChange[]): void {
+  const e = editor
+  if (!e || e.getModel() !== model || changes.length !== 1) return
+  const change = changes[0]
+  if (change.text === '.' || change.text.length > 1 || (!change.text && !change.rangeLength)) return
+
+  if (autoSuggestTimer) window.clearTimeout(autoSuggestTimer)
+  autoSuggestTimer = window.setTimeout(() => {
+    autoSuggestTimer = null
+    const activeEditor = editor
+    const position = activeEditor?.getPosition()
+    if (!activeEditor || activeEditor.getModel() !== model || !position) return
+    const line = model.getLineContent(position.lineNumber)
+    let shouldTrigger = false
+    if (model.getLanguageId() === 'sql') {
+      refreshDocStringIndex(model)
+      shouldTrigger = shouldAutoTriggerSqlCompletion(
+        line,
+        position.column,
+        stringBlockStates.get(model.id)?.get(position.lineNumber - 1) ?? false
+      )
+    } else {
+      shouldTrigger = /[A-Za-z_][A-Za-z0-9_]*$/.test(line.slice(0, position.column - 1))
+    }
+    if (shouldTrigger) activeEditor.trigger('auto-suggest', 'editor.action.triggerSuggest', {})
+  }, AUTO_SUGGEST_DELAY)
+}
+
 function attachModel(id: string): void {
   if (!editor) return
   const model = ensureModel(id)
   if (editor.getModel() !== model) editor.setModel(model)
+  if (autoSuggestTimer) window.clearTimeout(autoSuggestTimer)
+  autoSuggestTimer = null
   modelChangeDisposable?.dispose()
   modelChangeDisposable = model.onDidChangeContent((e) => {
     markIndexDirty(model, e.changes) // 索引增量失效(单行内编辑只标 1 行)
     scheduleCheck() // 超长行策略 + 行内校验(防抖)
+    if (!suppressChangeEmit && !e.isUndoing && !e.isRedoing) scheduleAutoSuggest(model, e.changes)
     if (suppressChangeEmit) {
       suppressChangeEmit = false
       return // 程序性写入:参数行由调用方自行 sync,不标记 dirty/不触发自动保存
@@ -636,7 +850,9 @@ onMounted(() => {
     autoClosingQuotes: 'always',
     bracketPairColorization: { enabled: true },
     suggest: { showWords: false }, // 禁用默认词补全,使用自实现 provider;候选虚拟滚动,无需截断配置
-    quickSuggestions: { other: true, comments: false, strings: false },
+    quickSuggestions: false, // 自动提示由 onDidChangeContent 的上下文判断统一触发,避免 Monaco 内置触发失效/重复弹出
+    suggestOnTriggerCharacters: true,
+    acceptSuggestionOnEnter: 'on',
     tabSize: 2,
     insertSpaces: true,
     scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 }
@@ -681,6 +897,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   modelChangeDisposable?.dispose()
   modelChangeDisposable = null
+  if (autoSuggestTimer) window.clearTimeout(autoSuggestTimer)
+  autoSuggestTimer = null
   if (checkTimer) window.clearTimeout(checkTimer)
   checkTimer = null
   for (const p of providers.splice(0)) p.dispose()
@@ -690,8 +908,15 @@ onBeforeUnmount(() => {
   models.clear()
   byLineWords.clear()
   wordCounts.clear()
+  wordPrefixBuckets.clear()
   dirtyLines.clear()
   needsRebuild.clear()
+  stringValuesByLine.clear()
+  stringValueCounts.clear()
+  stringPrefixBuckets.clear()
+  stringBlockStates.clear()
+  dirtyStringLines.clear()
+  stringNeedsRebuild.clear()
   schemaCache.clear()
   schemaInflight.clear()
 })
