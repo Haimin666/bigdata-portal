@@ -66,6 +66,9 @@ const pageCurrent = ref(1)
 watch(pageSize, () => {
   pageCurrent.value = 1
 })
+watch(currentResult, () => {
+  pageCurrent.value = 1
+})
 const pagedRows = computed(() => {
   const r = currentResult.value
   if (!r) return []
