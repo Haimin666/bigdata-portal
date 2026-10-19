@@ -66,5 +66,68 @@ async page => {
       results.push({ name: `accept-${name}`, value, pass: true })
     }
   }
+
+  await page.evaluate(() => {
+    window.__sqlTest.setValue('select foobar, foo, FOO;', { silent: true })
+    window.__sqlTest.setSelection({ line: 1, ch: 15 }, { line: 1, ch: 18 })
+  })
+  await page.waitForFunction(() => {
+    const editor = window.__sqlMonaco.editor.getEditors()[0]
+    return editor.getModel().getAllDecorations().some((d) => d.options.className === 'portal-selection-match')
+  })
+  const highlightRanges = await page.evaluate(() => {
+    const editor = window.__sqlMonaco.editor.getEditors()[0]
+    return editor.getModel().getAllDecorations()
+      .filter((d) => d.options.className === 'portal-selection-match')
+      .map((d) => [d.range.startColumn, d.range.endColumn])
+  })
+  if (highlightRanges.length !== 1 || highlightRanges[0][0] !== 8) {
+    throw new Error(`same-substring highlight mismatch: ${JSON.stringify(highlightRanges)}`)
+  }
+  results.push({ name: 'same-substring-highlight', highlightRanges, pass: true })
+
+  await page.evaluate(() => {
+    window.__sqlTest.setValue('SELECT customer_name FROM orders WHERE customer_name = \'alice\';\nSELECT customer_name FROM orders;', { silent: true })
+    const editor = window.__sqlMonaco.editor.getEditors()[0]
+    editor.focus()
+  })
+  await page.keyboard.press('Control+f')
+  await page.locator('.find-widget.visible').waitFor()
+  const findInput = page.locator('.find-widget textarea[aria-label="Find"]')
+  await findInput.fill('customer_name')
+  await page.locator('.find-widget .matchesCount').waitFor()
+  const findCount = await page.locator('.find-widget .matchesCount').innerText()
+  if (!findCount.includes('1 of 3')) throw new Error(`find match count mismatch: ${findCount}`)
+  results.push({ name: 'canvas-keyword-search', findCount, pass: true })
+  await page.keyboard.press('Escape')
+  await page.evaluate(() => window.__sqlMonaco.editor.getEditors()[0].focus())
+  await page.keyboard.press('Meta+f')
+  await page.locator('.find-widget.visible').waitFor()
+  results.push({ name: 'canvas-keyword-search-cmd-f', pass: true })
+  await page.keyboard.press('Escape')
+
+  await page.evaluate(() => {
+    window.__sqlTest.setValue('', { silent: true })
+    const editor = window.__sqlMonaco.editor.getEditors()[0]
+    editor.setPosition({ lineNumber: 1, column: 1 })
+    editor.focus()
+  })
+  await page.keyboard.press('Control+Tab')
+  const singleLineIndent = await page.evaluate(() => window.__sqlTest.getValue())
+  if (singleLineIndent !== '  ') throw new Error(`Ctrl+Tab cursor indent failed: ${JSON.stringify(singleLineIndent)}`)
+  results.push({ name: 'ctrl-tab-cursor-indent', value: singleLineIndent, pass: true })
+
+  await page.evaluate(() => {
+    window.__sqlTest.setValue('SELECT 1;\nSELECT 2;', { silent: true })
+    const editor = window.__sqlMonaco.editor.getEditors()[0]
+    editor.setSelection(new window.__sqlMonaco.Range(1, 1, 2, 10))
+    editor.focus()
+  })
+  await page.keyboard.press('Control+Tab')
+  const multiLineIndent = await page.evaluate(() => window.__sqlTest.getValue())
+  if (!multiLineIndent.startsWith('  SELECT 1;\n  SELECT 2;')) {
+    throw new Error(`Ctrl+Tab multiline indent failed: ${JSON.stringify(multiLineIndent)}`)
+  }
+  results.push({ name: 'ctrl-tab-multiline-indent', value: multiLineIndent, pass: true })
   return results
 }

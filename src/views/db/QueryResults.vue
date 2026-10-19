@@ -5,7 +5,7 @@
  *  - 结果内容:分页表格 / 单元格行内编辑(表预览)/ 复制(单元格·本页·整表 TSV)/ 导出 CSV
  *  - 数据源(results/activePane/db)由父持有,交互通过 emits 回传(select/close/rerun/busy)
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { DocumentChecked, Loading, Close, Grid, CopyDocument, Download } from '@element-plus/icons-vue'
 import { queryDb } from '@/api/db'
@@ -58,6 +58,49 @@ const emit = defineEmits<{
   (e: 'busy', v: boolean): void
   (e: 'manage-flink'): void
 }>()
+
+// 结果 tab 右键菜单:相对右击 tab 执行批量关闭。
+const tabContextMenu = ref<{ index: number; left: number; top: number } | null>(null)
+function hideTabContextMenu(): void {
+  tabContextMenu.value = null
+}
+function openTabContextMenu(event: MouseEvent, index: number): void {
+  event.preventDefault()
+  event.stopPropagation()
+  emit('select', index + 1)
+  tabContextMenu.value = {
+    index,
+    left: Math.max(8, Math.min(event.clientX, window.innerWidth - 168)),
+    top: Math.max(8, Math.min(event.clientY, window.innerHeight - 152))
+  }
+}
+function closeTabsFromMenu(action: 'current' | 'left' | 'right' | 'others'): void {
+  const target = tabContextMenu.value?.index
+  if (target == null) return
+  hideTabContextMenu()
+  let indices: number[]
+  if (action === 'current') indices = [target]
+  else if (action === 'left') indices = Array.from({ length: target }, (_, i) => i)
+  else if (action === 'right') indices = Array.from({ length: Math.max(0, props.results.length - target - 1) }, (_, i) => target + i + 1)
+  else indices = props.results.map((_, i) => i).filter((i) => i !== target)
+  // 从右向左移除,保证父组件数组 splice 后剩余索引仍有效。
+  indices.sort((a, b) => b - a).forEach((idx) => emit('close', idx))
+}
+function onTabContextMenuKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') hideTabContextMenu()
+}
+onMounted(() => {
+  window.addEventListener('click', hideTabContextMenu)
+  window.addEventListener('keydown', onTabContextMenuKeydown)
+  window.addEventListener('resize', hideTabContextMenu)
+  window.addEventListener('scroll', hideTabContextMenu, true)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('click', hideTabContextMenu)
+  window.removeEventListener('keydown', onTabContextMenuKeydown)
+  window.removeEventListener('resize', hideTabContextMenu)
+  window.removeEventListener('scroll', hideTabContextMenu, true)
+})
 
 // ═════════════════════ 结果 tab / 分页 ═════════════════════
 const currentResult = computed(() => (props.activePane > 0 ? props.results[props.activePane - 1] : null) ?? null)
@@ -335,6 +378,7 @@ async function showJson(v: unknown) {
         class="result-tab"
         :class="{ active: activePane === idx + 1 }"
         @click="emit('select', idx + 1)"
+        @contextmenu="openTabContextMenu($event, idx)"
       >
         <el-icon v-if="r.running" class="tab-state tab-spin"><Loading /></el-icon>
         <span v-else class="tab-state" :class="r.error ? 'tab-err' : r.truncated ? 'tab-trunc' : 'tab-ok'" />
@@ -465,6 +509,21 @@ async function showJson(v: unknown) {
         </div>
       </template>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="tabContextMenu"
+        class="result-tab-context-menu"
+        role="menu"
+        aria-label="结果标签操作"
+        :style="{ left: `${tabContextMenu.left}px`, top: `${tabContextMenu.top}px` }"
+        @click.stop
+      >
+        <button role="menuitem" type="button" @click="closeTabsFromMenu('current')">关闭当前</button>
+        <button role="menuitem" type="button" :disabled="tabContextMenu.index === 0" @click="closeTabsFromMenu('left')">关闭左侧</button>
+        <button role="menuitem" type="button" :disabled="tabContextMenu.index >= results.length - 1" @click="closeTabsFromMenu('right')">关闭右侧</button>
+        <button role="menuitem" type="button" :disabled="results.length < 2" @click="closeTabsFromMenu('others')">关闭其他</button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -573,6 +632,42 @@ async function showJson(v: unknown) {
   border-radius: 3px;
   padding: 0 3px;
   line-height: 1.3;
+}
+
+.result-tab-context-menu {
+  position: fixed;
+  z-index: 4000;
+  width: 160px;
+  padding: 4px;
+  border: 1px solid var(--bd-border, #dfe3ea);
+  border-radius: 7px;
+  background: var(--bd-panel, #fff);
+  box-shadow: 0 8px 24px rgba(20, 30, 50, 0.18);
+  color: var(--bd-text, #24292f);
+
+  button {
+    display: block;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      background: var(--bd-table-hover, rgba(120, 140, 180, 0.1));
+    }
+
+    &:disabled {
+      color: var(--bd-muted, #8a94a6);
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+  }
 }
 
 /* 下方内容 */

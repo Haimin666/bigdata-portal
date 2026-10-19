@@ -330,8 +330,7 @@ READ_ONLY_SQL_RE = re.compile(
     r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|WITH)\b",
     re.IGNORECASE | re.DOTALL,
 )
-# 仅查询类(SELECT/WITH 前缀)才追加行数上限;SHOW/DESC/EXPLAIN 等只读语句不追加。
-# Doris 等 mysql 协议引擎对 SHOW/DESC/EXPLAIN 不接受 LIMIT 后缀,追加即语法错。
+# 只对 SELECT/WITH 查询在服务端隐藏追加行数限制;SHOW/DESC/EXPLAIN 等保持原文。
 SELECT_ONLY_RE = re.compile(
     r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(?:SELECT|WITH)\b",
     re.IGNORECASE | re.DOTALL,
@@ -414,11 +413,7 @@ def enforce_limit(sql: str) -> int:
 
 
 def append_row_limit(sql: str, limit: int, row_limit: str) -> str:
-    """按数据源的行数限制模式追加语法:
-    - mysql:  SELECT ... LIMIT n
-    - fetch:  SELECT ... FETCH FIRST n ROWS ONLY(12c+)
-    - rownum: SELECT * FROM (SELECT ...) WHERE ROWNUM <= n(11g)
-    """
+    """仅在服务端为 SELECT/WITH 添加行数限制,不改动前端画布内容。"""
     if row_limit == "rownum":
         return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {limit}"
     if row_limit == "fetch":
@@ -560,9 +555,8 @@ def _execute_query(
 ) -> Dict[str, Any]:
     """在已建立的连接上执行(连接由调用方管理,以便异步 job 取消时 close 中断)。"""
     if is_select:
-        # 查询类:仅 SELECT/WITH 查询追加行数限制(SHOW/DESC/EXPLAIN 不追加,
-        # 避免 Doris 等引擎对非 SELECT 语句不接受 LIMIT 后缀);
-        # 各引擎(limit/fetch/rownum)统一按此规则。
+        # 画布 SQL 不变;仅 SELECT/WITH 在服务端隐式限行。特殊查询命令保持原文,
+        # 结果读取仍有上限,避免将特殊语法拼接成非法 LIMIT。
         row_mode = ds.effective_row_limit(conn)
         if SELECT_ONLY_RE.match(clean_sql) and not LIMIT_RE.search(clean_sql):
             clean_sql = append_row_limit(clean_sql, limit, row_mode)
@@ -573,7 +567,7 @@ def _execute_query(
         if ds.type == "impala" and job_logs is not None:
             job_logs.append("【Impala 进度】SQL 执行完成，正在读取查询结果。")
         if ds.type == "mysql":
-            rows = cur.fetchall()  # DictCursor → list[dict]
+            rows = cur.fetchmany(limit + 1)  # DictCursor → list[dict]
             truncated = len(rows) > limit
             rows = rows[:limit]
             columns = list(rows[0].keys()) if rows else []

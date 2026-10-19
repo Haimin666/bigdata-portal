@@ -5,6 +5,7 @@ import config from '../config.js'
 import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
 import { dbEngine } from '../engine-map.js'
 import { checkDbAccess } from '../db-permissions.js'
+import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
 
 export function setupDbQuery(app) {
   app.post('/api/dbquery/query', async (req, res) => {
@@ -16,6 +17,9 @@ export function setupDbQuery(app) {
     if (!dbName) {
       // 空 db 直接清晰报错,避免转发后得到 db-proxy 隐晦的 "database '' not in ALLOWED_DBS"
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
+    }
+    if (req.dbQueryApiPrincipal && (!['mysql', 'oracle'].includes(dbEngine(dbName)) || !isDbQueryApiReadSql(sql))) {
+      return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 MySQL、Oracle 单条只读 SQL' })
     }
     // 数据权限矩阵 v2:按 引擎+库+读写+表 校验(优先于写解锁,权限优先于操作放行)
     try {

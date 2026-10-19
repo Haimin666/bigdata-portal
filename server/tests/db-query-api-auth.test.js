@@ -45,7 +45,7 @@ const options = {
   dbQueryApiToken: 'db-token',
 }
 
-test('database API token authenticates only on an explicitly allowed Impala route', () => {
+test('database API token authenticates only on explicitly allowed query routes', () => {
   const req = makeRequest('/api/db/jobs', 'POST')
   const result = run(createAuthGate(makeAuth(), options), req)
 
@@ -53,8 +53,12 @@ test('database API token authenticates only on an explicitly allowed Impala rout
   assert.deepEqual(req.dbQueryApiPrincipal, {
     id: 'db-query-api',
     role: 'db-query-api',
-    routeScope: 'impala'
+    routeScope: 'database-job-submit'
   })
+
+  const syncReq = makeRequest('/api/dbquery/query', 'POST')
+  assert.equal(run(createAuthGate(makeAuth(), options), syncReq).continued, true)
+  assert.equal(syncReq.dbQueryApiPrincipal.routeScope, 'relational-query')
 })
 
 test('database API token is rejected on routes outside the Impala/Spark query allowlist', () => {

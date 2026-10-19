@@ -80,18 +80,16 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 请求 → require_auth(X-DB-Token) → 路由 → get_datasource(db)
   → _prepare_query: strip 注释/结尾分号 → is_select 判定(SELECT/SHOW/DESC/EXPLAIN/WITH)
   → 护栏: maxSqlLen / maxQps / maxConcurrent / 行数上限(maxLimit 超限 400)
-  → SELECT/WITH 查询 → 追加行数限制 → 执行 → 行数截断 → 返回
+  → SELECT/WITH 服务端隐式追加行数限制;SHOW/DESC/EXPLAIN 保持原文 → 最多读取 limit+1 行 → 截断并返回
   → Impala:服务端 DESCRIBE/sqlglot 类型检查 → 查询;可修复错误调用可选 AI,执行日志随异步 job 状态返回
   → 写语句(INSERT/UPDATE/DELETE/DDL...) → 原样执行 → _write_audit 审计
 ```
 
-**行数限制追加规则(各引擎统一,仅查询类)**
-- 仅 `SELECT` / `WITH` 前缀追加:
-  - MySQL/Doris: `... LIMIT n`
-  - Oracle 12c+: `... FETCH FIRST n ROWS ONLY`
-  - Oracle 11g(`rowLimit:"rownum"`): `SELECT * FROM (sql) WHERE ROWNUM <= n`
-- `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 与写语句**不追加**(Doris 等对非 SELECT 不接受 LIMIT 后缀)
-- 用户 SQL 自带 `LIMIT n`/`FETCH FIRST`/`ROWNUM` 时沿用;超过 `maxLimit` 直接 400
+**无感行数限制(各引擎统一,仅查询类)**
+- 前端画布 SQL 保持不变;db-proxy 只在发送到数据库前对无显式行数限制的 `SELECT` / `WITH` 隐式添加引擎对应的上限。
+- MySQL/Doris/Impala 使用 `LIMIT n`,Oracle 12c+ 使用 `FETCH FIRST n ROWS ONLY`,Oracle 11g 使用 `ROWNUM` 包装;Spark SELECT/WITH 使用执行计划限行。
+- `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 不追加 SQL 后缀,使用 cursor/Spark 有界迭代读取结果,避免特殊命令被改写后语法错误。
+- 用户 SQL 自带行数限制时沿用;配置 `maxLimit` 仍限制用户指定的最大行数,超过直接 400。达到默认或用户上限时通过 `truncated` 标记告知前端。
 
 ## 保留的资源护栏(非权限)
 

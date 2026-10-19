@@ -9,18 +9,22 @@ import {
   createDbQueryApiJobRegistry
 } from '../utils/db-query-api-policy.js'
 import {
+  apiTokenAllowsDatabase,
   apiTokenAllowsImpalaDatabase,
   apiTokenRoleRule,
   checkDbRuleAccess,
   checkSparkRuleAccess
 } from '../db-permissions.js'
 
-test('route policy only grants Impala and Spark query/read surfaces', () => {
-  assert.equal(dbQueryApiRouteScope('POST', '/api/db/jobs'), 'impala')
+test('route policy grants relational SQL query and owned job surfaces only', () => {
+  assert.equal(dbQueryApiRouteScope('POST', '/api/db/jobs'), 'database-job-submit')
+  assert.equal(dbQueryApiRouteScope('GET', '/api/db/jobs/job-1'), 'database-job')
+  assert.equal(dbQueryApiRouteScope('POST', '/api/db/jobs/job-1/cancel'), 'database-job')
   assert.equal(dbQueryApiRouteScope('GET', '/api/db/schema'), 'impala')
   assert.equal(dbQueryApiRouteScope('POST', '/api/spark/query'), 'spark')
   assert.equal(dbQueryApiRouteScope('GET', '/api/spark/schema/databases'), 'spark')
-  assert.equal(dbQueryApiRouteScope('POST', '/api/dbquery/query'), null)
+  assert.equal(dbQueryApiRouteScope('POST', '/api/dbquery/query'), 'relational-query')
+  assert.equal(dbQueryApiRouteScope('POST', '/api/db/explain'), 'impala')
   assert.equal(dbQueryApiRouteScope('POST', '/api/flink/query'), null)
   assert.equal(dbQueryApiRouteScope('PUT', '/api/db/jobs'), null)
   assert.equal(dbQueryApiRouteScope('GET', '/api/db-perms'), null)
@@ -33,6 +37,8 @@ test('read-only token accepts read statements and fails closed on writes or sess
   assert.equal(isDbQueryApiReadSql('use sales'), false)
   assert.equal(isDbQueryApiReadSql('set spark.sql.shuffle.partitions=2'), false)
   assert.equal(isDbQueryApiReadSql('delete from sales.orders'), false)
+  assert.equal(isDbQueryApiReadSql('WITH t AS (SELECT 1) DELETE FROM sales.orders'), false)
+  assert.equal(isDbQueryApiReadSql('SELECT * FROM sales.orders FOR UPDATE'), false)
   assert.equal(isDbQueryApiReadSql('select 1; drop table sales.orders'), false)
 })
 
@@ -57,16 +63,20 @@ test('async job access is limited to registered engine jobs and expires', () => 
   assert.equal(registry.has('impala', 'impala-job-1'), false)
 })
 
-test('API principal Impala permissions come from the dedicated gateway role and fail closed without it', () => {
+test('API principal database permissions allow only configured read-only engines and fail closed', () => {
   const perms = { roleRules: [{ role: DB_QUERY_API_ROLE, engineRules: [
-    { engine: 'impala', db: 'impala_ro', read: true, write: false, tables: null }
+    { engine: 'impala', db: 'impala_ro', read: true, write: false, tables: null },
+    { engine: 'mysql', db: 'mysql_ro', read: true, write: false, tables: null },
+    { engine: 'oracle', db: 'oracle_ro', read: true, write: false, tables: null }
   ] }] }
   const rule = apiTokenRoleRule(perms)
   assert.ok(rule)
   assert.doesNotThrow(() => checkDbRuleAccess(rule, 'impala_ro', { engine: 'impala' }))
+  assert.doesNotThrow(() => checkDbRuleAccess(rule, 'mysql_ro', { engine: 'mysql' }))
+  assert.doesNotThrow(() => checkDbRuleAccess(rule, 'oracle_ro', { engine: 'oracle' }))
   assert.throws(() => checkDbRuleAccess(rule, 'other_db', { engine: 'impala' }), { statusCode: 403 })
-  assert.throws(() => checkDbRuleAccess(rule, 'impala_ro', { engine: 'mysql' }), { statusCode: 403 })
-  assert.throws(() => checkDbRuleAccess(rule, 'impala_ro', { engine: 'impala', write: true }), { statusCode: 403 })
+  assert.throws(() => checkDbRuleAccess(rule, 'mysql_ro', { engine: 'mysql', write: true }), { statusCode: 403 })
+  assert.throws(() => checkDbRuleAccess(rule, 'oracle_ro', { engine: 'doris' }), { statusCode: 403 })
   assert.throws(() => checkDbRuleAccess({ engineRules: [
     { engine: 'impala', db: 'impala_ro', read: true, write: false, tables: ['allowed_table'] }
   ] }, 'impala_ro', { engine: 'impala', requireWholeDatabase: true }), { statusCode: 403 })
@@ -76,6 +86,9 @@ test('API principal Impala permissions come from the dedicated gateway role and 
   assert.equal(apiTokenAllowsImpalaDatabase({ roleRules: [] }, 'impala_ro'), false)
   assert.equal(apiTokenAllowsImpalaDatabase(perms, 'impala_ro'), true)
   assert.equal(apiTokenAllowsImpalaDatabase(perms, 'other_db'), false)
+  assert.equal(apiTokenAllowsDatabase(perms, 'mysql', 'mysql_ro'), true)
+  assert.equal(apiTokenAllowsDatabase(perms, 'oracle', 'oracle_ro'), true)
+  assert.equal(apiTokenAllowsDatabase(perms, 'doris', 'mysql_ro'), false)
 })
 
 test('API principal can read Spark but write only to configured database', () => {

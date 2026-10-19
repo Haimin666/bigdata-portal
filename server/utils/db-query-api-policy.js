@@ -8,11 +8,13 @@ export const DB_QUERY_API_ROLE = 'db-query-api'
 export function dbQueryApiRouteScope(method, pathname) {
   const verb = String(method || '').toUpperCase()
   const path = String(pathname || '').toLowerCase().replace(/\/$/, '') || '/'
-  if (verb === 'GET' && path === '/api/db/acl') return 'impala'
+  if (verb === 'GET' && path === '/api/db/acl') return 'database-acl'
   if (verb === 'GET' && /^\/api\/db\/(tables|fields|ddl|schema)$/.test(path)) return 'impala'
-  if (verb === 'POST' && ['/api/db/jobs', '/api/db/explain'].includes(path)) return 'impala'
-  if (verb === 'GET' && /^\/api\/db\/jobs\/[a-z0-9_-]+$/.test(path)) return 'impala-job'
-  if (verb === 'POST' && /^\/api\/db\/jobs\/[a-z0-9_-]+\/cancel$/.test(path)) return 'impala-job'
+  if (verb === 'POST' && path === '/api/db/jobs') return 'database-job-submit'
+  if (verb === 'POST' && path === '/api/db/explain') return 'impala'
+  if (verb === 'GET' && /^\/api\/db\/jobs\/[a-z0-9_-]+$/.test(path)) return 'database-job'
+  if (verb === 'POST' && /^\/api\/db\/jobs\/[a-z0-9_-]+\/cancel$/.test(path)) return 'database-job'
+  if (verb === 'POST' && path === '/api/dbquery/query') return 'relational-query'
 
   if (verb === 'GET' && /^\/api\/spark\/schema\/(databases|tables|fields)$/.test(path)) return 'spark'
   if (verb === 'POST' && ['/api/spark/query', '/api/spark/jobs'].includes(path)) return 'spark'

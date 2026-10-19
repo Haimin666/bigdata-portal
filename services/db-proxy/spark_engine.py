@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import json
+import itertools
 import logging
 import os
 import re
@@ -41,6 +42,13 @@ import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional
+
+
+def collect_limited_rows(df, limit: int, pushdown: bool = True):
+    """Read at most limit+1 rows; avoid DataFrame.limit for Spark command results."""
+    if pushdown:
+        return df.limit(limit + 1).collect()
+    return list(itertools.islice(df.toLocalIterator(), limit + 1))
 
 log = logging.getLogger("db-proxy.spark")
 
@@ -514,6 +522,7 @@ class SparkEngine:
             limit = max_limit
         # 去掉末尾分号(Spark SQL 解析器不接受)
         code = clean.rstrip(";").strip()
+        pushdown_limit = bool(re.match(r"^\s*(?:SELECT|WITH)\b", code, re.IGNORECASE))
 
         start = time.time()
         self._audit("sql db=spark sql=%s" % code[:300])
@@ -527,8 +536,8 @@ class SparkEngine:
                 timer.start()
             try:
                 df = self._spark.sql(code)
-                # 强制行数上限:Spark 端 limit 惰性,collect 前再取 limit+1 判断截断
-                rows = df.limit(limit + 1).collect()
+                # SELECT/WITH 用 Spark 计划限行;SHOW/DESCRIBE 等命令结果按迭代读取上限,避免命令计划不支持 limit。
+                rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
                 self._raise_if_cancelled()
                 truncated = len(rows) > limit
                 rows = rows[:limit]
@@ -556,7 +565,7 @@ class SparkEngine:
                             refreshed = self._refresh_tables(code)
                             self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
                             df = self._spark.sql(code)
-                            rows = df.limit(limit + 1).collect()
+                            rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
                             self._raise_if_cancelled()
                             truncated = len(rows) > limit
                             rows = rows[:limit]

@@ -8,6 +8,7 @@ import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
 import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
+import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
@@ -1326,7 +1327,7 @@ function expandSqlVars(sql: string, values?: Map<string, string>): string {
 function getSegments(text: string): string[] {
   return splitSqlSegments(text)
     .map((s) => s.sql.trim())
-    .filter((s) => s && !/^\s*(--|\/\*)/.test(s))
+    .filter(hasExecutableSql)
 }
 
 /** 批量执行互斥:同一次「执行」点击为一个批次;批内多条按 FIFO 逐条串行。

@@ -50,7 +50,7 @@ Spark/Flink 常规权限继续使用各自规则；Spark 可选 `writeDbs: strin
 
 - 唯一 Token 密钥放在门户服务端 `config.local.json` 的 `dbQueryApiToken`；数据库名单不再重复配置。
 - API Token 映射到权限矩阵中的虚拟角色 `db-query-api`。该角色不对应登录账号，角色规则在用户管理 → 数据权限中单独展示和编辑；没有该角色规则时 API Token 的数据库访问默认拒绝，不受 `defaultDeny=false` 的无规则放行影响。
-- 通过 `engineRules` 配置 `{engine:"impala", db:"库名", read:true, write:false}` 控制 Impala；通过 Spark 规则 `{read:true, write:true, writeDbs:["目标库"]}` 控制 Spark 读和可写库。Token 本身仍被网关硬限制为 Impala/Spark 路由、Impala 只读、Spark SQL（不含 PySpark）及 `INSERT INTO` / `INSERT OVERWRITE`；Spark 写 SQL 必须全限定目标库并与请求 `db` 相同。
+- 通过 `engineRules` 配置 `{engine:"impala"|"mysql"|"oracle", db:"库名", read:true, write:false}` 控制 Impala/MySQL/Oracle 只读查询；通过 Spark 规则 `{read:true, write:true, writeDbs:["目标库"]}` 控制 Spark 读和可写库。Token 本身仍被网关硬限制为 Impala/MySQL/Oracle 单条只读 SQL与 Spark 路由、Spark SQL（不含 PySpark）及 `INSERT INTO` / `INSERT OVERWRITE`；Spark 写 SQL 必须全限定目标库并与请求 `db` 相同。异步任务状态/取消仅允许该 Token 访问自己提交的任务。
 - Impala 表级规则仍约束查询引用表；表目录/字段/DDL/整库 Schema 元数据接口要求库规则为整库读取（`tables: null`），以免受限表名或结构通过元数据接口泄露。
 - `dbQueryApiToken` 只认证身份，所有库权限均由上述权限矩阵决定；db-proxy 不参与门户用户/Token 授权。
 

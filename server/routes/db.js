@@ -7,7 +7,7 @@ import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
 import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
 import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { dbEngine, refreshEngineMap } from '../engine-map.js'
-import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsImpalaDatabase } from '../db-permissions.js'
+import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsDatabase } from '../db-permissions.js'
 
 export function setupDb(app, auth) {
   // ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
@@ -52,8 +52,7 @@ export function setupDb(app, auth) {
       if (req.dbQueryApiPrincipal) {
         const perms = loadPerms()
         data.datasources = datasources.filter((d) =>
-          d && String(d.type || '').toLowerCase() === 'impala' &&
-            apiTokenAllowsImpalaDatabase(perms, String(d.name || ''))
+          d && apiTokenAllowsDatabase(perms, String(d.type || '').toLowerCase(), String(d.name || ''))
         )
         data.allowedDbs = data.datasources.map((d) => String(d.name))
         return res.json({ code: 0, data })
@@ -157,13 +156,14 @@ export function setupDb(app, auth) {
     if (!dbName) {
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
     }
-    if (req.dbQueryApiPrincipal && (dbEngine(dbName) !== 'impala' || !isDbQueryApiReadSql(sql))) {
-      return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala 只读 SQL' })
+    const engine = dbEngine(dbName)
+    if (req.dbQueryApiPrincipal && (!['impala', 'mysql', 'oracle'].includes(engine) || !isDbQueryApiReadSql(sql))) {
+      return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala、MySQL、Oracle 单条只读 SQL' })
     }
     // 数据权限矩阵 v2:按 引擎+库+读写+表 校验
     try {
       checkDbAccess(req, dbName, {
-        engine: dbEngine(dbName),
+        engine,
         write: isSparkWriteSql(sql),
         tables: extractTables(sql)
       })
@@ -192,7 +192,7 @@ export function setupDb(app, auth) {
         throw err
       }
       if (req.dbQueryApiPrincipal && body.data?.jobId) {
-        dbQueryApiJobs.register('impala', body.data.jobId, dbName)
+        dbQueryApiJobs.register(engine, body.data.jobId, dbName)
       }
       res.json({ code: 0, data: body.data })
     } catch (e) {
@@ -267,8 +267,8 @@ export function setupDb(app, auth) {
     app.use('/api/db', (req, res, next) => {
       if (req.dbQueryApiPrincipal) {
         const jobMatch = req.path.match(/^\/jobs\/([a-z0-9_-]+)(?:\/cancel)?$/i)
-        if (jobMatch && !dbQueryApiJobs.has('impala', jobMatch[1])) {
-          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Impala 任务' })
+        if (jobMatch && !['impala', 'mysql', 'oracle'].some((engine) => dbQueryApiJobs.has(engine, jobMatch[1]))) {
+          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此数据库任务' })
         }
       }
       // 敏感路径不走透传:

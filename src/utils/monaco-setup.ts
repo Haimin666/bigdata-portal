@@ -5,6 +5,8 @@
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
 // editor.api 不包含补全 UI；加载控制器以注册弹窗、触发命令和 snippet 接受能力。
 import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController'
+// 注册 Monaco 内置查找框及 Ctrl/Cmd+F 快捷键。
+import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController'
 // 只带 SQL / Python 两种 Monarch 高亮(basic-languages 其余语言不打包,控制体积)
 import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution'
 import 'monaco-editor/esm/vs/basic-languages/python/python.contribution'

@@ -122,15 +122,21 @@ export function apiTokenRoleRule(perms) {
     .find((rule) => rule && String(rule.role) === DB_QUERY_API_ROLE) || null
 }
 
-export function apiTokenAllowsImpalaDatabase(perms, dbName) {
+export function apiTokenAllowsDatabase(perms, engine, dbName) {
+  const normalizedEngine = String(engine || '').toLowerCase()
+  if (!['impala', 'mysql', 'oracle'].includes(normalizedEngine)) return false
   const rule = apiTokenRoleRule(perms)
   if (!rule) return false
   const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
   const matched = engineRules.find((entry) =>
-    entry && (entry.engine === '*' || entry.engine === 'impala') &&
+    entry && (entry.engine === '*' || String(entry.engine || '').toLowerCase() === normalizedEngine) &&
       (entry.db === '*' || String(entry.db) === String(dbName))
   )
   return matched?.read === true
+}
+
+export function apiTokenAllowsImpalaDatabase(perms, dbName) {
+  return apiTokenAllowsDatabase(perms, 'impala', dbName)
 }
 
 export function checkDbRuleAccess(rule, dbName, opts = {}) {
@@ -190,7 +196,9 @@ export function checkDbAccess(req, dbName, opts = {}) {
   const { engine = '', write = false, tables = null } = opts
   if (typeof dbName !== 'string' || dbName.trim() === '') return
   if (req?.dbQueryApiPrincipal) {
-    if (engine !== 'impala' || write) deny('数据库查询 API Token 仅允许 Impala 只读访问')
+    if (!['impala', 'mysql', 'oracle'].includes(String(engine).toLowerCase()) || write) {
+      deny('数据库查询 API Token 仅允许 Impala、MySQL、Oracle 只读访问')
+    }
     const perms = loadPerms()
     checkBroken(perms)
     return checkDbRuleAccess(apiTokenRoleRule(perms), dbName, { ...opts, subject: '数据库查询 API Token' })

@@ -17,8 +17,8 @@
 | 层 | 文件 | 说明 |
 |---|---|---|
 | 视图 | `src/views/db/QueryView.vue` | 主工作台:PageHeader + 引擎/数据源下拉、Monaco 编辑器(SqlEditor 封装)、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史、日志面板;支持双击表目录表节点生成预览查询自动执行;结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;工具栏 **EXPLAIN** 打开执行计划树;编辑器 **schema 驱动补全**(Ctrl+Space);格式化走 **sql-formatter**(方言 mysql/oracle/spark,${var} 占位保护,失败降级自研) |
-| 视图 | `src/views/db/QueryResults.vue` | 查询结果面板(2026-09 从 QueryView 拆出):结果 tab 栏(日志 tab 内容经 slot 注入)+ 分页表格 + 单元格行内编辑(提交走 queryDb + emit rerun 重查)+ 复制(单元格/本页/整表 TSV)+ CSV 导出;props: results/activePane/db/loading |
-| 视图 | `src/views/db/SqlEditor.vue` | Monaco 编辑器封装(2026-08 替代 CodeMirror):**model 池**(每 tab 一个 ITextModel,独立撤销/光标)、补全 provider(关键字+**内置函数**+**SQL snippet**+schema 表/列点语法+文中词/字符串值行级增量索引——打字只重建光标行 O(行内容),Enter/粘贴/删除才整表重建;输入变更按 SQL 光标上下文显式触发自动提示(80ms 防抖),本地候选不等网络;**当前编辑 Tab 内 SQL 字符串字面量**按前缀补全,不扫描注释、不跨 Tab/历史)、**schema 预取** db 就绪即拉缓存)、快捷键(Cmd+Enter/S/Cmd+Shift+F/Cmd+/、Shift+Tab 反缩进)、主题 portal-dark/light 与字号联动 |
+| 视图 | `src/views/db/QueryResults.vue` | 查询结果面板(2026-09 从 QueryView 拆出):结果 tab 栏(日志 tab 内容经 slot 注入)+ 分页表格 + 单元格行内编辑(提交走 queryDb + emit rerun 重查)+ 复制(单元格/本页/整表 TSV)+ CSV 导出;结果 tab 右键菜单支持关闭当前、关闭左侧、关闭右侧、关闭其他;props: results/activePane/db/loading |
+| 视图 | `src/views/db/SqlEditor.vue` | Monaco 编辑器封装(2026-08 替代 CodeMirror):**model 池**(每 tab 一个 ITextModel,独立撤销/光标)、补全 provider(关键字+**内置函数**+**SQL snippet**+schema 表/列点语法+文中词/字符串值行级增量索引——打字只重建光标行 O(行内容),Enter/粘贴/删除才整表重建;输入变更按 SQL 光标上下文显式触发自动提示(80ms 防抖),本地候选不等网络;**当前编辑 Tab 内 SQL 字符串字面量**按前缀补全,不扫描注释、不跨 Tab/历史)、**schema 预取** db 就绪即拉缓存)、快捷键(Cmd+Enter/S/Cmd+Shift+F/Cmd+/、Ctrl+Tab 缩进、Shift+Tab 反缩进)、主题 portal-dark/light 与字号联动 |
 | 工具 | `src/utils/monaco-setup.ts` | Monaco 环境:worker 注册(Vite `?worker` 内联 EditorWorker)、主题 definePortalThemes(portal-dark/light)、model URI 约定(`portal-sql://editor/<modelId>`,供补全 provider 归属判定) |
 | 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(**引擎 → 库 → 表 → 字段**:mysql/oracle/impala 数据源分组展示 + Spark 组(经新 `/spark/schema/*` 元数据,SHOW/DESC 只读+db-proxy 侧 5 分钟 TTL 缓存,Spark 可用性由 spark/status 探测),含表/字段注释,双击表预览,复制表名(Spark 带 db. 前缀)/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
@@ -44,6 +44,8 @@
 
 - **Monaco 补全组件加载**:`editor.api` 仅提供基础编辑器 API；`monaco-setup.ts` 必须显式加载 `contrib/suggest/browser/suggestController`，注册补全弹窗、触发命令与 snippet 接受能力，否则 provider 有候选也无法显示提示。验证需覆盖浏览器实际打字自动弹出和 Tab 接受，不能仅依赖类型检查/构建。
 - **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
+- **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
+- **无感行数上限**:前端画布 SQL 不变；db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
@@ -51,14 +53,14 @@
 - 窄屏(≤640px)下隐藏底部状态栏快捷键长提示,保留引擎/库/主题状态,避免提示折行挤占编辑器视口。
 - 标题策略:数据库查询页不重复展示“数据库查询”标题,侧栏与 Tab 负责导航标识,工作台状态由引擎/库/结果状态栏承载。
 
-- **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink` 取消当前引擎 job
+- **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink` 取消当前引擎 job。按分号拆段时忽略纯注释段，但保留前置行注释/块注释后的可执行 SQL 段。
 - **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab。MySQL/Oracle 异步 job 的状态只保存在 db-proxy 进程内存,完成/失败状态保留 1 小时;页面轮询遇到临时网络错误应重试,但浏览器刷新会丢失 jobId,db-proxy 重启会丢失任务状态。
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);切换/更新结果项时页码重置为第 1 页，避免沿用旧结果页码造成有数据却显示空白;点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化**:el-table `@header-dragend` 按 库.表(或 SQL 前 40 字符)签名写入 localStorage,刷新保留。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
 - **Spark 日志透传**:执行时 3s 轮询 `/api/spark/logs` 增量展示 driver 日志,结束即停;自动滚动到底部跟随最新 200 条(双 rAF 等 DOM 就绪再滚,用户上翻阅读旧日志时暂停跟随,回到底部附近自动恢复)
 - **解锁体系(已移除)**:写权限密码验证(`/api/spark/auth` + `X-Spark-Token`)已移除 —— 写 SQL 直接执行,权限由「数据权限矩阵」管控,数据源 `readOnly` 兑底;spark/flink 网关不再校验解锁 token(db-proxy 侧 `writeToken` 密钥与资源护栏保留)
-- **编辑器(Monaco)**:`SqlEditor.vue` 封装 —— 构造函数一次、model 池按 tab 切换(`editor.setModel`),撤销历史/光标按 tab 独立;主题 `portal-dark/portal-light`(defineTheme,仅画布,不污染全局)与字号由 props 驱动;Tab 缩进交给 Monaco 原生(浮层选词/多行缩进自动),Shift+Tab 反缩进、Cmd+/ 注释(逐行 `-- ` 切换)组件内实现。**SQL 专属折叠**:注册 folding provider,按跨行括号(CTE/子查询/INSERT SELECT)与块注释折叠(状态机跳过注释/字符串内的括号)。**超长行降级**:检测单行 >500 字符 → 自动 wordWrap off 防折行计算卡,恢复后回 on。**行内校验**:同样的词法扫描产出 markers —— 未闭合引号/括号 → 波浪线 + hover 提示(300ms 防抖;跳过 -- # /* */ 注释与字符串)。**卡死根治(2026-08)**:CM5 的"每键全文档扫描 + 上千候选一次性渲染 DOM"不复存在 —— 补全为异步 provider + **文中词行级增量索引**(每键只重建光标 1 行;Enter/粘贴/删除等行数变化低频场景才整表重建)+ 候选上限截断 + Monaco 虚拟滚动渲染;`${var}` 参数行同步在 change 事件中与快照**共用一次 getValue**(不再每键两次全量)
+- **编辑器(Monaco)**:`SqlEditor.vue` 封装 —— 构造函数一次、model 池按 tab 切换(`editor.setModel`),撤销历史/光标按 tab 独立;主题 `portal-dark/portal-light`(defineTheme,仅画布,不污染全局)与字号由 props 驱动;Tab 缩进交给 Monaco 原生(浮层选词/多行缩进自动),Shift+Tab 反缩进、Cmd+/ 注释(逐行 `-- ` 切换)组件内实现。选中同一行的 1–64 字符时，在当前 SQL 文档中高亮最多 500 个完全相同的其他匹配项(大小写敏感，不限定 ASCII 标识符)。**SQL 专属折叠**:注册 folding provider,按跨行括号(CTE/子查询/INSERT SELECT)与块注释折叠(状态机跳过注释/字符串内的括号)。**超长行降级**:检测单行 >500 字符 → 自动 wordWrap off 防折行计算卡,恢复后回 on。**行内校验**:同样的词法扫描产出 markers —— 未闭合引号/括号 → 波浪线 + hover 提示(300ms 防抖;跳过 -- # /* */ 注释与字符串)。**卡死根治(2026-08)**:CM5 的"每键全文档扫描 + 上千候选一次性渲染 DOM"不复存在 —— 补全为异步 provider + **文中词行级增量索引**(每键只重建光标 1 行;Enter/粘贴/删除等行数变化低频场景才整表重建)+ 候选上限截断 + Monaco 虚拟滚动渲染;`${var}` 参数行同步在 change 事件中与快照**共用一次 getValue**(不再每键两次全量)
 - **脚本树**:`data/scripts` 本地存储,文件 = 脚本(不入库);**按用户分桶**(2026-08)——`tree.json` 按用户名分桶(`users.<username>.my` 私有桶 + `users.__shared__` 公共桶);前端固定双根:「我的文件夹」(私有,仅本人可见可写)+「共享文件夹」(**所有人可读可写**,全员协作,右键含完整菜单 + 「复制到我的文件夹」,可拖入拖出);旧版顶层 `{my:[]}` 格式首次加载自动迁移进公共桶
 - **元数据深度**:表目录懒加载已切 detail 模式 —— 表节点显示表注释(悬停完整),字段节点显示类型+注释,双击表节点一键预览(`SELECT * ... LIMIT 100`,Oracle 用 `FETCH FIRST 100 ROWS ONLY` 与双引号标识符),表节点按钮支持复制表名 / 复制建表语句(`/ddl`)
 - **复制建表语句**:`/ddl?db=&table=` —— MySQL 走 `SHOW CREATE TABLE`,Oracle 走 `DBMS_METADATA.GET_DDL`,需账号有对应元数据读取权限,失败友好报错
@@ -69,7 +71,7 @@
 - **EXPLAIN 可视化**:工具栏「EXPLAIN」取选中 SQL → `/explain` —— MySQL 走 `EXPLAIN FORMAT=JSON` 解析成树(降级普通 EXPLAIN 表格),Oracle 走 `EXPLAIN PLAN FOR` + `DBMS_XPLAN` 表格按 ID/PARENT_ID 递归成树;结果在弹窗中用 el-tree 展示(访问类型/行数/代价/过滤条件)
 - **SQL 传参(内联参数行)**:自动识别画布 SQL 中全部 `${var}`(字母/下划线开头,有序去重),在分割条下方「SQL 参数」行内联填值(el-input,无变量时不占位;编辑器内容/tab 切换实时同步,同名变量会话内记忆上次取值自动预填);**只替换本次执行段内已填值的变量,未填值的保持 `${var}` 原样交由引擎报错,不阻断其他 SQL 执行**(2026-08 修复:此前按画布全集校验导致缺参卡住所有查询)。原 `${T}/${T-N}` 内置日期变量、`${T-1} 传参` 下拉与 ElMessageBox 弹窗传参已移除;快捷键提示行移至底部状态栏主题项旁
 - **历史与收藏**:QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history:<用户名>`(**按用户隔离**,同一浏览器多账号互不可见;认证关闭落到 `default`;**上限 20 条循环缓存**:新在前、同 sql 去重、超出删最旧);侧栏「历史」tab 星标收藏写入 `db-query-favorites:<用户名>`(上限 50);**点击历史/收藏条目只回填编辑器不自动执行**(历史是缓存,用户按 Cmd+Enter 自行运行);**结果快照随历史缓存**(2026-08)——执行成功时把该 SQL 的列+前 100 行快照写入条目(序列化 >200KB 不缓存),点击带快照的条目除回填编辑器外直接开一个「缓存」标记的结果 tab 免重查展示,历史/收藏列表以「结果」小徽标标识
-- **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档(Monaco model 池,2026-08)**:每个 tab 一个 ITextModel(SqlEditor 内部 `modelId→model` 池,`editor.setModel` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;切 tab 不触发 change 事件,参数行由 showTabInEditor 重建,内容快照由 change 事件回调写回(`t.content = editor.getValue()`),自动保存只读活跃 tab 实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
+- **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd/Ctrl+F 画布内查找、Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档(Monaco model 池,2026-08)**:每个 tab 一个 ITextModel(SqlEditor 内部 `modelId→ITextModel` 池,`editor.setModel` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;切 tab 不触发 change 事件,参数行由 showTabInEditor 重建,内容快照由 change 事件回调写回(`t.content = editor.getValue()`),自动保存只读活跃 tab 实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
 - **Spark Stage 进度**:spark 查询执行中,日志面板顶部按 3s 节奏轮询 `/spark/stages`(后端 `sparkContext.statusTracker()` 聚合活跃 job/stage:任务数/已完成/失败/状态),每条 stage 一个 el-progress 进度条,RUNNING 蓝 / SUCCEEDED 绿 / FAILED 红;local 模式或 statusTracker 不可用时自动降级为空
 - **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。Impala 表名列表和表字段结构缓存到 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用;类型检查、`/tables`、`/fields`、`/schema` 共用缓存,缓存缺表/缺结构时按需 DESCRIBE 并持久化。查询返回字段/表引用无法识别错误时强制刷新 SQL 涉及表的结构,更新持久化缓存后再进入 AI 修复流程。缓存按数据源连接指纹与库隔离,不包含密码;数据源结构变化后通过下一次相关错误触发刷新。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数,密钥不下发浏览器。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
 
@@ -83,13 +85,14 @@
 ## 6. 外部 API Token（网关侧）
 
 - 与数据同步 `syncApiToken` 分离，调用方通过 `X-API-Token` 访问门户网关；不向浏览器配置接口回显，不转发给 db-proxy；未配置时保持 Cookie 登录方式。
-- token 专用主体仅允许 Impala 与 Spark 路由，库权限由 `db-permissions` 矩阵的 `db-query-api` 虚拟角色授权。Impala 所有 SQL 限制为只读；MySQL、Oracle、Doris、Flink、脚本管理及权限管理接口拒绝 token。
+- token 专用主体允许 Impala、MySQL、Oracle 与 Spark 查询路由，库权限由 `db-permissions` 矩阵的 `db-query-api` 虚拟角色授权。Impala/MySQL/Oracle 限制为单条只读 SQL；Doris、Flink、脚本管理及权限管理接口拒绝 token。
+- 外部调用先用 `GET /api/db/acl` 获取已授权数据源；再用 `POST /api/dbquery/query` 同步查询 MySQL/Oracle，或 `POST /api/db/jobs` 异步查询 Impala/MySQL/Oracle。异步任务通过 `GET /api/db/jobs/:id` 轮询、`POST /api/db/jobs/:id/cancel` 取消；所有请求带 `X-API-Token`，提交体使用 `{ "db": "数据源名", "sql": "只读 SQL" }`。
 - Impala 查询可按角色规则限制到表；表目录/字段/DDL/整库 Schema 元数据接口仅在该库配置整库读取时开放，避免表级规则下泄露其他表名和结构。
 - Spark token 仅允许 Spark SQL（禁止 PySpark）；读取按只读语句白名单执行。虚拟角色中的 Spark `writeDbs` 配置写库名单，仅允许 `INSERT INTO` / `INSERT OVERWRITE` 写入名单内库；写请求须提供 `db`，且 SQL 中目标库必须显式限定并与 `db` 一致。`CREATE`、`DROP`、`ALTER`、`USE`、多语句等拒绝。
-- API 主体不映射为 admin/dev/viewer 用户，使用权限矩阵中的虚拟角色 `db-query-api` 控制库权限；未配置该角色规则时数据库访问默认拒绝。网关仍硬限制路由和 SQL 能力；权限失败 fail-closed。异步状态/取消只允许访问由该 API 主体提交并登记的 Impala/Spark job。
+- API 主体不映射为 admin/dev/viewer 用户，使用权限矩阵中的虚拟角色 `db-query-api` 控制库权限；未配置该角色规则时数据库访问默认拒绝。网关仍硬限制路由和 SQL 能力；权限失败 fail-closed。异步查询通过 `POST /api/db/jobs` 提交，状态/取消只允许访问由该 API 主体提交并登记的 Impala/MySQL/Oracle/Spark job；MySQL/Oracle 同步查询仍可用 `POST /api/dbquery/query`。
 - Token 设置仅影响门户服务端 `config.local.json` / 环境变量；请求头仅使用 HTTPS。服务端日志不得记录 token 原文。
 
-配置项仅保留服务端密钥 `dbQueryApiToken`；Impala/Spark 库读写权限统一在用户管理 → 数据权限中的 `db-query-api` 虚拟角色配置，Spark 写库范围使用 `writeDbs`。
+配置项仅保留服务端密钥 `dbQueryApiToken`；Impala/MySQL/Oracle 的库读权限通过用户管理 → 数据权限中的 `db-query-api` 虚拟角色 `engineRules` 配置，Spark 读写权限同样在该角色下配置，Spark 写库范围使用 `writeDbs`。
 
 ## 7. 已知限制
 

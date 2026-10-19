@@ -6,7 +6,7 @@
  *  - 补全:关键字 + schema 表/列(点语法) + 文中词;provider 按需节流,候选上限截断,
  *    Monaco 虚拟滚动渲染 —— 根治 CM5 时代"每键全扫 + 上千候选一次性渲染 DOM"的卡死
  *  - 快捷键:Cmd/Ctrl+Enter 执行、Cmd+S 保存、Cmd+Shift+F 格式化、Cmd+/ 注释、
- *    Shift+Tab 反缩进(Tab 由 Monaco 原生:补全浮层选词/多行缩进,无需干预)
+ *    Ctrl+Tab 缩进、Shift+Tab 反缩进
  *  - 主题/字号/语言联动
  * 对外(defineExpose)提供与旧 CodeMirror 兼容的 API 面,QueryView 其余逻辑零改动。
  */
@@ -617,26 +617,30 @@ function attachModel(id: string): void {
 }
 
 // ── 行编辑 ──────────────────────────────────────────────────
-/** 选中词全画布高亮:选中 2~64 字符的标识符时,整词匹配(大小写不敏感,与旧 CM 一致),
- *  最多装饰 500 处(旧 CM 无上限,长脚本+短词必卡死 —— 此为根治项)。
- *  仅高亮"其他位置的同词",选中区本身由 Monaco 原生 selection 高亮。 */
+/** 选中文本全画布高亮:当前行内选中 1~64 个非空白字符时,按字面值精确匹配,
+ *  最多装饰 500 处;排除当前选区,由 Monaco 原生 selection 高亮。 */
 let selHighlightIds: string[] = []
 function syncSelectionHighlight(): void {
   const e = editor
   const m = modelOf()
   if (!e || !m) return
-  if (m.getLineCount() > 20000) return // 超大文档关闭实时高亮,防每键全扫卡顿
   const sel = e.getSelection()
-  const word = sel && !sel.isEmpty() ? m.getValueInRange(sel).trim() : ''
-  if (!/^[A-Za-z0-9_$]{2,64}$/.test(word)) {
+  const selectedText = sel && !sel.isEmpty() ? m.getValueInRange(sel) : ''
+  if (m.getLineCount() > 20000 || selectedText.includes('\n') || selectedText.length < 1 || selectedText.length > 64 || /^\s+$/.test(selectedText)) {
     if (selHighlightIds.length) selHighlightIds = e.deltaDecorations(selHighlightIds, [])
     return
   }
-  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const matches = m.findMatches(`\\b${esc}\\b`, true, false, false, null, true, 500)
+  const esc = selectedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matches = m.findMatches(esc, false, true, true, null, false, 501)
+  const otherMatches = matches.filter((match) =>
+    match.range.endLineNumber < sel!.startLineNumber ||
+    match.range.startLineNumber > sel!.endLineNumber ||
+    (match.range.endLineNumber === sel!.startLineNumber && match.range.endColumn <= sel!.startColumn) ||
+    (match.range.startLineNumber === sel!.endLineNumber && match.range.startColumn >= sel!.endColumn)
+  ).slice(0, 500)
   selHighlightIds = e.deltaDecorations(
     selHighlightIds,
-    matches.map((x) => ({ range: x.range, options: { className: 'portal-selection-match' } }))
+    otherMatches.map((x) => ({ range: x.range, options: { className: 'portal-selection-match' } }))
   )
 }
 
@@ -880,10 +884,23 @@ onMounted(() => {
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => emit('format'))
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => commentSelection(editor!))
 
-  // Shift+Tab:补全浮层可见时放行(反向选词),否则多行反缩进。Tab 完全交给 Monaco 原生
-  // (浮层选词 / 多行缩进 / 插入空格),不拦截。
+  // Ctrl+Tab 显式缩进；Shift+Tab 反缩进。普通 Tab 保留 Monaco 补全选词/默认缩进行为。
   editor.onKeyDown((e) => {
-    if (e.keyCode !== monaco.KeyCode.Tab || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
+    if (e.keyCode === monaco.KeyCode.KeyF && (e.ctrlKey || e.metaKey) && !e.altKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      editor!.getAction('actions.find')?.run()
+      return
+    }
+    if (e.keyCode !== monaco.KeyCode.Tab || e.altKey || e.metaKey) return
+    if (e.ctrlKey && !e.shiftKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      editor!.getAction('editor.action.hideSuggestWidget')?.run()
+      indentLines(editor!)
+      return
+    }
+    if (!e.shiftKey || e.ctrlKey) return
     const ctrl = (editor as unknown as {
       _contributions?: Record<string, { widget?: { isVisible?: () => boolean } }>
     })._contributions?.['editor.contrib.suggestController']?.widget
@@ -895,6 +912,24 @@ onMounted(() => {
 
   emit('ready')
 })
+
+function indentLines(target: monaco.editor.IStandaloneCodeEditor): void {
+  const selection = target.getSelection()
+  if (!selection) return
+  if (!selection.isEmpty() || selection.startLineNumber !== selection.endLineNumber) {
+    const model = target.getModel()
+    if (!model) return
+    const indent = ' '.repeat(model.getOptions().tabSize)
+    const edits = []
+    for (let line = selection.startLineNumber; line <= selection.endLineNumber; line++) {
+      edits.push({ range: new monaco.Range(line, 1, line, 1), text: indent, forceMoveMarkers: true })
+    }
+    target.executeEdits('sql-indent-lines', edits)
+    return
+  }
+  const tabSize = target.getModel()?.getOptions().tabSize ?? 2
+  target.executeEdits('sql-indent', [{ range: selection, text: ' '.repeat(tabSize), forceMoveMarkers: true }])
+}
 
 onBeforeUnmount(() => {
   modelChangeDisposable?.dispose()
