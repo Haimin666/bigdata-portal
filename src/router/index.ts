@@ -64,6 +64,11 @@ const router = createRouter({
           name: 'sync',
           component: () => import('@/views/sync/SyncCodeView.vue')
         },
+        {
+          path: 'credit-dictionary',
+          name: 'creditDictionary',
+          component: () => import('@/views/credit-dictionary/CreditDictionaryView.vue')
+        },
         ...subappRoutes
       ]
     },

@@ -12,6 +12,9 @@ import DataLeapView from '@/views/dataleap/DataLeapView.vue'
 // SQL 画布含 Monaco(~1.5MB gzip),必须异步:避免拖慢首屏(全量打包进主 chunk 曾致 index 4.9MB)
 const DbQueryView = defineAsyncComponent(() => import('@/views/db/QueryView.vue'))
 const SyncCodeView = defineAsyncComponent(() => import('@/views/sync/SyncCodeView.vue'))
+const CreditDictionaryView = defineAsyncComponent(
+  () => import('@/views/credit-dictionary/CreditDictionaryView.vue')
+)
 
 defineOptions({ name: 'TabStage' })
 
@@ -38,7 +41,8 @@ const nativeComponents: Record<string, Component> = {
   dbQuery: DbQueryView,
   userManage: UserManageView,
   dataleap: DataLeapView,
-  sync: SyncCodeView
+  sync: SyncCodeView,
+  creditDictionary: CreditDictionaryView
 }
 
 const activePath = computed(() => route.path)

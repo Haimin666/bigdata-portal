@@ -132,5 +132,12 @@ export const menus: MenuItem[] = [
     name: 'sync',
     icon: 'Refresh',
     kind: 'native'
+  },
+  {
+    path: '/credit-dictionary',
+    title: '征信数据字典',
+    name: 'creditDictionary',
+    icon: 'DataLine',
+    kind: 'native'
   }
 ]

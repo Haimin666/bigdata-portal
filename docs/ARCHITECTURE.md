@@ -38,12 +38,14 @@ src/
 │       ├── TabStage.vue    # 多 tab 常驻池(v-show 保状态,关闭才销毁)
 │       └── SubAppView.vue  # 子应用 iframe 池
 ├── views/              # 业务视图(见模块文档)
+│   ├── credit-dictionary/ # 征信接口模型与代码字典(静态只读)
 ├── store/              # Pinia:auth.ts(会话/角色)、yarn.ts(应用列表/RM 选择)
 ├── api/                # 后端封装:auth/db/ds/dsDeps/hdfs/yarn
 ├── utils/theme.ts      # 深浅主题 + 管理端主题覆盖注入
 ├── styles/             # variables.scss(双主题 CSS 变量)/ index.scss(全局)
 ├── components/         # 通用:PageHeader/TableToolbar/StateView/StatusBadge 等
 ├── config/menu.ts      # 静态菜单表(驱动侧栏 + subapp 路由 + 角色过滤)
+├── data/credit-dictionary.json # 征信工作簿导出的静态数据快照
 └── types/              # TS 类型
 ```
 
@@ -59,7 +61,7 @@ src/
 - **危险操作反馈**:工作流实例、任务节点、YARN 应用和同步生成等异步操作必须在目标按钮上显示 loading,成功后刷新或展示结果,失败保留可重试入口;不得用全局遮罩阻塞无关页面操作
 - **桌面端视觉层**:桌面壳采用低饱和蓝灰中性色、系统无衬线字体和语义主题变量;侧栏/标签页统一使用轻量层级和明确 hover/active/focus 状态,不改变业务页面的宽表格、SQL 画布和内容区尺寸。侧栏折叠入口固定在顶部壳层左侧,使用 `Fold/Expand` 图标切换 220px/64px 宽度;深浅主题入口固定在顶部操作区,切换状态持久化到 `localStorage` 并同步 `html.dark`
 - **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
-- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)
+- **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)。征信数据字典 `creditDictionary` 为原生只读模块，静态加载 `src/data/credit-dictionary.json`，不访问网关 API
 - **字体**:全局系统无衬线字体栈 `--bd-font`;SQL/日志等数据组件按需使用等宽字体,管理端可覆盖
 
 ## 3. 网关架构(server/)

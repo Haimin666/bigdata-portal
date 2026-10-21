@@ -28,6 +28,8 @@ services/db-proxy/flink-logs/
 # playwright-cli 会话产物(快照/截图)
 .playwright-cli/
 data/
+!src/data/
+!src/data/credit-dictionary.json
 *.png
 # 原型演示目录(不入库)
 demo-proto/

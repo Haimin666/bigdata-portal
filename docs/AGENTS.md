@@ -51,6 +51,7 @@ bigdata-portal/
 │   ├── views/
 │   │   ├── yarn/                # YARN 原生视图
 │   │   ├── hdfs/HdfsView.vue    # HDFS 文件浏览器(WebHDFS)
+│   │   ├── credit-dictionary/   # 征信接口模型与代码字典(离线静态数据)
 │   │   └── subapp/              # Tab 常驻池相关(原生视图 + 子应用共用)
 │   │       ├── SubAppView.vue   # iframe 内容组件(原生 iframe 直挂,常驻不卸载;自动登录已移除)
 │   │       └── SubappTabs.vue   # 顶部 Tab 条(切换/关闭,关闭即销毁组件/iframe)
@@ -112,6 +113,7 @@ npm run dev:vite     # 前端
 |---|---|---|---|
 | YARN | native | /yarn | 原生视图 |
 | HDFS | native | /hdfs | 自建 WebHDFS 文件浏览器 |
+| 征信数据字典 | native | /credit-dictionary | 征信接口模型/字段/代码字典静态查询，模块名 `creditDictionary` |
 | 海豚 ds | iframe 同源 | /apps/dsweb/ui/#/home | 网关代理,用户在页面内登录 |
 | Stingray query | iframe 同源 | /apps/stingray/login | 网关代理 + 路由注入 + ws,用户在页面内登录 |
 | OMD | iframe 跨源 | https://omd.corp.shiqiao.com/ | 直接嵌入,用户域内登录 |
