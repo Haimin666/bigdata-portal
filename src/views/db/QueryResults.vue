@@ -409,6 +409,10 @@ async function showJson(v: unknown) {
       <!-- 结果内容 -->
       <template v-else-if="currentResult">
         <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
+        <div v-else-if="currentResult.running && !currentResult.columns.length && !currentResult.rows.length" class="result-card result-pending">
+          <el-icon class="tab-spin"><Loading /></el-icon>
+          <span>查询执行中…</span>
+        </div>
         <div v-else-if="currentResult.hdfsPath" class="result-card hdfs-path-card">
           <span class="hdfs-path">{{ currentResult.hdfsPath }}</span>
           <el-button size="small" text type="primary" @click="copyHdfsPath">复制路径</el-button>
@@ -711,6 +715,13 @@ async function showJson(v: unknown) {
   justify-content: space-between;
   gap: 12px;
   padding: 0 16px;
+}
+.result-pending {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--bd-muted, #8a94a6);
 }
 .hdfs-path {
   min-width: 0;

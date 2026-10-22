@@ -1793,7 +1793,7 @@ async function onSparkExecutorsChange(val: number) {
       <span class="sb-item"><span class="sb-label">引擎</span>{{ engineLabel }}</span>
       <span class="sb-item"><span class="sb-label">库</span>{{ db || '—' }}</span>
       <template v-if="currentResult && !currentResult.error && !currentResult.jobId && !currentResult.hdfsPath">
-        <span class="sb-item sb-stats">
+        <span v-if="!(currentResult.running && !currentResult.columns.length && !currentResult.rows.length)" class="sb-item sb-stats">
           {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · {{ currentResult.costMs }}ms
           <span v-if="currentResult.truncated" class="sb-trunc">· 已截断</span>
         </span>
