@@ -17,6 +17,7 @@ export interface DbQueryResult {
   rows: Record<string, unknown>[]
   costMs: number
   truncated: boolean
+  hdfsPath?: string
 }
 
 /** 门户模块显隐配置(服务端 config.local.json 的 enabledModules) */

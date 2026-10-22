@@ -130,6 +130,7 @@ src/
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
 - **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
+- **Spark 大结果导出**:Spark SQL 查询及 PySpark 返回的 DataFrame 先检查结果行数;超过 500,000 行时由 db-proxy 将 CSV 分片目录写入 HDFS `/tmp/db-query-exports/<日期>/<UUID>/`,异步查询结果返回 `hdfsPath`,门户结果区只显示该路径。
 - **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
@@ -143,7 +144,8 @@ QueryView.vue
             ├─ 写检测(isSparkWriteSql + 数据权限矩阵)
             └─ spark-gateway / flink-gateway
                  └─ db-proxy /query | /spark/query | /flink/query
-                      └─ 引擎执行(常驻 session / flink 网关)→ {columns, rows, costMs, truncated}
+                      └─ 引擎执行→ {columns, rows, costMs, truncated[, hdfsPath]}
+                           └─ Spark 超 500,000 行:写 HDFS CSV,仅返回 hdfsPath
 ```
 
 ## 6. 配置体系

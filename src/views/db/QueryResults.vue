@@ -26,6 +26,7 @@ export interface QueryResultItem {
   rows: Record<string, unknown>[]
   costMs: number
   truncated: boolean
+  hdfsPath?: string
   error?: string
   jobId?: string
   mode?: string
@@ -266,6 +267,14 @@ function copyCell(val: unknown) {
     else ElMessage.warning('复制失败,请手动选择复制')
   })
 }
+function copyHdfsPath() {
+  const path = currentResult.value?.hdfsPath
+  if (!path) return
+  void copyText(path).then((ok) => {
+    if (ok) ElMessage.success('路径已复制')
+    else ElMessage.warning('复制失败,请手动选择路径')
+  })
+}
 /** 列宽签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格签名持久化,对齐原实现) */
 function colSig(): string {
   const r = currentResult.value
@@ -400,6 +409,10 @@ async function showJson(v: unknown) {
       <!-- 结果内容 -->
       <template v-else-if="currentResult">
         <el-alert v-if="currentResult.error" type="error" :title="currentResult.error" show-icon :closable="false" class="err-alert" />
+        <div v-else-if="currentResult.hdfsPath" class="result-card hdfs-path-card">
+          <span class="hdfs-path">{{ currentResult.hdfsPath }}</span>
+          <el-button size="small" text type="primary" @click="copyHdfsPath">复制路径</el-button>
+        </div>
         <div v-else class="result-card">
           <div v-loading="loading" class="result-table-wrap">
             <el-table :data="pagedRows" border stripe size="small" class="result-table" empty-text="无数据" :row-class-name="() => cellCopyDisabled ? 'row-selectable' : ''" @header-dragend="onColResize">
@@ -689,6 +702,22 @@ async function showJson(v: unknown) {
   background: var(--bd-panel, #fff);
   /* 结果表格占满,但给底部信息条让出空间 */
   padding-bottom: 0;
+}
+.hdfs-path-card {
+  flex: 0 0 auto;
+  min-height: 52px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+}
+.hdfs-path {
+  min-width: 0;
+  color: var(--bd-text, #303133);
+  font-family: var(--el-font-family);
+  user-select: text;
+  overflow-wrap: anywhere;
 }
 .result-table-wrap {
   flex: 1;

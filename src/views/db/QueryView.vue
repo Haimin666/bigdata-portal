@@ -35,7 +35,7 @@ const currentSparkJobId = ref('')
  *  动机:公司网关固定 60s 读超时,同步长请求(大查询可能跑数十分钟/小时)
  *  必被掐断 504;异步化后提交/查状态都是秒级往返,永不撞超时。
  *  SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行。 */
-async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
+async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }> {
   const { jobId } = await submitSparkJob(sql, undefined, kind, 7200000)
   currentSparkJobId.value = jobId
   const deadline = Date.now() + 7200000 // 上限 2 小时
@@ -51,7 +51,7 @@ async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<
     const j = await getSparkJob(jobId)
     if (j.state === 'done') {
       currentSparkJobId.value = ''
-      return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }
+      return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }
     }
     if (j.state === 'failed') {
       currentSparkJobId.value = ''
@@ -1792,7 +1792,7 @@ async function onSparkExecutorsChange(val: number) {
     <div class="statusbar">
       <span class="sb-item"><span class="sb-label">引擎</span>{{ engineLabel }}</span>
       <span class="sb-item"><span class="sb-label">库</span>{{ db || '—' }}</span>
-      <template v-if="currentResult && !currentResult.error && !currentResult.jobId">
+      <template v-if="currentResult && !currentResult.error && !currentResult.jobId && !currentResult.hdfsPath">
         <span class="sb-item sb-stats">
           {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · {{ currentResult.costMs }}ms
           <span v-if="currentResult.truncated" class="sb-trunc">· 已截断</span>

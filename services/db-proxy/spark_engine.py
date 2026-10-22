@@ -41,6 +41,7 @@ import re
 import threading
 import time
 import traceback
+import uuid
 from typing import Any, Dict, List, Optional
 
 
@@ -526,6 +527,41 @@ class SparkEngine:
 
         start = time.time()
         self._audit("sql db=spark sql=%s" % code[:300])
+        exporting = False
+
+        def read_result(df) -> Dict[str, Any]:
+            nonlocal exporting
+            row_count = df.count()
+            self._raise_if_cancelled()
+            if row_count > 500000:
+                hdfs_path = "hdfs:///tmp/db-query-exports/%s/%s/" % (
+                    time.strftime("%Y-%m-%d"), uuid.uuid4().hex,
+                )
+                exporting = True
+                df.write.mode("errorifexists").option("header", True).csv(hdfs_path)
+                self._raise_if_cancelled()
+                self._audit("sql exported rows=%d path=%s" % (row_count, hdfs_path))
+                return {
+                    "columns": [],
+                    "rows": [],
+                    "costMs": int((time.time() - start) * 1000),
+                    "truncated": False,
+                    "hdfsPath": hdfs_path,
+                }
+            # SELECT/WITH 用 Spark 计划限行;命令结果按迭代读取上限,避免不支持 limit。
+            rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
+            self._raise_if_cancelled()
+            truncated = len(rows) > limit
+            rows = rows[:limit]
+            columns = df.columns
+            data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
+            return {
+                "columns": columns,
+                "rows": data,
+                "costMs": int((time.time() - start) * 1000),
+                "truncated": truncated,
+            }
+
         with self._lock:
             gid = self._begin_job()
             timer: Optional[threading.Timer] = None
@@ -536,27 +572,15 @@ class SparkEngine:
                 timer.start()
             try:
                 df = self._spark.sql(code)
-                # SELECT/WITH 用 Spark 计划限行;SHOW/DESCRIBE 等命令结果按迭代读取上限,避免命令计划不支持 limit。
-                rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
-                self._raise_if_cancelled()
-                truncated = len(rows) > limit
-                rows = rows[:limit]
-                columns = df.columns
-                data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
-                cost_ms = int((time.time() - start) * 1000)
-                self._audit("sql done rows=%d cost=%dms" % (len(rows), cost_ms))
-                return {
-                    "columns": columns,
-                    "rows": data,
-                    "costMs": cost_ms,
-                    "truncated": truncated,
-                }
+                result = read_result(df)
+                self._audit("sql done rows=%d cost=%dms" % (len(result["rows"]), result["costMs"]))
+                return result
             except Exception as e:
                 # 常驻 session 元数据缓存过期:底层 HDFS 文件被重写/覆盖后,
                 # Spark 仍按旧文件列表读取 → SparkFileNotFoundException。
                 # 自动 REFRESH 涉及的表并重试一次,规避"REFRESH TABLE"手动操作。
                 msg = str(e)
-                if _is_file_not_found(msg):
+                if not exporting and _is_file_not_found(msg):
                     # 超时/手动取消置位时不重试(避免超时后继续执行慢查询)
                     if self._cancel_flag.is_set():
                         self._audit("file-not-found detected but skipped (cancel_flag set)")
@@ -565,20 +589,9 @@ class SparkEngine:
                             refreshed = self._refresh_tables(code)
                             self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
                             df = self._spark.sql(code)
-                            rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
-                            self._raise_if_cancelled()
-                            truncated = len(rows) > limit
-                            rows = rows[:limit]
-                            columns = df.columns
-                            data = [dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))])) for r in rows]
-                            cost_ms = int((time.time() - start) * 1000)
-                            self._audit("sql retry OK rows=%d cost=%dms" % (len(rows), cost_ms))
-                            return {
-                                "columns": columns,
-                                "rows": data,
-                                "costMs": cost_ms,
-                                "truncated": truncated,
-                            }
+                            result = read_result(df)
+                            self._audit("sql retry OK rows=%d cost=%dms" % (len(result["rows"]), result["costMs"]))
+                            return result
                         except Exception as e2:
                             self._audit("sql retry FAILED after refresh: %s" % e2)
                             raise RuntimeError(_format_spark_error(e2))
@@ -623,20 +636,35 @@ class SparkEngine:
             try:
                 exec(compile(code, "<pyspark>", "exec"), namespace)  # noqa: S102 信任模式
                 result = namespace.get("result")
-                cost_ms = int((time.time() - start) * 1000)
                 if self._cancel_flag.is_set():
-                    self._audit("pycode CANCELLED after %dms" % cost_ms)
+                    self._audit("pycode CANCELLED after %dms" % (int((time.time() - start) * 1000)))
                     raise RuntimeError("查询已停止(用户取消或超时)")
                 if result is not None:
                     # DataFrame → 表格
                     if hasattr(result, "columns") and hasattr(result, "collect"):
-                        rows = result.collect()
-                        columns = result.columns
-                        data = [
-                            dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))]))
-                            for r in rows
-                        ]
-                        out: Dict[str, Any] = {"columns": columns, "rows": data, "truncated": False}
+                        row_count = result.count()
+                        self._raise_if_cancelled()
+                        if row_count > 500000:
+                            hdfs_path = "hdfs:///tmp/db-query-exports/%s/%s/" % (
+                                time.strftime("%Y-%m-%d"), uuid.uuid4().hex,
+                            )
+                            result.write.mode("errorifexists").option("header", True).csv(hdfs_path)
+                            self._raise_if_cancelled()
+                            out = {
+                                "columns": [],
+                                "rows": [],
+                                "truncated": False,
+                                "hdfsPath": hdfs_path,
+                            }
+                            self._audit("pycode exported rows=%d path=%s" % (row_count, hdfs_path))
+                        else:
+                            rows = result.collect()
+                            columns = result.columns
+                            data = [
+                                dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))]))
+                                for r in rows
+                            ]
+                            out = {"columns": columns, "rows": data, "truncated": False}
                     elif isinstance(result, (list, tuple)) and result and isinstance(result[0], dict):
                         columns = list(result[0].keys())
                         out = {"columns": columns, "rows": result, "truncated": False}
@@ -648,8 +676,8 @@ class SparkEngine:
                         "rows": [{"stdout": line} for line in captured] or [{"stdout": "(no output)"}],
                         "truncated": False,
                     }
-                out["costMs"] = cost_ms
-                self._audit("pycode done cost=%dms result=%s" % (cost_ms, str(out.get("columns"))))
+                out["costMs"] = int((time.time() - start) * 1000)
+                self._audit("pycode done cost=%dms result=%s" % (out["costMs"], str(out.get("columns"))))
                 return out
             except Exception as e:
                 if self._cancel_flag.is_set():
