@@ -37,7 +37,7 @@ SQL 查询直接提交到集群,避免 SQL Gateway 那层 REST 的冷启动/卡�
   "sessionName": "db-proxy-flink-session",
   "queue": "default",                       # 提交 job 的 YARN 队列(可选)
   "defaultLimit": 1000,
-  "maxLimit": 10000,
+  "maxLimit": 500000,
   "queryTimeout": 300,                      # 查询结果收集超时(秒),防流式源阻塞
   "allowWrite": false,                      # 已废弃(读写限制已收口网关侧,不再生效)
   "pipelineJars": [                         # connector jar,file:// 或绝对路径
@@ -160,7 +160,7 @@ class FlinkEngine:
         self._audit_file = os.path.join(self._log_dir, "flink-audit.log")
         self._client_log = os.path.join(self._log_dir, "flink-client.log")
         self._default_limit = int(cfg.get("defaultLimit", 1000))
-        self._max_limit = int(cfg.get("maxLimit", 10000))
+        self._max_limit = int(cfg.get("maxLimit", 500000))
         self._query_timeout = int(cfg.get("queryTimeout", 300))
         self._allow_write = bool(cfg.get("allowWrite", False))
 

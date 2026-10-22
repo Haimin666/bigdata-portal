@@ -45,7 +45,7 @@
 - **Monaco 补全组件加载**:`editor.api` 仅提供基础编辑器 API；`monaco-setup.ts` 必须显式加载 `contrib/suggest/browser/suggestController`，注册补全弹窗、触发命令与 snippet 接受能力，否则 provider 有候选也无法显示提示。验证需覆盖浏览器实际打字自动弹出和 Tab 接受，不能仅依赖类型检查/构建。
 - **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
-- **无感行数上限**:前端画布 SQL 不变；db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回。
+- **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。

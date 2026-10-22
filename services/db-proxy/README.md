@@ -34,8 +34,8 @@
   "authToken": "你的访问token",                    // X-DB-Token 鉴权,留空=不鉴权
   "listenHost": "0.0.0.0",
   "listenPort": 8756,
-  "defaultLimit": 100,                            // 无限制子句时默认行数
-  "maxLimit": 10000,                              // 行数硬上限
+  "defaultLimit": 1000,                           // 无限制子句时默认行数
+  "maxLimit": 500000,                             // 行数硬上限
   "queryTimeout": 60,
   "connectTimeout": 5,
   "allowedDbs": [],                               // 已废弃(不再拦截,仅 /acl 回显)
@@ -89,14 +89,14 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 - 前端画布 SQL 保持不变;db-proxy 只在发送到数据库前对无显式行数限制的 `SELECT` / `WITH` 隐式添加引擎对应的上限。
 - MySQL/Doris/Impala 使用 `LIMIT n`,Oracle 12c+ 使用 `FETCH FIRST n ROWS ONLY`,Oracle 11g 使用 `ROWNUM` 包装;Spark SELECT/WITH 使用执行计划限行。
 - `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 不追加 SQL 后缀,使用 cursor/Spark 有界迭代读取结果,避免特殊命令被改写后语法错误。
-- 用户 SQL 自带行数限制时沿用;配置 `maxLimit` 仍限制用户指定的最大行数,超过直接 400。达到默认或用户上限时通过 `truncated` 标记告知前端。
+- 默认返回上限为 1000 行;各引擎硬上限为 500,000 行。用户 SQL 自带行数限制时沿用;超过硬上限直接 400(Spark/Flink 按硬上限截取)。达到默认或用户上限时通过 `truncated` 标记告知前端。
 
 ## 保留的资源护栏(非权限)
 
 | 护栏 | 行为 |
 |---|---|
 | `X-DB-Token` 鉴权 | 与 `authToken` 不符 → 401(配置空 = 不鉴权,不推荐) |
-| 行数上限 | 无限制子句 SELECT 自动追加;硬上限 `maxLimit`(默认 10000) |
+| 行数上限 | 默认 1000 行;硬上限 `maxLimit`(默认 500000) |
 | `maxSqlLen` | SQL 超 32768 字节(默认)拒绝 |
 | `maxConcurrent` / `maxQps` | 并发信号量 + QPS 限流 → 429 |
 | 超时 | 连接/查询超时可配,防远端卡死 |
@@ -149,7 +149,7 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
   "queue": "default",
   "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
   "defaultLimit": 1000,
-  "maxLimit": 10000,
+  "maxLimit": 500000,
   "maxSqlLen": 65536,
   "logDir": "spark-logs"
 }
@@ -187,7 +187,7 @@ Session 创建 30~90s,首个请求等待,之后复用。
   "yarnAppId": "application_xxx",
   "queue": "default",
   "defaultLimit": 1000,
-  "maxLimit": 10000,
+  "maxLimit": 500000,
   "queryTimeout": 300,
   "catalogs": ["CREATE CATALOG paimon_hive_store WITH (...)"],
   "defaultCatalog": "paimon_hive_store",

@@ -24,7 +24,7 @@
     "queue": "default",
     "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
     "defaultLimit": 1000,
-    "maxLimit": 10000,
+    "maxLimit": 500000,
     "maxSqlLen": 65536,
     "allowWrite": false,
     "logDir": "spark-logs"
@@ -388,7 +388,7 @@ class SparkEngine:
                 "executorInstances": int(self.cfg.get("executorInstances") or 0),
                 "allowWrite": bool(self.cfg.get("allowWrite", False)),
                 "defaultLimit": int(self.cfg.get("defaultLimit", 1000)),
-                "maxLimit": int(self.cfg.get("maxLimit", 10000)),
+                "maxLimit": int(self.cfg.get("maxLimit", 500000)),
             },
         }
         if self._spark is not None:
@@ -514,7 +514,7 @@ class SparkEngine:
         if len(clean) > int(self.cfg.get("maxSqlLen", 65536)):
             raise ValueError("sql too long")
         limit = int(self.cfg.get("defaultLimit", 1000))
-        max_limit = int(self.cfg.get("maxLimit", 10000))
+        max_limit = int(self.cfg.get("maxLimit", 500000))
         m = re.search(r"\bLIMIT\s+(\d+)\b", clean, re.IGNORECASE)
         if m:
             limit = int(m.group(1))
