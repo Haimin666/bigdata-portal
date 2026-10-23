@@ -684,7 +684,7 @@ export async function listSparkFields(db: string, table: string): Promise<TableF
   return sparkSchemaRequest<TableField[]>(`fields?${q}`)
 }
 
-/** 前端设置 Spark executor 数量(0=动态分配;5/10/15/20=固定常驻,下次查询生效) */
+/** 前端设置 Spark executor 数量(0=动态分配;正整数=固定常驻,下次查询生效) */
 export async function setSparkExecutors(executorInstances: number): Promise<Record<string, unknown>> {
   const res = await fetch('/api/spark/config', {
     method: 'POST',

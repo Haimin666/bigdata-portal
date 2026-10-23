@@ -20,7 +20,7 @@ defineOptions({ name: 'DbQueryView' })
 const datasources = ref<DbDataSource[]>([])
 const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
 const db = ref('')
-// Spark executor 数量设置(0=动态分配;5/10/15/20=固定常驻),仅 sparksql 引擎显示
+// Spark executor 数量设置(0=动态分配;正整数=固定数量),仅 sparksql 引擎显示
 const sparkExecutors = ref(0)
 const sparkExecutorsLoading = ref(false)
 const loading = ref(false)
@@ -1570,8 +1570,12 @@ watch(engine, async (val) => {
 })
 
 /** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
-async function onSparkExecutorsChange(val: number) {
+async function onSparkExecutorsChange(val: number | undefined, oldVal: number | undefined) {
   if (sparkExecutorsLoading.value) return
+  if (val == null || !Number.isInteger(val) || val < 0) {
+    sparkExecutors.value = oldVal ?? 0
+    return
+  }
   sparkExecutorsLoading.value = true
   try {
     await setSparkExecutors(val)
@@ -1579,7 +1583,7 @@ async function onSparkExecutorsChange(val: number) {
     else ElMessage.info(`已设置固定 ${val} 个 executor;下次 sparksql 查询生效(需重建会话)`)
   } catch (e) {
     ElMessage.error(`设置失败:${e instanceof Error ? e.message : e}`)
-    sparkExecutors.value = 0 // 回退
+    sparkExecutors.value = oldVal ?? 0
   } finally {
     sparkExecutorsLoading.value = false
   }
@@ -1606,20 +1610,22 @@ async function onSparkExecutorsChange(val: number) {
         <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
-      <el-select
+      <el-tooltip
         v-if="engine === 'sparksql'"
-        v-model="sparkExecutors"
-        class="executor-select"
-        placeholder="Executor 数量"
-        :loading="sparkExecutorsLoading"
-        @change="onSparkExecutorsChange"
+        content="0 表示动态分配；正整数表示固定 executor 数量"
+        placement="top"
       >
-        <el-option label="动态分配(自适应)" :value="0" />
-        <el-option label="5 个" :value="5" />
-        <el-option label="10 个" :value="10" />
-        <el-option label="15 个" :value="15" />
-        <el-option label="20 个" :value="20" />
-      </el-select>
+        <el-input-number
+          v-model="sparkExecutors"
+          class="executor-input"
+          :min="0"
+          :step="1"
+          step-strictly
+          :disabled="sparkExecutorsLoading || loading"
+          controls-position="right"
+          @change="onSparkExecutorsChange"
+        />
+      </el-tooltip>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
@@ -2063,7 +2069,7 @@ async function onSparkExecutorsChange(val: number) {
   width: 96px;
 }
 
-.executor-select {
+.executor-input {
   width: 120px;
 }
 

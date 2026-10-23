@@ -89,6 +89,9 @@
 - YARN 容器使用 HDFS archives：`spark.archives=hdfs:///spark4/resources/jdk17.zip#jdk,hdfs:///spark4/resources/py312.zip#py3`；`spark.executorEnv.JAVA_HOME=./jdk`，executor Python 指向 `./py3/bin/python`。路径需符合归档解压后的目录结构。
 - Spark 资源示例：driver 4g、4 个 executor、每个 executor 4 核/8g；对应 `driverMemory`、`executorInstances`、`executorCores`、`executorMemory`。
 - `sparkHome`、YARN client 配置和 `sparkConf` 在 `datasources.json` 中配置；SparkSession 首次创建后常驻，修改配置或服务 Python 环境后必须重启 db-proxy。
+- Spark Hadoop codec 覆盖配置放在 `spark.sparkConf`：`spark.hadoop.io.compression.codecs` 显式列出可用 codec，排除当前环境缺失的 LZO codec；同时将 `spark.hadoop.io.compression.codec.lzo.class` 设为空字符串。前者负责覆盖 codec 列表，修改后需重启 db-proxy 重建 SparkSession。
+- YARN application 被外部终止时，下一次请求检测到 SparkContext stopped 后先调用旧 SparkSession 的 `stop()` 清理 PySpark 与 JVM 默认 session 状态，再通过 `getOrCreate()` 重建，避免复用已停止的 context。
+- 工作台 SparkSQL 工具栏支持输入任意非负 executor 数量：0 表示动态分配，正整数表示固定数量；设置后当前 session 安全停止，下一次查询按新配置重建。执行、保活和 session 生命周期变更串行；取消和 stage 进度轮询仍可在查询期间运行。
 
 ## 6. 外部 API Token（网关侧）
 

@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 # ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
 CONFIG_FILE = "datasources.json"
@@ -1094,7 +1094,7 @@ class SparkJobSubmitReq(BaseModel):
 
 
 class SparkConfigReq(BaseModel):
-    executorInstances: int = 0  # 0=动态分配(后端 maxExecutors);>0=固定常驻数量
+    executorInstances: StrictInt = 0  # 0=动态分配(后端 maxExecutors);>0=固定常驻数量
 
 
 @app.post("/spark/config")
@@ -1108,8 +1108,8 @@ def spark_config(
         raise HTTPException(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
-    if req.executorInstances != 0 and req.executorInstances not in (5, 10, 15, 20):
-        raise HTTPException(status_code=400, detail="executorInstances 仅支持 0/5/10/15/20(0=动态分配)")
+    if req.executorInstances < 0:
+        raise HTTPException(status_code=400, detail="executorInstances 必须是非负整数")
     try:
         SPARK_ENGINE.set_executors(req.executorInstances)
     except ValueError as e:

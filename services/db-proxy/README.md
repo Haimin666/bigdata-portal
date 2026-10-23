@@ -155,7 +155,9 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
     "spark.executorEnv.JAVA_HOME": "./jdk",
     "spark.yarn.appMasterEnv.PYSPARK_PYTHON": "./py3/bin/python",
     "spark.executorEnv.PYSPARK_PYTHON": "./py3/bin/python",
-    "spark.pyspark.python": "./py3/bin/python"
+    "spark.pyspark.python": "./py3/bin/python",
+    "spark.hadoop.io.compression.codecs": "org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,org.apache.hadoop.io.compress.SnappyCodec,org.apache.hadoop.io.compress.Lz4Codec,org.apache.hadoop.io.compress.ZStandardCodec",
+    "spark.hadoop.io.compression.codec.lzo.class": ""
   },
   "defaultLimit": 1000,
   "maxLimit": 500000,
@@ -163,6 +165,10 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
   "logDir": "spark-logs"
 }
 ```
+
+`spark.hadoop.io.compression.codecs` 显式列出 Spark classpath 中可用的 Hadoop codec并排除缺失的 LZO codec；同时将 `spark.hadoop.io.compression.codec.lzo.class` 设为空字符串。调整后重启 db-proxy 使常驻 SparkSession 重新创建。
+
+工作台 `/api/spark/config` 支持任意非负整数 executor 数量：`0` 表示动态分配，正整数表示固定数量；设置后当前 session 停止，并在下一次查询时按新数量重建。
 
 **特性**
 - SQL 写语句(**INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等**):引擎不再校验

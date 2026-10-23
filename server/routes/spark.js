@@ -226,12 +226,12 @@ export function setupSpark(app) {
       }
     })
 
-    // 前端设置 Spark executor 数量(5/10/15/20 固定常驻;0=动态分配)
+    // 前端设置 Spark executor 数量(正整数固定常驻;0=动态分配)
     app.post('/api/spark/config', async (req, res) => {
       try {
-        const n = Number(req.body?.executorInstances)
-        if (![0, 5, 10, 15, 20].includes(n)) {
-          return res.status(400).json({ code: 400, msg: 'executorInstances 仅支持 0/5/10/15/20' })
+        const n = req.body?.executorInstances
+        if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+          return res.status(400).json({ code: 400, msg: 'executorInstances 必须是非负整数' })
         }
         const data = await sparkSetExecutors(n)
         res.json({ code: 0, data })

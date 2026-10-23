@@ -58,7 +58,9 @@
       "spark.executorEnv.JAVA_HOME": "./jdk",
       "spark.yarn.appMasterEnv.PYSPARK_PYTHON": "./py3/bin/python",
       "spark.executorEnv.PYSPARK_PYTHON": "./py3/bin/python",
-      "spark.pyspark.python": "./py3/bin/python"
+      "spark.pyspark.python": "./py3/bin/python",
+      "spark.hadoop.io.compression.codecs": "org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,org.apache.hadoop.io.compress.SnappyCodec,org.apache.hadoop.io.compress.Lz4Codec,org.apache.hadoop.io.compress.ZStandardCodec",
+      "spark.hadoop.io.compression.codec.lzo.class": ""
     }
   },
   "flink": {

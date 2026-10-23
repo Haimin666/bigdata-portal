@@ -200,20 +200,21 @@ class SparkEngine:
         def loop() -> None:
             while True:
                 time.sleep(interval)
+                if not self._lock.acquire(blocking=False):
+                    continue  # 查询正在使用 session,跳过本次保活
                 try:
-                    if self._spark is None:
+                    spark = self._spark
+                    if spark is None:
                         continue  # 尚未初始化,等待首次使用
-                    # 轻量保活查询;context 死时 collect 抛异常 → 走 except 重建
-                    self._spark.sql("select 1").collect()
+                    # 与用户查询串行,避免保活失败时停止正在执行的 SparkContext
+                    spark.sql("select 1").collect()
                     # 成功不写 audit(避免每 5 分钟刷一条噪音);失败才记
                 except Exception as e:
                     self._audit("spark keepalive failed: %s" % str(e)[:200])
-                    try:
-                        if self._spark is not None:
-                            self._spark.stop()
-                    except Exception:
-                        pass
-                    self._spark = None  # 下次查询/保活自动重建
+                    with self._init_lock:
+                        self._discard_session()
+                finally:
+                    self._lock.release()
 
         self._keepalive_thread = threading.Thread(target=loop, daemon=True, name="spark-keepalive")
         self._keepalive_thread.start()
@@ -268,6 +269,15 @@ class SparkEngine:
         except Exception:
             return False
 
+    def _discard_session(self) -> None:
+        """丢弃旧 session,清理 PySpark 与 JVM 默认 session 状态。"""
+        old, self._spark = self._spark, None
+        if old is not None:
+            try:
+                old.stop()
+            except Exception as e:
+                log.warning("clear stopped Spark session failed: %s", e)
+
     def _ensure_initialized(self) -> None:
         """首次使用时创建 SparkSession(懒加载,避免 db-proxy 启动即依赖 spark)。
 
@@ -279,13 +289,18 @@ class SparkEngine:
             # "Cannot call methods on a stopped SparkContext" 卡死后续查询
             if self._spark is not None and self._context_stopped():
                 log.warning("spark context is stopped, rebuilding session")
-                self._spark = None
+                self._discard_session()
             if self._spark is not None:
                 return
             self._session_state = "starting"
             t0 = time.time()
             try:
                 self._spark = self._build_session()
+                if self._context_stopped():
+                    self._discard_session()
+                    self._spark = self._build_session()
+                    if self._context_stopped():
+                        raise RuntimeError("rebuilt Spark session is still stopped")
                 self._session_state = "idle"
                 self._start_keepalive()
                 self._audit(
@@ -373,21 +388,18 @@ class SparkEngine:
         n = int(n)
         if n < 0:
             raise ValueError("executorInstances 必须 >= 0")
-        with self._init_lock:
-            prev = self.cfg.get("executorInstances")
-            if n == 0:
-                # 0=自适应(动态分配):移除固定数量配置,恢复 maxExecutors 动态伸缩
-                self.cfg.pop("executorInstances", None)
-            else:
-                self.cfg["executorInstances"] = n
-            if self._spark is not None:
-                try:
-                    self._spark.stop()
-                except Exception:
-                    pass
-                self._spark = None
-                self._session_state = "disabled"
-            self._audit("set_executors: %s -> %s, session will rebuild on next query" % (prev, n))
+        with self._lock:
+            with self._init_lock:
+                prev = self.cfg.get("executorInstances")
+                if n == 0:
+                    # 0=自适应(动态分配):移除固定数量配置,恢复 maxExecutors 动态伸缩
+                    self.cfg.pop("executorInstances", None)
+                else:
+                    self.cfg["executorInstances"] = n
+                if self._spark is not None:
+                    self._discard_session()
+                    self._session_state = "disabled"
+                self._audit("set_executors: %s -> %s, session will rebuild on next query" % (prev, n))
 
     def status(self) -> Dict[str, Any]:
         st = {
@@ -519,7 +531,6 @@ class SparkEngine:
     ) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("spark engine not enabled (datasources.json spark.enabled=false)")
-        self._ensure_initialized()
         clean = _strip_comments(sql)
         if not clean:
             raise ValueError("empty sql")
@@ -574,6 +585,8 @@ class SparkEngine:
             }
 
         with self._lock:
+            self._ensure_initialized()
+            spark = self._spark
             gid = self._begin_job()
             timer: Optional[threading.Timer] = None
             if timeout_ms and timeout_ms > 0:
@@ -582,7 +595,7 @@ class SparkEngine:
                 timer.daemon = True
                 timer.start()
             try:
-                df = self._spark.sql(code)
+                df = spark.sql(code)
                 result = read_result(df)
                 self._audit("sql done rows=%d cost=%dms" % (len(result["rows"]), result["costMs"]))
                 return result
@@ -599,7 +612,7 @@ class SparkEngine:
                         try:
                             refreshed = self._refresh_tables(code)
                             self._audit("auto refresh tables after FileNotFound: %s" % refreshed)
-                            df = self._spark.sql(code)
+                            df = spark.sql(code)
                             result = read_result(df)
                             self._audit("sql retry OK rows=%d cost=%dms" % (len(result["rows"]), result["costMs"]))
                             return result
@@ -622,22 +635,22 @@ class SparkEngine:
     ) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("spark engine not enabled (datasources.json spark.enabled=false)")
-        self._ensure_initialized()
         if len(code) > int(self.cfg.get("maxSqlLen", 65536)):
             raise ValueError("code too long")
         start = time.time()
         self._audit("pycode >>>\n%s" % code[:2000])
-        # 信任模式:执行于受限命名空间,提供 spark/sc;约定 result 变量承载结果
-        namespace: Dict[str, Any] = {"spark": self._spark, "sc": self._spark.sparkContext}
         captured: List[str] = []
 
         def _print(*args, **kwargs):
             captured.append(" ".join(str(a) for a in args))
 
-        namespace["print"] = _print
-        namespace["show"] = _print
-
         with self._lock:
+            self._ensure_initialized()
+            spark = self._spark
+            # 信任模式:执行于受限命名空间,提供 spark/sc;约定 result 变量承载结果
+            namespace: Dict[str, Any] = {"spark": spark, "sc": spark.sparkContext}
+            namespace["print"] = _print
+            namespace["show"] = _print
             self._begin_job()
             timer: Optional[threading.Timer] = None
             if timeout_ms and timeout_ms > 0:

@@ -120,7 +120,7 @@ export async function status() {
   return res.data
 }
 
-/** 前端设置 Spark executor 数量(方案A):0=动态分配;5/10/15/20=固定常驻,下次查询生效 */
+/** 前端设置 Spark executor 数量:0=动态分配;正整数=固定常驻,下次查询生效 */
 export async function setExecutors(executorInstances) {
   const res = await proxy('/spark/config', {
     method: 'POST',
