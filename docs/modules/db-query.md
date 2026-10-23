@@ -46,7 +46,7 @@
 - **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
 - **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
-- **Spark 大结果导出**:Spark SQL 查询及 PySpark 返回的 DataFrame 超过 500,000 行时,db-proxy 将完整结果写为带表头的 CSV 分片目录至 HDFS `/tmp/db-query-exports/<日期>/<UUID>/`;Spark SQL 没有显式 `LIMIT` 时先 count,若未超限仍遵循 1000 行默认返回。成功响应保留 `columns/rows/costMs/truncated` 结构并增加 `hdfsPath`;导出时 `columns`/`rows` 为空,结果区只显示可选择/复制的 HDFS 路径。Spark 写出失败按查询失败处理。
+- **Spark 查询结果限制**:Spark SQL 无显式 `LIMIT` 和 PySpark DataFrame 结果默认按 `defaultLimit` 收集 1,000 行;显式 SQL 行数上限最高为 `maxLimit`(默认 500,000)。结果读取最多拉取有效上限 + 1 行并设置 `truncated`;不先统计完整结果,也不自动导出 HDFS。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。

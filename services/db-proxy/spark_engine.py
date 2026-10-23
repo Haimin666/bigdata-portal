@@ -43,7 +43,6 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from typing import Any, Dict, List, Optional
 
 
@@ -549,27 +548,8 @@ class SparkEngine:
 
         start = time.time()
         self._audit("sql db=spark sql=%s" % code[:300])
-        exporting = False
 
         def read_result(df) -> Dict[str, Any]:
-            nonlocal exporting
-            row_count = df.count()
-            self._raise_if_cancelled()
-            if row_count > 500000:
-                hdfs_path = "hdfs:///tmp/db-query-exports/%s/%s/" % (
-                    time.strftime("%Y-%m-%d"), uuid.uuid4().hex,
-                )
-                exporting = True
-                df.write.mode("errorifexists").option("header", True).csv(hdfs_path)
-                self._raise_if_cancelled()
-                self._audit("sql exported rows=%d path=%s" % (row_count, hdfs_path))
-                return {
-                    "columns": [],
-                    "rows": [],
-                    "costMs": int((time.time() - start) * 1000),
-                    "truncated": False,
-                    "hdfsPath": hdfs_path,
-                }
             # SELECT/WITH 用 Spark 计划限行;命令结果按迭代读取上限,避免不支持 limit。
             rows = collect_limited_rows(df, limit, pushdown=pushdown_limit)
             self._raise_if_cancelled()
@@ -604,7 +584,7 @@ class SparkEngine:
                 # Spark 仍按旧文件列表读取 → SparkFileNotFoundException。
                 # 自动 REFRESH 涉及的表并重试一次,规避"REFRESH TABLE"手动操作。
                 msg = str(e)
-                if not exporting and _is_file_not_found(msg):
+                if _is_file_not_found(msg):
                     # 超时/手动取消置位时不重试(避免超时后继续执行慢查询)
                     if self._cancel_flag.is_set():
                         self._audit("file-not-found detected but skipped (cancel_flag set)")
@@ -647,6 +627,10 @@ class SparkEngine:
         with self._lock:
             self._ensure_initialized()
             spark = self._spark
+            limit = min(
+                int(self.cfg.get("defaultLimit", 1000)),
+                int(self.cfg.get("maxLimit", 500000)),
+            )
             # 信任模式:执行于受限命名空间,提供 spark/sc;约定 result 变量承载结果
             namespace: Dict[str, Any] = {"spark": spark, "sc": spark.sparkContext}
             namespace["print"] = _print
@@ -666,29 +650,16 @@ class SparkEngine:
                 if result is not None:
                     # DataFrame → 表格
                     if hasattr(result, "columns") and hasattr(result, "collect"):
-                        row_count = result.count()
+                        rows = result.limit(limit + 1).collect()
                         self._raise_if_cancelled()
-                        if row_count > 500000:
-                            hdfs_path = "hdfs:///tmp/db-query-exports/%s/%s/" % (
-                                time.strftime("%Y-%m-%d"), uuid.uuid4().hex,
-                            )
-                            result.write.mode("errorifexists").option("header", True).csv(hdfs_path)
-                            self._raise_if_cancelled()
-                            out = {
-                                "columns": [],
-                                "rows": [],
-                                "truncated": False,
-                                "hdfsPath": hdfs_path,
-                            }
-                            self._audit("pycode exported rows=%d path=%s" % (row_count, hdfs_path))
-                        else:
-                            rows = result.collect()
-                            columns = result.columns
-                            data = [
-                                dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))]))
-                                for r in rows
-                            ]
-                            out = {"columns": columns, "rows": data, "truncated": False}
+                        truncated = len(rows) > limit
+                        rows = rows[:limit]
+                        columns = result.columns
+                        data = [
+                            dict(zip(columns, [self._json_value(r[i]) for i in range(len(columns))]))
+                            for r in rows
+                        ]
+                        out = {"columns": columns, "rows": data, "truncated": truncated}
                     elif isinstance(result, (list, tuple)) and result and isinstance(result[0], dict):
                         columns = list(result[0].keys())
                         out = {"columns": columns, "rows": result, "truncated": False}

@@ -1,9 +1,122 @@
 import unittest
+import threading
 
-from spark_engine import collect_limited_rows
+from spark_engine import SparkEngine, collect_limited_rows
 
 
 class QueryLimitTests(unittest.TestCase):
+    def test_large_spark_sql_result_obeys_default_limit_instead_of_exporting(self):
+        class DataFrame:
+            columns = ["id"]
+
+            def __init__(self):
+                self.requested_limit = None
+                self.count_calls = 0
+                self.export_calls = 0
+                self.write = self
+
+            def count(self):
+                self.count_calls += 1
+                return 600001
+
+            def limit(self, count):
+                self.requested_limit = count
+                return self
+
+            def collect(self):
+                return [(value,) for value in range(self.requested_limit)]
+
+            def mode(self, _mode):
+                return self
+
+            def option(self, _key, _value):
+                return self
+
+            def csv(self, _path):
+                self.export_calls += 1
+
+        class Spark:
+            def __init__(self, dataframe):
+                self.dataframe = dataframe
+
+            def sql(self, _sql):
+                return self.dataframe
+
+        dataframe = DataFrame()
+        engine = SparkEngine.__new__(SparkEngine)
+        engine.cfg = {"enabled": True, "defaultLimit": 1000, "maxLimit": 500000}
+        engine._lock = threading.Lock()
+        engine._spark = Spark(dataframe)
+        engine._cancel_flag = threading.Event()
+        engine._ensure_initialized = lambda: None
+        engine._begin_job = lambda: "test-job"
+        engine._end_job = lambda: None
+        engine._audit = lambda _message: None
+        engine._raise_if_cancelled = lambda: None
+
+        result = engine.execute_sql("SELECT id FROM source", timeout_ms=0)
+
+        self.assertEqual(len(result["rows"]), 1000)
+        self.assertTrue(result["truncated"])
+        self.assertNotIn("hdfsPath", result)
+        self.assertEqual(dataframe.requested_limit, 1001)
+        self.assertEqual(dataframe.count_calls, 0)
+        self.assertEqual(dataframe.export_calls, 0)
+
+    def test_large_pyspark_dataframe_obeys_default_limit_instead_of_exporting(self):
+        class DataFrame:
+            columns = ["id"]
+
+            def __init__(self):
+                self.requested_limit = None
+                self.export_calls = 0
+                self.write = self
+
+            def count(self):
+                return 600001
+
+            def limit(self, count):
+                self.requested_limit = count
+                return self
+
+            def collect(self):
+                return [(value,) for value in range(self.requested_limit)]
+
+            def mode(self, _mode):
+                return self
+
+            def option(self, _key, _value):
+                return self
+
+            def csv(self, _path):
+                self.export_calls += 1
+
+        class Spark:
+            sparkContext = object()
+
+        dataframe = DataFrame()
+        spark = Spark()
+        spark.dataframe = dataframe
+        engine = SparkEngine.__new__(SparkEngine)
+        engine.cfg = {"enabled": True, "defaultLimit": 1000, "maxLimit": 500000}
+        engine._lock = threading.Lock()
+        engine._spark = spark
+        engine._cancel_flag = threading.Event()
+        engine._ensure_initialized = lambda: None
+        engine._begin_job = lambda: "test-job"
+        engine._end_job = lambda: None
+        engine._audit = lambda _message: None
+        engine._raise_if_cancelled = lambda: None
+        engine._json_value = lambda value: value
+
+        result = engine.execute_code("result = spark.dataframe", timeout_ms=0)
+
+        self.assertEqual(len(result["rows"]), 1000)
+        self.assertTrue(result["truncated"])
+        self.assertNotIn("hdfsPath", result)
+        self.assertEqual(dataframe.requested_limit, 1001)
+        self.assertEqual(dataframe.export_calls, 0)
+
     def test_special_statement_reads_bounded_iterator_without_dataframe_limit(self):
         class CommandResult:
             def __init__(self):

@@ -130,7 +130,7 @@ src/
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
 - **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
-- **Spark 大结果导出**:Spark SQL 查询及 PySpark 返回的 DataFrame 先检查结果行数;超过 500,000 行时由 db-proxy 将 CSV 分片目录写入 HDFS `/tmp/db-query-exports/<日期>/<UUID>/`,异步查询结果返回 `hdfsPath`,门户结果区只显示该路径。
+- **Spark 查询结果限制**:Spark SQL 与 PySpark DataFrame 默认最多收集 1,000 行,显式 SQL 限制最高 500,000 行。结果在 driver 端最多读取限制值 + 1 行,截断后返回,不对超大原始结果自动导出 HDFS。
 - **Spark Hadoop codec 配置**:db-proxy 的 `spark.sparkConf` 支持通过 `spark.hadoop.*` 注入 Hadoop 配置;当前 Spark4 为兼容环境中未安装的 LZO codec，设置 `spark.hadoop.io.compression.codecs` 为可用 codec 列表，并保留 `spark.hadoop.io.compression.codec.lzo.class` 空值覆盖。
 - **Spark session 恢复**:YARN 外部终止 client application 后,db-proxy 检测到 SparkContext 已停止时先清理 PySpark/JVM 默认 SparkSession 状态,再创建新 session,避免 `getOrCreate()` 复用已停止的 context。
 - **Spark executor 设置**:工作台与 `/api/spark/config` 接受任意非负整数;0 表示动态分配,正整数表示固定 executor 数量。session 执行、保活与停止/重建共享生命周期锁;取消和 stage 进度查询不等待执行锁。
@@ -147,8 +147,8 @@ QueryView.vue
             ├─ 写检测(isSparkWriteSql + 数据权限矩阵)
             └─ spark-gateway / flink-gateway
                  └─ db-proxy /query | /spark/query | /flink/query
-                      └─ 引擎执行→ {columns, rows, costMs, truncated[, hdfsPath]}
-                           └─ Spark 超 500,000 行:写 HDFS CSV,仅返回 hdfsPath
+                      └─ 引擎执行→ {columns, rows, costMs, truncated}
+                           └─ 超过有效行数限制:只收集限制值 + 1 行并标记 truncated
 ```
 
 ## 6. 配置体系

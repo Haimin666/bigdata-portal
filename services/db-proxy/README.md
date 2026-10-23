@@ -90,7 +90,7 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 - MySQL/Doris/Impala 使用 `LIMIT n`,Oracle 12c+ 使用 `FETCH FIRST n ROWS ONLY`,Oracle 11g 使用 `ROWNUM` 包装;Spark SELECT/WITH 使用执行计划限行。
 - `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 不追加 SQL 后缀,使用 cursor/Spark 有界迭代读取结果,避免特殊命令被改写后语法错误。
 - 默认返回上限为 1000 行;各引擎硬上限为 500,000 行。用户 SQL 自带行数限制时沿用;超过硬上限直接 400(Spark/Flink 按硬上限截取)。达到默认或用户上限时通过 `truncated` 标记告知前端。
-- Spark SQL 查询和 PySpark 返回的 DataFrame 先统计执行结果;超过 500,000 行时写为 CSV 分片目录到 HDFS `/tmp/db-query-exports/<日期>/<UUID>/`,返回 `hdfsPath` 且不回传结果行。Spark SQL 无显式 `LIMIT` 且未超限时仍按默认 1000 行收集。
+- Spark SQL 无显式 `LIMIT` 时默认最多返回 1,000 行;SQL 显式限制最高为 500,000 行。Spark 结果通过 `limit+1` 有界收集并标记截断,不先统计完整结果或自动导出 HDFS。
 
 ## 保留的资源护栏(非权限)
 
