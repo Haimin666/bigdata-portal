@@ -142,13 +142,21 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
   "master": "yarn",
   "deployMode": "client",
   "appName": "db-proxy-spark",
+  "sparkHome": "/opt/spark/spark4/spark4.2",
   "driverMemory": "4g",
   "executorMemory": "8g",
-  "executorCores": 2,
-  "maxExecutors": 15,
-  "minExecutors": 1,
+  "executorCores": 4,
+  "executorInstances": 4,
   "queue": "default",
   "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
+  "sparkConf": {
+    "spark.archives": "hdfs:///spark4/resources/jdk17.zip#jdk,hdfs:///spark4/resources/py312.zip#py3",
+    "spark.yarn.appMasterEnv.JAVA_HOME": "./jdk",
+    "spark.executorEnv.JAVA_HOME": "./jdk",
+    "spark.yarn.appMasterEnv.PYSPARK_PYTHON": "./py3/bin/python",
+    "spark.executorEnv.PYSPARK_PYTHON": "./py3/bin/python",
+    "spark.pyspark.python": "./py3/bin/python"
+  },
   "defaultLimit": 1000,
   "maxLimit": 500000,
   "maxSqlLen": 65536,
@@ -164,9 +172,25 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
 - 日志透传:log4j 重定向 `spark-logs/spark-jvm.log`,审计 `spark-logs/spark-audit.log`;
   `GET /spark/logs?offset=N` 增量读取
 
-**依赖**:Python 3.8+ `pyspark`(版本与集群匹配,如 `pyspark==3.4.2`);
-运行机器可提交 YARN(client 模式,需 HADOOP_CONF_DIR)并直连 Hive Metastore。
+**依赖**:Spark 4.2 要求 Python 3.10+、Java 17+；当前部署使用 Python 3.12，
+并确保 PySpark 与 `sparkHome` 中的 Spark 版本匹配。client 模式的 driver 在 db-proxy
+进程内运行，因此服务本身必须由 Python 3.12 启动；YARN executors 使用 HDFS archives
+中的 Python 环境。运行机器需可提交 YARN(需 `HADOOP_CONF_DIR`)并直连 Hive Metastore。
 Session 创建 30~90s,首个请求等待,之后复用。
+
+启动 db-proxy 的服务环境设置如下；服务进程本身由 Python 3.12 启动，`PYTHONPATH`
+保持清除。YARN 侧的 JDK/Python 通过 `spark.archives` 分发；归档解压后的路径应与
+`spark.pyspark.python` 等配置一致。
+
+```bash
+export SPARK_HOME=/opt/spark/spark4/spark4.2
+export JAVA_HOME=/opt/spark/spark4/jdk17
+export PYSPARK_PYTHON=/opt/spark/spark4/py312/bin/python3.12
+export PYSPARK_DRIVER_PYTHON=/opt/spark/spark4/py312/bin/python3.12
+unset PYTHONPATH
+cd /path/to/services/db-proxy
+exec /opt/spark/spark4/py312/bin/python3.12 -m uvicorn main:app --host 0.0.0.0 --port 8756
+```
 
 ## Flink 引擎(双通道:交互式 + PreJob)
 

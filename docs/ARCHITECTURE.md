@@ -167,12 +167,12 @@ QueryView.vue
   同宿主机:jupyter 容器(8888,base_url=/apps/jupyter)
 
 客户机 hadoop-task-3(能直连数据库)
-  db-proxy:uvicorn main:app --port 8756(py38 环境)
+  db-proxy:client 模式常驻 SparkSession,由 Python 3.12 + Spark 4.2 启动
 
 集群:YARN RM hadoop-nn-1:8088 / NM hadoop-dn-*:8042
      Hive metastore hadoop-nn-1/2:9083
      DS Web olds.bigdata.shiqiao.com/dolphinscheduler
-     Flink 1.17.2(StreamX)/ Spark 3.4.2(hadoop-task-1)
+     Flink 1.17.2(StreamX)/ Spark 4.2(hadoop-task-3)
 ```
 
 ## 8. Android 移动端

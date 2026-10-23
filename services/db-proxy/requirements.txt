@@ -13,5 +13,6 @@ oracledb>=1.4,<2.2
 impyla==0.23.0
 sqlglot==25.34.1
 # Spark 引擎(可选):仅启用 datasources.json 的 spark 段时需要。
-# 注意:pyspark 3.x 要求 Python 3.8+(db-proxy 核心仅需 3.7)。
-# pyspark==3.4.2
+# Spark 4.2 / PySpark 4.2 要求 Python 3.10+、Java 17+;db-proxy 核心可继续使用较低版本 Python。
+# PySpark 版本必须与 sparkHome 中的 Spark 保持一致,并安装在 db-proxy 的 Python 环境。
+# pyspark==4.2.*

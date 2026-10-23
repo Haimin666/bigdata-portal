@@ -83,6 +83,13 @@
 - 库别名:oracle 连接串可配置别名,未配置显示库名
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句
 
+### Spark 4.2 / YARN client 环境
+
+- db-proxy 的 driver 在客户机进程内运行；启动服务的 Python 必须为 3.10+（当前部署 Python 3.12），且 PySpark 与 `sparkHome` 中的 Spark 版本匹配。启动进程设置 `SPARK_HOME=/opt/spark/spark4/spark4.2`、`JAVA_HOME=/opt/spark/spark4/jdk17`、`PYSPARK_PYTHON` 和 `PYSPARK_DRIVER_PYTHON` 为本机 Python 3.12 路径，并清除旧 `PYTHONPATH`。
+- YARN 容器使用 HDFS archives：`spark.archives=hdfs:///spark4/resources/jdk17.zip#jdk,hdfs:///spark4/resources/py312.zip#py3`；`spark.executorEnv.JAVA_HOME=./jdk`，executor Python 指向 `./py3/bin/python`。路径需符合归档解压后的目录结构。
+- Spark 资源示例：driver 4g、4 个 executor、每个 executor 4 核/8g；对应 `driverMemory`、`executorInstances`、`executorCores`、`executorMemory`。
+- `sparkHome`、YARN client 配置和 `sparkConf` 在 `datasources.json` 中配置；SparkSession 首次创建后常驻，修改配置或服务 Python 环境后必须重启 db-proxy。
+
 ## 6. 外部 API Token（网关侧）
 
 - 与数据同步 `syncApiToken` 分离，调用方通过 `X-API-Token` 访问门户网关；不向浏览器配置接口回显，不转发给 db-proxy；未配置时保持 Cookie 登录方式。

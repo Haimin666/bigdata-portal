@@ -36,10 +36,11 @@
     "master": "yarn",
     "deployMode": "client",
     "appName": "db-proxy-spark",
-    "sparkHome": "/opt/spark/spark-3.4.2-bin-hadoop3",
+    "sparkHome": "/opt/spark/spark4/spark4.2",
     "driverMemory": "4g",
     "executorMemory": "8g",
-    "executorCores": 2,
+    "executorCores": 4,
+    "executorInstances": 4,
     "maxExecutors": 15,
     "minExecutors": 1,
     "executorIdleTimeout": "120s",
@@ -51,7 +52,14 @@
     "allowWrite": false,
     "logDir": "spark-logs",
     "keepaliveInterval": 300,
-    "sparkConf": {}
+    "sparkConf": {
+      "spark.archives": "hdfs:///spark4/resources/jdk17.zip#jdk,hdfs:///spark4/resources/py312.zip#py3",
+      "spark.yarn.appMasterEnv.JAVA_HOME": "./jdk",
+      "spark.executorEnv.JAVA_HOME": "./jdk",
+      "spark.yarn.appMasterEnv.PYSPARK_PYTHON": "./py3/bin/python",
+      "spark.executorEnv.PYSPARK_PYTHON": "./py3/bin/python",
+      "spark.pyspark.python": "./py3/bin/python"
+    }
   },
   "flink": {
     "enabled": true,
