@@ -1093,6 +1093,11 @@ class SparkJobSubmitReq(BaseModel):
     timeoutMs: int = 600000  # 异步任务默认 10 分钟(大查询可传更久,不撞网关超时)
 
 
+class SparkExportSubmitReq(BaseModel):
+    sql: str
+    timeoutMs: int = 7200000
+
+
 class SparkConfigReq(BaseModel):
     executorInstances: StrictInt = 0  # 0=动态分配(后端 maxExecutors);>0=固定常驻数量
 
@@ -1364,6 +1369,25 @@ def spark_job_submit(
         raise HTTPException(status_code=400, detail="sql is required")
     job_id = SPARK_JOBS.submit(str(sql), kind, req.writeUnlocked, req.timeoutMs)
     log.info("spark job submitted: %s kind=%s", job_id, kind)
+    return {"code": 0, "data": {"jobId": job_id}}
+
+
+@app.post("/spark/export/jobs")
+def spark_export_job_submit(
+    req: SparkExportSubmitReq,
+    x_db_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """提交只读 Spark SQL 的 HDFS CSV 导出任务。"""
+    require_auth(x_db_token)
+    if not SPARK_ENGINE.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    sql = str(req.sql or "")
+    if not sql.strip():
+        raise HTTPException(status_code=400, detail="sql is required")
+    job_id = SPARK_JOBS.submit(sql, "export", False, req.timeoutMs)
+    log.info("spark export job submitted: %s", job_id)
     return {"code": 0, "data": {"jobId": job_id}}
 
 

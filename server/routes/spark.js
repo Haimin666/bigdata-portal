@@ -6,7 +6,7 @@
 // 暴力破解防护、token 签发/校验/清理(12h TTL、绑定签发用户)均在本模块内。
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import config from '../config.js'
-import { isSparkWriteSql } from '../utils/sql-write-detect.js'
+import { isSparkWriteSql, isSparkExportSql } from '../utils/sql-write-detect.js'
 import { isSparkApiSqlShapeAllowed } from '../utils/db-query-api-policy.js'
 import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { checkSparkAccess } from '../db-permissions.js'
@@ -173,6 +173,30 @@ export function setupSpark(app) {
         const msg = e instanceof Error ? e.message : String(e)
         console.error('[spark/jobs]', msg)
         res.status(502).json({ code: 502, msg: `spark 提交失败: ${msg.slice(0, 300)}` })
+      }
+    })
+
+    app.post('/api/spark/export/jobs', async (req, res) => {
+      try {
+        const sql = String(req.body?.sql || '')
+        if (!isSparkExportSql(sql)) {
+          return res.status(400).json({ code: 400, msg: 'HDFS 导出仅支持单条只读 SELECT/WITH SQL' })
+        }
+        if (req.dbQueryApiPrincipal && !isSparkApiSqlShapeAllowed(sql, req.body?.db)) {
+          return res.status(403).json({ code: 403, msg: 'API Token 无权导出该 Spark SQL' })
+        }
+        checkSparkAccess(req, false, req.body?.db)
+        const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 7200000, 7200000)
+        const data = await sparkSubmitJob(sql, { kind: 'export', timeoutMs })
+        if (req.dbQueryApiPrincipal && data?.jobId) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
+        res.json({ code: 0, data })
+      } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
+        const msg = e instanceof Error ? e.message : String(e)
+        console.error('[spark/export]', msg)
+        res.status(502).json({ code: 502, msg: `Spark HDFS 导出提交失败: ${msg.slice(0, 300)}` })
       }
     })
 

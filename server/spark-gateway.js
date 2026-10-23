@@ -74,13 +74,12 @@ export async function submitJob(
   sql,
   { kind = 'sql', writeUnlocked = false, timeoutMs = 600000 } = {}
 ) {
-  const payload =
-    kind === 'pyspark'
-      ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
-      : { kind: 'sql', sql, writeUnlocked, timeoutMs }
+  const payload = kind === 'pyspark'
+    ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
+    : { kind, sql, writeUnlocked, timeoutMs }
   const headers = {}
   if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
-  const res = await proxy('/spark/jobs', {
+  const res = await proxy(kind === 'export' ? '/spark/export/jobs' : '/spark/jobs', {
     method: 'POST',
     body: JSON.stringify(payload),
     headers,

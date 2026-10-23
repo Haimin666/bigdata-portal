@@ -55,7 +55,7 @@
     "typeCheck": { "enabled": true },
     "aiFix": { "enabled": false, "baseUrl": "https://.../v1", "apiKey": "...", "model": "...", "maxAttempts": 2 }
   },
-  "spark": { "enabled": false },                  // 见「Spark 引擎」
+  "spark": { "enabled": false, "exportPath": "hdfs:///tmp/db-proxy-spark-exports" }, // Spark CSV 导出根目录
   "flink": { "enabled": false }                   // 见「Flink 引擎」
 }
 ```
@@ -67,6 +67,7 @@
 - oracle 连 11g 必须 `rowLimit: "rownum"` + `oracleClientLib`
 - `maxConcurrent/maxQps`、`maxSqlLen`(默认 32KB)在顶层配置
 - `allowWrite`/`writeToken`(spark/flink 段)已废弃,不再生效
+- SparkSQL 工作台「导出到 HDFS」把单条只读 `SELECT/WITH` 的完整结果写成带表头 CSV 目录;默认根目录 `hdfs:///tmp/db-proxy-spark-exports`,可用 `spark.exportPath` 覆盖。结果按唯一任务目录保存,不收集到 driver;导出失败不返回路径。此配置由 db-proxy 启动时加载,修改后重启生效。
 
 ## 启动
 
@@ -168,7 +169,7 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
 
 `spark.hadoop.io.compression.codecs` 显式列出 Spark classpath 中可用的 Hadoop codec并排除缺失的 LZO codec；同时将 `spark.hadoop.io.compression.codec.lzo.class` 设为空字符串。调整后重启 db-proxy 使常驻 SparkSession 重新创建。
 
-工作台 `/api/spark/config` 支持任意非负整数 executor 数量：`0` 表示动态分配，正整数表示固定数量；设置后当前 session 停止，并在下一次查询时按新数量重建。
+工作台 executor 选择器提供动态分配(自适应)及固定 5/10/15/20 个选项；服务端 `/api/spark/config` 仍接受任意非负整数，已有的非枚举配置会显示为当前值。设置后当前 session 停止，并在下一次查询时按新数量重建。
 
 **特性**
 - SQL 写语句(**INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等**):引擎不再校验

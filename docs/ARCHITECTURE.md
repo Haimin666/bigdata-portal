@@ -122,7 +122,7 @@ src/
 |---|---|
 | `main.py` | FastAPI 入口:数据源加载、路由、鉴权、护栏(限流/并发信号量) |
 | `impala_engine.py` | Impala SQL 类型检查/修复;元数据读取通过本地 JSON 缓存复用,类型检查与表目录共用 |
-| `spark_engine.py` | Spark 引擎:懒加载 **client 模式常驻 SparkSession**(YARN),串行锁、jobGroup 可取消、120s 超时自动 cancel、FileNotFound 自动 REFRESH 重试一次 |
+| `spark_engine.py` | Spark 引擎:懒加载 **client 模式常驻 SparkSession**(YARN),串行锁、jobGroup 可取消、120s 超时自动 cancel、FileNotFound 自动 REFRESH 重试一次;SparkSQL 独立 HDFS CSV 导出通过异步 job 写入,不收集全量结果到 driver |
 | `flink_engine.py` | Flink SQL 引擎:流/批双模式,支持 connector jar(paimon/mysql-cdc/kafka/hbase) |
 | `flink_prejob.py` | Flink PreJob 通道:pyflink 脚本生成 + `yarn-per-job` 提交 + YARN 状态/日志/cancel |
 | `flink_connectors.py` | Flink 连接器元数据:批量建表/DDL 生成/表探测 |
@@ -133,7 +133,7 @@ src/
 - **Spark 查询结果限制**:Spark SQL 与 PySpark DataFrame 默认最多收集 1,000 行,显式 SQL 限制最高 500,000 行。结果在 driver 端最多读取限制值 + 1 行,截断后返回,不对超大原始结果自动导出 HDFS。
 - **Spark Hadoop codec 配置**:db-proxy 的 `spark.sparkConf` 支持通过 `spark.hadoop.*` 注入 Hadoop 配置;当前 Spark4 为兼容环境中未安装的 LZO codec，设置 `spark.hadoop.io.compression.codecs` 为可用 codec 列表，并保留 `spark.hadoop.io.compression.codec.lzo.class` 空值覆盖。
 - **Spark session 恢复**:YARN 外部终止 client application 后,db-proxy 检测到 SparkContext 已停止时先清理 PySpark/JVM 默认 SparkSession 状态,再创建新 session,避免 `getOrCreate()` 复用已停止的 context。
-- **Spark executor 设置**:工作台与 `/api/spark/config` 接受任意非负整数;0 表示动态分配,正整数表示固定 executor 数量。session 执行、保活与停止/重建共享生命周期锁;取消和 stage 进度查询不等待执行锁。
+- **Spark executor 设置**:工作台恢复枚举选择:动态分配(自适应)或固定 5/10/15/20 个 executor;若服务端当前固定值不在枚举内,选择器额外显示该当前值,不自动改写配置。`/api/spark/config` 仍接受非负整数。session 执行、保活与停止/重建共享生命周期锁;取消和 stage 进度查询不等待执行锁。
 - **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录

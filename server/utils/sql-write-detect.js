@@ -79,6 +79,13 @@ export function isSparkWriteSql(sql) {
   return true
 }
 
+/** CSV export accepts exactly one read-only SELECT/WITH statement. */
+export function isSparkExportSql(sql) {
+  const s = String(sql || '').replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '').trim()
+  const statements = splitSqlStatements(s).map((part) => part.trim()).filter(Boolean)
+  return statements.length === 1 && /^(SELECT|WITH)\b/i.test(statements[0]) && !isSparkWriteSql(statements[0])
+}
+
 /** 简易 SQL 表名提取(表级权限校验用;去掉库前缀与引号,过滤非表关键字) */
 export function extractTables(sql) {
   const s = String(sql || '').replace(/\/\*[\s\S]*?\*\//g, '')

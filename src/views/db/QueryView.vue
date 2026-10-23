@@ -2,11 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
-import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion } from '@element-plus/icons-vue'
+import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, Download } from '@element-plus/icons-vue'
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -20,10 +20,12 @@ defineOptions({ name: 'DbQueryView' })
 const datasources = ref<DbDataSource[]>([])
 const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
 const db = ref('')
-// Spark executor 数量设置(0=动态分配;正整数=固定数量),仅 sparksql 引擎显示
+// Spark executor 数量设置(0=动态分配;固定枚举 5/10/15/20),仅 sparksql 引擎显示
 const sparkExecutors = ref(0)
+const sparkExecutorsCommitted = ref(0)
 const sparkExecutorsLoading = ref(false)
 const loading = ref(false)
+const exportLoading = ref(false)
 const error = ref('')
 
 // 写权限密码验证已移除(由网关库权限矩阵管控 + 数据源 readOnly 兜底),以下直接执行
@@ -71,6 +73,59 @@ async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<
   }
   currentSparkJobId.value = ''
   throw new Error('任务超时(2 小时),已自动取消')
+}
+
+/** 导出当前 SparkSQL 语句到 HDFS；结果集不经过 driver collect，也不创建表格结果 tab。 */
+async function exportSparkResult() {
+  if (loading.value || exportLoading.value) return
+  if (engine.value !== 'sparksql') return
+  if (!ensureDb()) {
+    ElMessage.warning('请先选择数据库')
+    return
+  }
+  const rawSql = getSqlToRun().trim()
+  if (!rawSql) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  const sql = expandSqlVars(rawSql, collectRunVars(rawSql))
+  batchCancelled = false
+  exportLoading.value = true
+  loading.value = true
+  error.value = ''
+  try {
+    const { jobId } = await submitSparkExportJob(db.value, sql)
+    currentSparkJobId.value = jobId
+    const deadline = Date.now() + 7200000
+    while (Date.now() < deadline) {
+      if (batchCancelled) {
+        await cancelSparkJob(jobId).catch(() => undefined)
+        throw new Error('已取消')
+      }
+      const job = await getSparkJob(jobId)
+      if (job.state === 'done') {
+        const path = job.result?.hdfsPath
+        if (!path) throw new Error('导出任务完成，但未返回 HDFS 路径')
+        await ElMessageBox.alert(path, 'HDFS 导出完成', { confirmButtonText: '关闭' })
+        return
+      }
+      if (job.state === 'failed') throw new Error(job.error || 'HDFS 导出失败')
+      if (job.state === 'cancelled') throw new Error('已取消')
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+    }
+    await cancelSparkJob(jobId).catch(() => undefined)
+    throw new Error('导出超时(2 小时)，已请求取消')
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    if (message !== '已取消') {
+      error.value = message
+      ElMessage.error(message)
+    }
+  } finally {
+    currentSparkJobId.value = ''
+    exportLoading.value = false
+    loading.value = false
+  }
 }
 
 // ── 多文件 tab(最多 10 个)──────────────────────────────────
@@ -1491,7 +1546,14 @@ async function stopQuery() {
   batchCancelled = true
   runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
   try {
-    if (engine.value === 'flinksql') {
+    if (currentSparkJobId.value) {
+      try {
+        await cancelSparkJob(currentSparkJobId.value)
+      } catch {
+        /* 忽略 */
+      }
+      await cancelSpark()
+    } else if (engine.value === 'flinksql') {
       // 流式异步任务:精确取消当前 job;batch 同步查询走 cancelFlink
       if (currentFlinkJobId.value) {
         try {
@@ -1504,14 +1566,7 @@ async function stopQuery() {
         await cancelFlink()
       }
     } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
-      // 异步任务:优先精确取消当前 job,再兜底取消引擎当前 job group
-      if (currentSparkJobId.value) {
-        try {
-          await cancelSparkJob(currentSparkJobId.value)
-        } catch {
-          /* 忽略 */
-        }
-      }
+      // 同步请求或提交尚未拿到 jobId 时,按 Spark 当前 job group 取消
       await cancelSpark()
     } else if (currentDbJobId.value) {
       // mysql/oracle 异步任务:精确取消当前 job(查询可能仍在后台跑,结果丢弃)
@@ -1556,6 +1611,7 @@ onMounted(async () => {
   try {
     const st = (await sparkStatus()) as { config?: { executorInstances?: number } }
     sparkExecutors.value = st.config?.executorInstances ?? 0
+    sparkExecutorsCommitted.value = sparkExecutors.value
   } catch {
     /* 引擎未启用或不可达时忽略 */
   }
@@ -1570,20 +1626,25 @@ watch(engine, async (val) => {
 })
 
 /** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
-async function onSparkExecutorsChange(val: number | undefined, oldVal: number | undefined) {
-  if (sparkExecutorsLoading.value) return
-  if (val == null || !Number.isInteger(val) || val < 0) {
-    sparkExecutors.value = oldVal ?? 0
+async function onSparkExecutorsChange(val: number | undefined) {
+  const previous = sparkExecutorsCommitted.value
+  if (sparkExecutorsLoading.value) {
+    sparkExecutors.value = previous
+    return
+  }
+  if (val == null || ![0, 5, 10, 15, 20].includes(val)) {
+    sparkExecutors.value = previous
     return
   }
   sparkExecutorsLoading.value = true
   try {
     await setSparkExecutors(val)
+    sparkExecutorsCommitted.value = val
     if (val === 0) ElMessage.info('已切换为动态分配;下次 sparksql 查询生效')
     else ElMessage.info(`已设置固定 ${val} 个 executor;下次 sparksql 查询生效(需重建会话)`)
   } catch (e) {
     ElMessage.error(`设置失败:${e instanceof Error ? e.message : e}`)
-    sparkExecutors.value = oldVal ?? 0
+    sparkExecutors.value = previous
   } finally {
     sparkExecutorsLoading.value = false
   }
@@ -1610,22 +1671,22 @@ async function onSparkExecutorsChange(val: number | undefined, oldVal: number | 
         <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
-      <el-tooltip
+      <el-select
         v-if="engine === 'sparksql'"
-        content="0 表示动态分配；正整数表示固定 executor 数量"
-        placement="top"
+        v-model="sparkExecutors"
+        class="executor-select"
+        placeholder="Executor 数量"
+        :loading="sparkExecutorsLoading"
+        :disabled="loading"
+        @change="onSparkExecutorsChange"
       >
-        <el-input-number
-          v-model="sparkExecutors"
-          class="executor-input"
-          :min="0"
-          :step="1"
-          step-strictly
-          :disabled="sparkExecutorsLoading || loading"
-          controls-position="right"
-          @change="onSparkExecutorsChange"
-        />
-      </el-tooltip>
+        <el-option label="动态分配(自适应)" :value="0" />
+        <el-option v-if="sparkExecutors > 0 && ![5, 10, 15, 20].includes(sparkExecutors)" :label="`当前配置(${sparkExecutors} 个)`" :value="sparkExecutors" />
+        <el-option label="5 个" :value="5" />
+        <el-option label="10 个" :value="10" />
+        <el-option label="15 个" :value="15" />
+        <el-option label="20 个" :value="20" />
+      </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
@@ -1661,6 +1722,9 @@ async function onSparkExecutorsChange(val: number | undefined, oldVal: number | 
       <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" :disabled="loading" @click="formatSql" /></el-tooltip>
       <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" :loading="explainLoading" :disabled="loading" @click="runExplain" /></el-tooltip>
       <el-tooltip v-if="loading" content="停止" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery" /></el-tooltip>
+      <el-tooltip v-if="engine === 'sparksql'" content="导出当前 SQL 完整结果到 HDFS" placement="top">
+        <el-button :icon="Download" :loading="exportLoading" :disabled="loading && !exportLoading" @click="exportSparkResult">导出到 HDFS</el-button>
+      </el-tooltip>
       <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" :loading="loading" :disabled="loading" @click="runQuery" /></el-tooltip>
       </div>
       <el-divider direction="vertical" />
@@ -2069,7 +2133,7 @@ async function onSparkExecutorsChange(val: number | undefined, oldVal: number | 
   width: 96px;
 }
 
-.executor-input {
+.executor-select {
   width: 120px;
 }
 

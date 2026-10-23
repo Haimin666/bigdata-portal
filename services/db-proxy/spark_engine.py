@@ -43,6 +43,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from typing import Any, Dict, List, Optional
 
 
@@ -64,6 +65,28 @@ WRITE_KW = re.compile(
 
 def _strip_comments(sql: str) -> str:
     return re.sub(r"--[^\n]*|/\*[\s\S]*?\*/", "", sql).strip()
+
+
+def _has_unquoted_semicolon(sql: str) -> bool:
+    quote = ""
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if quote:
+            if ch == "\\" and i + 1 < len(sql):
+                i += 2
+                continue
+            if ch == quote:
+                if i + 1 < len(sql) and sql[i + 1] == quote:
+                    i += 2
+                    continue
+                quote = ""
+        elif ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == ";":
+            return True
+        i += 1
+    return False
 
 
 _FILE_NOT_FOUND_MARKS = (
@@ -609,6 +632,88 @@ class SparkEngine:
                     timer.cancel()
                 self._end_job()
 
+    def export_sql(self, sql: str, job_id: str, timeout_ms: int = 7200000) -> Dict[str, Any]:
+        """Write a single read-only Spark SQL result to HDFS without collecting rows on the driver."""
+        if not self.enabled:
+            raise RuntimeError("spark engine not enabled (datasources.json spark.enabled=false)")
+        clean = _strip_comments(sql)
+        if not clean:
+            raise ValueError("empty sql")
+        if len(clean) > int(self.cfg.get("maxSqlLen", 65536)):
+            raise ValueError("sql too long")
+        if not re.match(r"^(SELECT|WITH)\b", clean, re.IGNORECASE):
+            raise ValueError("HDFS export only supports SELECT/WITH queries")
+
+        # Allow one optional trailing semicolon, but reject SQL statement chaining.
+        code = clean.rstrip()
+        if code.endswith(";"):
+            code = code[:-1].strip()
+        if _has_unquoted_semicolon(code):
+            raise ValueError("HDFS export accepts one SQL statement")
+        if not code:
+            raise ValueError("empty sql")
+
+        root = str(self.cfg.get("exportPath") or "hdfs:///tmp/db-proxy-spark-exports").rstrip("/")
+        if not root.startswith("hdfs://"):
+            raise ValueError("spark.exportPath must be an HDFS URI")
+        export_id = "%s_%s" % (job_id, uuid.uuid4().hex)
+        final_path = "%s/spark_export_%s" % (root, export_id)
+        staging_path = "%s/.staging_spark_export_%s" % (root, export_id)
+        start = time.time()
+        self._audit("export start job=%s sql=%s path=%s" % (job_id, code[:300], final_path))
+
+        with self._lock:
+            self._ensure_initialized()
+            spark = self._spark
+            gid = self._begin_job()
+            timer: Optional[threading.Timer] = None
+            if timeout_ms and timeout_ms > 0:
+                timer = threading.Timer(timeout_ms / 1000.0, self.cancel)
+                timer.daemon = True
+                timer.start()
+            fs = None
+            staging = None
+            try:
+                df = spark.sql(code)
+                hadoop_path = spark._jvm.org.apache.hadoop.fs.Path
+                staging = hadoop_path(staging_path)
+                target = hadoop_path(final_path)
+                fs = staging.getFileSystem(spark._jsc.hadoopConfiguration())
+                if fs.exists(target):
+                    raise RuntimeError("HDFS export path already exists")
+                if fs.exists(staging):
+                    raise RuntimeError("HDFS export staging path already exists")
+
+                (df.write.mode("errorifexists")
+                    .option("header", "true")
+                    .option("encoding", "UTF-8")
+                    .csv(staging_path))
+                self._raise_if_cancelled()
+                if not fs.rename(staging, target):
+                    raise RuntimeError("failed to publish HDFS export path")
+                result = {
+                    "hdfsPath": final_path,
+                    "costMs": int((time.time() - start) * 1000),
+                }
+                self._audit("export done job=%s cost=%dms path=%s" % (job_id, result["costMs"], final_path))
+                return result
+            except Exception as e:
+                if fs is not None and staging is not None:
+                    try:
+                        if fs.exists(staging):
+                            fs.delete(staging, True)
+                    except Exception:
+                        pass
+                if self._cancel_flag.is_set():
+                    self._audit("export CANCELLED job=%s after %dms" % (job_id, int((time.time() - start) * 1000)))
+                    raise RuntimeError("导出已停止(用户取消或超时)")
+                self._audit("export FAILED job=%s: %s\n%s" % (job_id, e, traceback.format_exc()))
+                raise RuntimeError(_format_spark_error(e))
+            finally:
+                if timer:
+                    timer.cancel()
+                self._end_job()
+
     # ── PySpark 代码执行(信任模式 + 审计)──────────────────────
     def execute_code(
         self, code: str, timeout_ms: int = 600000, write_unlocked: bool = False
@@ -918,6 +1023,8 @@ class SparkJobManager:
         try:
             if j["kind"] == "pyspark":
                 result = self._engine.execute_code(j["sql"], j["timeout_ms"], j["write_unlocked"])
+            elif j["kind"] == "export":
+                result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"])
             else:
                 result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
             j["result"] = result

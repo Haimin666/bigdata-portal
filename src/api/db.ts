@@ -256,7 +256,7 @@ export interface SparkJobInfo {
   createdAt?: number
   startedAt?: number
   finishedAt?: number
-  result?: DbQueryResult
+  result?: DbQueryResult & { hdfsPath?: string }
   error?: string
   logs?: string[]
   executedSql?: string
@@ -285,6 +285,32 @@ export async function submitSparkJob(
   }
   const body = (await res.json()) as ApiResponse<{ jobId: string }>
   if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '提交失败')
+  return body.data as { jobId: string }
+}
+
+/** 提交 Spark SQL 全量结果 HDFS CSV 导出任务。 */
+export async function submitSparkExportJob(
+  db: string,
+  sql: string,
+  timeoutMs = 7200000
+): Promise<{ jobId: string }> {
+  const res = await fetch('/api/spark/export/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ db, sql, timeoutMs })
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const body = (await res.json()) as ApiResponse<unknown>
+      msg = body.detail || body.msg || msg
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(msg)
+  }
+  const body = (await res.json()) as ApiResponse<{ jobId: string }>
+  if (body.code !== undefined && body.code !== 0) throw new Error(body.detail || body.msg || '导出任务提交失败')
   return body.data as { jobId: string }
 }
 

@@ -35,7 +35,7 @@
 |---|---|---|---|---|
 | mysql/oracle/doris | db-proxy `/query`(同步)/ `/jobs`(异步任务) | **写权限密码验证已移除**:库访问权由数据权限矩阵管控,数据源 `readOnly` 与 db-proxy 资源护栏兑底;写操作(UPDATE/INSERT/DELETE/DDL)记审计日志 | db-proxy `queryTimeout`;异步默认 1h 可配 | 直连;异步任务提交由网关专用路由处理(非透传),EXEC_GATES 拦 viewer |
 | impala | db-proxy `/jobs`(异步任务),Impala HS2/21050 | 数据权限矩阵;数据源可设 `readOnly`;AI 修复仅对只读 SQL 启用 | 数据源 `queryTimeout`;异步默认 1h | impyla 直连;支持表/字段/DDL/schema/EXPLAIN 元数据、服务端 SQL 类型自动检查;可选服务端 AI 修复,每次尝试与诊断通过 job logs 回显,连接/认证/权限/超时错误不触发 AI |
-| sparksql | db-proxy `/spark/query`(常驻 client session) | 写语句需网关写拦截(isSparkWriteSql);**已移除独立解锁弹窗**,权限由数据权限矩阵 + db-proxy 护栏管控 | **前端/门户/db-proxy 统一 120s**,超时自动 cancelJobGroup | 串行锁;FileNotFound 自动 REFRESH 重试一次 |
+| sparksql | db-proxy `/spark/query`(常驻 client session);HDFS 导出复用 Spark 异步 job | 写语句需网关写拦截(isSparkWriteSql);**已移除独立解锁弹窗**,权限由数据权限矩阵 + db-proxy 护栏管控 | **前端/门户/db-proxy 统一 120s**,超时自动 cancelJobGroup | 串行锁;FileNotFound 自动 REFRESH 重试一次;独立导出将只读 SQL 结果写为 HDFS CSV 目录 |
 | pyspark | 同上 `kind=pyspark` | 同上(与 sparksql 同通道) | 同上 | 前端已移除入口,后端保留给 Jupyter |
 | flinksql | db-proxy `/flink/query` | 同上(写权限同 spark 体系) | `queryTimeout`(默认 300s) | 流/批双模式;流查询 collect 到 limit 行返回 |
 | flink prejob | db-proxy `/flink/prejob/jobs`(yarn-per-job) | **已移除解锁要求**:直接提交,写凭证由网关自动携带(db-proxy 侧共享密钥校验防直连) | `submitTimeout`(默认 120s) | pyflink 脚本封装;作业列表/日志/停止走 PREJOB 管理 |
@@ -46,7 +46,7 @@
 - **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
 - **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
-- **Spark 查询结果限制**:Spark SQL 无显式 `LIMIT` 和 PySpark DataFrame 结果默认按 `defaultLimit` 收集 1,000 行;显式 SQL 行数上限最高为 `maxLimit`(默认 500,000)。结果读取最多拉取有效上限 + 1 行并设置 `truncated`;不先统计完整结果,也不自动导出 HDFS。
+- **Spark 查询结果限制与导出**:普通 Spark SQL 无显式 `LIMIT` 和 PySpark DataFrame 结果默认按 `defaultLimit` 收集 1,000 行;显式 SQL 行数上限最高为 `maxLimit`(默认 500,000)。普通查询最多读取有效上限 + 1 行并设置 `truncated`。SparkSQL 工具栏另有独立「导出到 HDFS」操作，接受单条只读 `SELECT/WITH`，由 Spark 直接写带表头 CSV 目录，不受结果行数上限限制，也不把全量结果 collect 到 driver；任务异步执行、可取消，完成后仅返回 HDFS 路径。根目录为 `spark.exportPath`，默认 `hdfs:///tmp/db-proxy-spark-exports`，每次导出使用唯一子目录，失败时不发布最终路径。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
@@ -91,7 +91,7 @@
 - `sparkHome`、YARN client 配置和 `sparkConf` 在 `datasources.json` 中配置；SparkSession 首次创建后常驻，修改配置或服务 Python 环境后必须重启 db-proxy。
 - Spark Hadoop codec 覆盖配置放在 `spark.sparkConf`：`spark.hadoop.io.compression.codecs` 显式列出可用 codec，排除当前环境缺失的 LZO codec；同时将 `spark.hadoop.io.compression.codec.lzo.class` 设为空字符串。前者负责覆盖 codec 列表，修改后需重启 db-proxy 重建 SparkSession。
 - YARN application 被外部终止时，下一次请求检测到 SparkContext stopped 后先调用旧 SparkSession 的 `stop()` 清理 PySpark 与 JVM 默认 session 状态，再通过 `getOrCreate()` 重建，避免复用已停止的 context。
-- 工作台 SparkSQL 工具栏支持输入任意非负 executor 数量：0 表示动态分配，正整数表示固定数量；设置后当前 session 安全停止，下一次查询按新配置重建。执行、保活和 session 生命周期变更串行；取消和 stage 进度轮询仍可在查询期间运行。
+- 工作台 SparkSQL 工具栏使用枚举选择：动态分配(自适应)或固定 5/10/15/20 个 executor；服务端已有的非枚举固定值也会作为当前项显示，不自动变更。选择后当前 session 安全停止，下一次查询按新配置重建。执行、保活和 session 生命周期变更串行；取消和 stage 进度轮询仍可在查询期间运行。
 
 ## 6. 外部 API Token（网关侧）
 
