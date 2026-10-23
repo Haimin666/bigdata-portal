@@ -33,11 +33,13 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import itertools
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import traceback
@@ -305,6 +307,15 @@ class SparkEngine:
             spark_bin = os.path.join(spark_home, "bin")
             if spark_bin not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = spark_bin + os.pathsep + os.environ.get("PATH", "")
+            spark_python_zips = sorted(glob.glob(os.path.join(spark_home, "python", "lib", "*.zip")))
+            for path in reversed(spark_python_zips):
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+            if spark_python_zips:
+                existing_pythonpath = os.environ.get("PYTHONPATH", "")
+                os.environ["PYTHONPATH"] = os.pathsep.join(
+                    spark_python_zips + ([existing_pythonpath] if existing_pythonpath else [])
+                )
 
         from pyspark import SparkConf
         from pyspark.sql import SparkSession

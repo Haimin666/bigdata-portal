@@ -14,5 +14,5 @@ impyla==0.23.0
 sqlglot==25.34.1
 # Spark 引擎(可选):仅启用 datasources.json 的 spark 段时需要。
 # Spark 4.2 / PySpark 4.2 要求 Python 3.10+、Java 17+;db-proxy 核心可继续使用较低版本 Python。
-# PySpark 版本必须与 sparkHome 中的 Spark 保持一致,并安装在 db-proxy 的 Python 环境。
+# PySpark 版本必须与 sparkHome 中的 Spark 保持一致;引擎从 sparkHome/python/lib/*.zip 加载。
 # pyspark==4.2.*

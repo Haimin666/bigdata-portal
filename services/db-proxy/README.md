@@ -173,14 +173,15 @@ SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock
   `GET /spark/logs?offset=N` 增量读取
 
 **依赖**:Spark 4.2 要求 Python 3.10+、Java 17+；当前部署使用 Python 3.12，
-并确保 PySpark 与 `sparkHome` 中的 Spark 版本匹配。client 模式的 driver 在 db-proxy
+并确保 Spark 安装目录中的 PySpark 与 Spark 版本匹配。client 模式的 driver 在 db-proxy
 进程内运行，因此服务本身必须由 Python 3.12 启动；YARN executors 使用 HDFS archives
-中的 Python 环境。运行机器需可提交 YARN(需 `HADOOP_CONF_DIR`)并直连 Hive Metastore。
+中的 Python 环境。引擎会将 `$SPARK_HOME/python/lib/*.zip` 加入进程 `sys.path` 和
+`PYTHONPATH`，无需在启动脚本里手工设置。运行机器需可提交 YARN(需 `HADOOP_CONF_DIR`)并直连 Hive Metastore。
 Session 创建 30~90s,首个请求等待,之后复用。
 
-启动 db-proxy 的服务环境设置如下；服务进程本身由 Python 3.12 启动，`PYTHONPATH`
-保持清除。YARN 侧的 JDK/Python 通过 `spark.archives` 分发；归档解压后的路径应与
-`spark.pyspark.python` 等配置一致。
+启动 db-proxy 的服务环境设置如下；服务进程本身由 Python 3.12 启动。YARN 侧的
+JDK/Python 通过 `spark.archives` 分发；归档解压后的路径应与 `spark.pyspark.python`
+等配置一致。
 
 ```bash
 export SPARK_HOME=/opt/spark/spark4/spark4.2
