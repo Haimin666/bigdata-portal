@@ -1,13 +1,15 @@
-import io
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
+import spark_thrift_engine
 try:
     from spark_thrift_engine import SparkThriftEngine
 except ModuleNotFoundError:
@@ -15,10 +17,16 @@ except ModuleNotFoundError:
 
 
 class BeelineProcess:
+    processes = {}
+
     def __init__(self, stdout="", stderr="", returncode=0, blocked=False,
                  timeout=False, ignore_terminate=False):
-        self.stdout = io.StringIO(stdout)
-        self.stderr = io.StringIO(stderr)
+        self.stdout = tempfile.TemporaryFile(buffering=0)
+        self.stderr = tempfile.TemporaryFile(buffering=0)
+        self.stdout.write(stdout.encode("utf-8"))
+        self.stderr.write(stderr.encode("utf-8"))
+        self.stdout.seek(0)
+        self.stderr.seek(0)
         self.returncode = None
         self.exit_code = returncode
         self.started = threading.Event()
@@ -28,6 +36,8 @@ class BeelineProcess:
         self.ignore_terminate = ignore_terminate
         self.terminated = False
         self.killed = False
+        self.pid = 100000 + len(self.processes)
+        self.processes[self.pid] = self
 
     def wait(self, timeout=None):
         self.started.set()
@@ -58,6 +68,12 @@ class SparkThriftEngineTests(unittest.TestCase):
         self.assertIsNotNone(SparkThriftEngine, "SparkThriftEngine adapter is missing")
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        def kill_group(pid, sig):
+            process = BeelineProcess.processes[pid]
+            (process.terminate if sig == signal.SIGTERM else process.kill)()
+        group_patch = patch("spark_thrift_engine.os.killpg", side_effect=kill_group)
+        self.kill_group = group_patch.start()
+        self.addCleanup(group_patch.stop)
 
     def engine(self, **cfg):
         return SparkThriftEngine({"enabled": True, **cfg}, self.temp_dir.name)
@@ -163,6 +179,13 @@ class SparkThriftEngineTests(unittest.TestCase):
         process = BeelineProcess("id\n1\n", "executing\n", blocked=True)
         engine = self.engine()
         errors = []
+        logged = threading.Event()
+        original_log = engine._log
+
+        def observe_log(name, text):
+            original_log(name, text)
+            if "executing" in text:
+                logged.set()
 
         def execute():
             try:
@@ -170,19 +193,27 @@ class SparkThriftEngineTests(unittest.TestCase):
             except RuntimeError as error:
                 errors.append(str(error))
 
-        with patch("spark_thrift_engine.subprocess.Popen", return_value=process):
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=process), \
+                patch.object(engine, "_log", side_effect=observe_log):
             worker = threading.Thread(target=execute)
             worker.start()
-            self.assertTrue(process.started.wait(1))
-            self.assertTrue(engine.status()["busy"])
-            self.assertIn("executing", engine.read_logs()["content"])
-            engine.cancel()
-            worker.join(2)
+            try:
+                self.assertTrue(process.started.wait(1))
+                self.assertTrue(logged.wait(1))
+                self.assertTrue(engine.status()["busy"])
+                self.assertIn("executing", engine.read_logs()["content"])
+            finally:
+                engine.cancel()
+                worker.join(2)
         self.assertFalse(worker.is_alive())
         self.assertTrue(process.terminated)
         self.assertEqual(len(errors), 1)
         self.assertRegex(errors[0], "取消|cancel")
         self.assertFalse(engine.status()["busy"])
+        self.kill_group.assert_any_call(process.pid, signal.SIGTERM)
+        self.kill_group.assert_any_call(process.pid, signal.SIGKILL)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
 
     def test_secret_redaction_covers_logs_status_and_failure(self):
         engine = self.engine()
@@ -195,7 +226,8 @@ class SparkThriftEngineTests(unittest.TestCase):
 
     def test_jdbc_secrets_are_rejected_before_they_can_enter_process_arguments(self):
         for jdbc in ("jdbc:hive2://local/default;password=jdbc-secret",
-                     "jdbc:hive2://user:jdbc-secret@local/default"):
+                     "jdbc:hive2://user:jdbc-secret@local/default",
+                     'jdbc:hive2://user:"jdbc-secret suffix,& tail"@local/default'):
             with self.subTest(jdbc=jdbc):
                 engine = self.engine(jdbcUrl=jdbc)
                 with patch("spark_thrift_engine.subprocess.Popen") as popen:
@@ -203,6 +235,7 @@ class SparkThriftEngineTests(unittest.TestCase):
                         engine.execute_sql("SELECT 1")
                 popen.assert_not_called()
                 self.assertNotIn("jdbc-secret", str(engine.status()))
+                self.assertNotIn("suffix", str(engine.status()))
 
     def test_malformed_csv_fails_instead_of_returning_successful_rows(self):
         with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess("id,name\n1\n")):
@@ -277,6 +310,123 @@ class SparkThriftEngineTests(unittest.TestCase):
         args = popen.call_args.args[0]
         self.assertEqual(args[args.index("-e") + 1], "SHOW DATABASES")
         self.assertEqual(result["rows"], [{"namespace": "default"}])
+
+    def test_secret_assignments_redact_spaces_and_delimiters_completely(self):
+        for assignment in ('password="alpha beta,gamma&delta"',
+                           "token='alpha beta,gamma&delta'", "pwd=alpha beta,gamma&delta"):
+            with self.subTest(assignment=assignment):
+                engine = self.engine(jdbcUrl="jdbc:hive2://local/default;" + assignment)
+                for value in (engine.status()["config"]["jdbcUrl"], engine._redact(assignment)):
+                    for fragment in ("alpha", "beta", "gamma", "delta"):
+                        self.assertNotIn(fragment, value)
+                engine._log("jvm", assignment + "\n")
+                self.assertNotIn("delta", engine.read_logs()["content"])
+
+    def test_logs_keep_bounded_tail_and_monotonic_offsets_across_overflow(self):
+        engine = self.engine()
+        with patch.object(spark_thrift_engine, "MAX_LOG_BYTES", 64, create=True), \
+                patch.object(spark_thrift_engine, "LOG_READ_BYTES", 16, create=True):
+            engine._log("jvm", "a" * 50)
+            first = engine.read_logs()
+            engine._log("jvm", "b" * 50)
+            replay = engine.read_logs({"jvm": 0})
+            self.assertLessEqual(len(engine._logs["jvm"]), 64)
+            self.assertLessEqual(len(replay["content"].encode("utf-8")), 16)
+            self.assertEqual(replay["files"]["jvm"], 100)
+            self.assertGreater(replay["offsets"]["jvm"], first["offsets"]["jvm"])
+            self.assertEqual(replay["content"], "a" * 14 + "b" * 2)
+            engine._log("audit", "c" * 100)
+            self.assertLessEqual(len(engine._logs["audit"]), 64)
+            self.assertLessEqual(len(engine.read_logs()["content"].encode("utf-8")), 32)
+
+    def test_long_diagnostic_line_and_returned_errors_are_bounded(self):
+        engine = self.engine()
+        with patch("spark_thrift_engine.subprocess.Popen",
+                   return_value=BeelineProcess(stderr="x" * 100000 + "\n", returncode=1)):
+            with self.assertRaises(RuntimeError) as caught:
+                engine.execute_sql("SELECT 1")
+        self.assertLess(len(str(caught.exception).encode("utf-8")), 4096)
+        self.assertLess(len(engine.read_logs()["content"].encode("utf-8")), 16384)
+
+    def test_posix_timeout_uses_own_session_and_kills_process_group(self):
+        process = BeelineProcess(timeout=True, ignore_terminate=True)
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=process) as popen:
+            with self.assertRaisesRegex(RuntimeError, "timeout"):
+                self.engine().execute_sql("SELECT 1", timeout_ms=1)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.kill_group.assert_any_call(process.pid, signal.SIGTERM)
+        self.kill_group.assert_any_call(process.pid, signal.SIGKILL)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_output_reader_shutdown_has_bounded_wait_even_if_pipe_stays_open(self):
+        class StuckReader:
+            def __init__(self, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                if timeout is None:
+                    raise AssertionError("reader shutdown must have a deadline")
+
+            def is_alive(self):
+                return True
+
+        engine = self.engine()
+        process = BeelineProcess()
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=process), \
+                patch("spark_thrift_engine.threading.Thread", StuckReader):
+            with self.assertRaisesRegex(RuntimeError, "reader|output"):
+                engine.execute_sql("SELECT 1")
+        self.assertFalse(engine.status()["busy"])
+        self.assertTrue(process.stdout.closed)
+        self.kill_group.assert_any_call(process.pid, signal.SIGKILL)
+
+    def test_csv_fields_at_eight_mib_are_supported(self):
+        value = "x" * (8 * 1024 * 1024)
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess("value\n" + value + "\n")):
+            result = self.engine().execute_sql("SELECT value FROM source")
+        self.assertEqual(result["rows"], [{"value": value}])
+
+    def test_csv_field_above_eight_mib_reports_explicit_limit(self):
+        value = "x" * (8 * 1024 * 1024 + 1)
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess("value\n" + value + "\n")):
+            with self.assertRaisesRegex(RuntimeError, "8 MiB"):
+                self.engine().execute_sql("SELECT value FROM source")
+
+    def test_csv_field_limit_counts_utf8_bytes(self):
+        value = "界" * (8 * 1024 * 1024 // 3 + 1)
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess("value\n" + value + "\n")):
+            with self.assertRaisesRegex(RuntimeError, "8 MiB"):
+                self.engine().execute_sql("SELECT value FROM source")
+
+    def test_real_pipe_readers_exit_when_a_descendant_keeps_pipe_open(self):
+        process = BeelineProcess()
+        process.stdout.close()
+        reader_fd, writer_fd = os.pipe()
+        process.stdout = os.fdopen(reader_fd, "rb", buffering=0)
+        self.addCleanup(os.close, writer_fd)
+        created = []
+        real_thread = threading.Thread
+
+        def create_reader(**kwargs):
+            thread = real_thread(**kwargs)
+            created.append(thread)
+            return thread
+
+        engine = self.engine()
+        started = time.monotonic()
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=process), \
+                patch("spark_thrift_engine.threading.Thread", side_effect=create_reader), \
+                patch.object(spark_thrift_engine, "READER_WAIT_SECONDS", 0.05):
+            with self.assertRaisesRegex(RuntimeError, "output readers"):
+                engine.execute_sql("SELECT 1")
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(all(not thread.is_alive() for thread in created))
+        self.assertTrue(process.stdout.closed)
+        self.assertFalse(engine.status()["busy"])
 
 
 if __name__ == "__main__":

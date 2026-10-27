@@ -1,14 +1,71 @@
 """Spark SQL transport through a local Beeline process (no SparkSession)."""
 
 import csv
+from collections import deque
 import os
 import re
+import select
+import signal
 import subprocess
 import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
+
+
+# Logs retain the latest 1 MiB per channel; each poll reads at most 64 KiB/channel.
+MAX_LOG_BYTES = 1024 * 1024
+LOG_READ_BYTES = 64 * 1024
+LOG_LINE_BYTES = 4096
+MAX_CSV_FIELD_BYTES = 8 * 1024 * 1024
+READER_WAIT_SECONDS = 2
+STOP_WAIT_SECONDS = 1
+# csv exposes only a process-wide character ceiling. Enforce UTF-8 bytes below too.
+csv.field_size_limit(MAX_CSV_FIELD_BYTES)
+_SECRET_ASSIGNMENT = re.compile(
+    r'''(?ix)\b(password|passwd|pwd|token|secret)\b(\s*[=:]\s*)
+    ("(?:\\.|""|[^"\\])*(?:"|$)|'(?:\\.|''|[^'\\])*(?:'|$)|[^\r\n]+)''')
+
+
+def _pipe_lines(stream, stop, max_line_bytes, truncate=False):
+    """Read bounded chunks; POSIX pipes never block shutdown waiting for EOF."""
+    pending = bytearray()
+    discarded = False
+    fd = stream.fileno()
+    while not stop.is_set():
+        if os.name == "posix" and not select.select([fd], [], [], 0.05)[0]:
+            continue
+        try:
+            chunk = os.read(fd, 8192)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            if pending:
+                yield pending.decode("utf-8", errors="replace")
+            return
+        pieces = chunk.split(b"\n")
+        for index, piece in enumerate(pieces):
+            ceiling = max_line_bytes()
+            if not discarded:
+                if len(pending) + len(piece) > ceiling:
+                    if not truncate:
+                        raise ValueError("Beeline CSV2 field exceeds the 8 MiB limit")
+                    pending.extend(piece[:max(0, ceiling - len(pending))])
+                    discarded = True
+                else:
+                    pending.extend(piece)
+            if index < len(pieces) - 1:
+                yield pending.decode("utf-8", errors="replace") + "\n"
+                pending.clear()
+                discarded = False
+
+
+def _join_readers(readers, timeout):
+    deadline = time.monotonic() + timeout
+    for reader in readers:
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+    return all(not reader.is_alive() for reader in readers)
 
 
 def _mask_sql(sql: str) -> str:
@@ -67,6 +124,7 @@ class SparkThriftEngine:
         self._stop_lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._logs = {"jvm": bytearray(), "audit": bytearray()}
+        self._log_ends = {"jvm": 0, "audit": 0}
         self._process = None
         self._cancel_flag = threading.Event()
         self._state = "idle" if self.enabled else "disabled"
@@ -80,19 +138,23 @@ class SparkThriftEngine:
     def _redact(self, value: Any) -> str:
         text = str(value)
         secrets = [str(self.cfg.get("password") or "")]
-        secrets.extend(re.findall(r"(?i)(?:password|passwd|pwd|token|secret)\s*=\s*([^;\s&,]+)",
-                                  str(self.cfg.get("jdbcUrl", ""))))
+        secrets.extend(match.group(3).strip("\"'") for match in
+                       _SECRET_ASSIGNMENT.finditer(str(self.cfg.get("jdbcUrl", ""))))
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[REDACTED]")
-        text = re.sub(r"://[^/@\s]+:[^/@\s]+@", "://[REDACTED]@", text)
-        return re.sub(r"(?i)(password|passwd|pwd|token|secret)(\s*[=:]\s*)([^;\s&,]+)",
-                      r"\1\2[REDACTED]", text)
+        text = re.sub(r"://[^/@\r\n]+:[^/@\r\n]+@", "://[REDACTED]@", text)
+        return _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
 
     def _log(self, name: str, text: str) -> None:
         data = self._redact(text).encode("utf-8")
         with self._log_lock:
+            self._log_ends[name] += len(data)
             self._logs[name].extend(data)
+            if len(self._logs[name]) > MAX_LOG_BYTES:
+                del self._logs[name][:-MAX_LOG_BYTES]
+                while self._logs[name] and self._logs[name][0] & 0xC0 == 0x80:
+                    del self._logs[name][0]
 
     def status(self) -> Dict[str, Any]:
         with self._state_lock:
@@ -118,24 +180,40 @@ class SparkThriftEngine:
         positions = {}
         with self._log_lock:
             for name, data in self._logs.items():
-                offset = max(0, min(int(offsets.get(name, 0)), len(data)))
-                content.append(bytes(data[offset:]).decode("utf-8", errors="replace"))
-                positions[name] = len(data)
-        return {"content": "".join(content), "offsets": positions, "files": dict(positions)}
+                base = self._log_ends[name] - len(data)
+                offset = max(base, min(int(offsets.get(name, 0)), self._log_ends[name])) - base
+                end = min(offset + LOG_READ_BYTES, len(data))
+                while end < len(data) and data[end] & 0xC0 == 0x80:
+                    end -= 1
+                content.append(bytes(data[offset:end]).decode("utf-8", errors="replace"))
+                positions[name] = base + end
+            files = dict(self._log_ends)
+        return {"content": "".join(content), "offsets": positions, "files": files}
 
     def _terminate(self, process) -> None:
         with self._stop_lock:
-            if process.poll() is not None:
-                return
+            def send(sig):
+                try:
+                    if os.name == "posix":
+                        os.killpg(process.pid, sig)
+                    elif sig == signal.SIGTERM:
+                        process.terminate()
+                    else:
+                        process.kill()
+                except ProcessLookupError:
+                    pass
+
+            send(signal.SIGTERM)
             try:
-                process.terminate()
-            except ProcessLookupError:
-                return
-            try:
-                process.wait(timeout=5)
+                process.wait(timeout=STOP_WAIT_SECONDS)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                pass
+            # The parent may exit before children that still hold stdout/stderr open.
+            send(signal.SIGKILL)
+            try:
+                process.wait(timeout=STOP_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Beeline process did not stop after SIGKILL") from None
 
     def cancel(self) -> bool:
         with self._state_lock:
@@ -186,7 +264,7 @@ class SparkThriftEngine:
             raise RuntimeError("spark engine not enabled")
         if self.cfg.get("password"):
             raise ValueError("spark.password is unsupported; use the no-password Thrift connection")
-        if re.search(r"(?i)(?:password|passwd|pwd|token|secret)\s*=|://[^/@\s]+:[^/@\s]+@",
+        if re.search(r"(?i)(?:password|passwd|pwd|token|secret)\s*=|://[^/@\r\n]+:[^/@\r\n]+@",
                      str(self.cfg.get("jdbcUrl", ""))):
             raise ValueError("JDBC credentials are unsupported; use the no-password Thrift connection")
         if not sql.strip():
@@ -204,26 +282,37 @@ class SparkThriftEngine:
             readers = []
             columns = []
             rows = []
-            diagnostics = []
+            diagnostics = deque(maxlen=20)
             parse_errors = []
             truncated = False
+            stop_readers = threading.Event()
 
-            def lines(stream):
-                for line in stream:
-                    self._log("jvm", line)
-                    diagnostics.append(self._redact(line))
-                    if len(diagnostics) > 20:
-                        diagnostics.pop(0)
+            def lines(stream, csv_output=False):
+                if csv_output:
+                    max_line = lambda: max(1, len(columns)) * (2 * MAX_CSV_FIELD_BYTES + 3)
+                else:
+                    max_line = lambda: LOG_LINE_BYTES
+                for line in _pipe_lines(stream, stop_readers, max_line, truncate=not csv_output):
+                    excerpt = self._redact(line[:LOG_LINE_BYTES]).encode("utf-8")[:LOG_LINE_BYTES]
+                    text = excerpt.decode("utf-8", errors="replace")
+                    self._log("jvm", text + ("\n" if not text.endswith("\n") else ""))
+                    diagnostics.append(text)
                     yield line
+
+            def check_fields(record):
+                if any(len(field.encode("utf-8")) > MAX_CSV_FIELD_BYTES for field in record):
+                    raise ValueError("Beeline CSV2 field exceeds the 8 MiB limit")
 
             def read_stdout():
                 nonlocal columns, truncated
                 try:
-                    records = csv.reader(lines(process.stdout), strict=True)
+                    records = csv.reader(lines(process.stdout, csv_output=True), strict=True)
                     columns = next(records, [])
+                    check_fields(columns)
                     for record in records:
                         if not record:
                             continue
+                        check_fields(record)
                         if len(record) != len(columns):
                             raise ValueError("invalid Beeline CSV2 row width")
                         if len(rows) < limit:
@@ -232,7 +321,11 @@ class SparkThriftEngine:
                         else:
                             truncated = True
                 except Exception as error:
-                    parse_errors.append(self._redact(error))
+                    if isinstance(error, csv.Error) and "field larger" in str(error):
+                        message = "Beeline CSV2 field exceeds the 8 MiB limit"
+                    else:
+                        message = self._redact(error)
+                    parse_errors.append(message)
                     # Continue draining the pipe so malformed output cannot block Beeline.
                     for _line in lines(process.stdout):
                         pass
@@ -252,8 +345,11 @@ class SparkThriftEngine:
                                             " -Ddisable.quoting.for.sv=false").strip()
                 self._log("audit", "Beeline SQL started\n")
                 process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                           stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
-                                           errors="replace", env=env)
+                                           stdin=subprocess.DEVNULL, bufsize=0, env=env,
+                                           start_new_session=os.name == "posix")
+                if os.name == "posix":
+                    os.set_blocking(process.stdout.fileno(), False)
+                    os.set_blocking(process.stderr.fileno(), False)
                 with self._state_lock:
                     self._process = process
                 for target in (read_stdout, read_stderr):
@@ -268,8 +364,9 @@ class SparkThriftEngine:
                     self._cancel_flag.set()
                     self._terminate(process)
                     raise RuntimeError("查询超时(timeout)，Beeline 已停止")
-                for reader in readers:
-                    reader.join()
+                if not _join_readers(readers, READER_WAIT_SECONDS):
+                    self._terminate(process)
+                    raise RuntimeError("Beeline output readers did not finish")
                 if self._cancel_flag.is_set():
                     raise RuntimeError("查询已取消(cancelled)")
                 if exit_code:
@@ -290,13 +387,15 @@ class SparkThriftEngine:
                     self._last_error = message
                 raise RuntimeError(message) from None
             finally:
-                if process is not None:
-                    if process.poll() is None:
-                        self._terminate(process)
-                    for reader in readers:
-                        reader.join()
-                    process.stdout.close()
-                    process.stderr.close()
-                with self._state_lock:
-                    self._process = None
-                    self._busy = False
+                try:
+                    if process is not None:
+                        if process.poll() is None:
+                            self._terminate(process)
+                        stop_readers.set()
+                        _join_readers(readers, STOP_WAIT_SECONDS)
+                        process.stdout.close()
+                        process.stderr.close()
+                finally:
+                    with self._state_lock:
+                        self._process = None
+                        self._busy = False
