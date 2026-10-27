@@ -20,7 +20,7 @@
 
 - **前端**:Vue3 SPA(编译产物 `dist/`,由网关 serve,`docker` 多阶段构建)
 - **网关**:Node Express,聚合三类能力 —— ① 本平台 API(auth/theme/users/db/scripts/ds-deps/spark/flink)② 反向代理(子应用 iframe、YARN 页面重写代理)③ 静态托管(dist)
-- **数据服务 db-proxy**:Python FastAPI,部署在能直连数据库的客户机(`hadoop-task-3`),内嵌常驻 SparkSession 与 Flink 引擎;门户不直接连库
+- **数据服务 db-proxy**:Python FastAPI,部署在能直连数据库的客户机(`hadoop-task-3`),Spark SQL 通过同机 Beeline/HiveServer2 Spark Thrift 执行,Flink 保留内嵌引擎;门户不直接连库
 
 ## 2. 前端架构
 
@@ -83,7 +83,7 @@ src/
 | `routes/yarn-proxy.js` | YARN 三套代理:hadoopapi(按 X-Resource-Manager 动态)、yarniframe(HTML 重写)、iframe-proxy(NM 日志等白名单主机) |
 | `routes/subapps-proxy.js` | 子应用 iframe 代理:HDFS(/apps/hdfs、/static、/webhdfs)、DS Web、Jupyter、DolphinScheduler、Stingray(HTML 注入) |
 | `routes/db.js` | DB 访问:/api/db 权限校验 + acl + jobs + explain + 透传,以及 /api/db-perms 管理 API(admin) |
-| `routes/spark.js` | Spark SQL:query/jobs/logs/status/config/stages/cancel；用户访问由模块与数据权限矩阵控制 |
+| `routes/spark.js` | Spark SQL:query/jobs/logs/status/cancel；用户访问由模块与数据权限矩阵控制 |
 | `routes/flink.js` | Flink SQL:交互查询/async/连接器/DDL 生成/jobs/PreJob 全套路由 |
 | `routes/dbquery.js` | MySQL/Oracle 同步查询 `/api/dbquery/query`(写检测 + 权限矩阵) |
 | `routes/assistant.js` | 开发助手:/api/assistant 项目路由(接 assistant-projects.js)+ 8787 Reasonix 代理;Datadeck Web `/agent` 页面代理与 APK `/api/mobile/assistant/*` 固定用户/白名单 API+SSE 流代理 |
@@ -110,7 +110,7 @@ src/
 - 会话:`portal_session` cookie(httpOnly),`requireAuth`/`requireAdmin` 守卫;`PROTECTED_PREFIXES` 内未登录一律 401
 - **WebSocket 鉴权**:upgrade 请求不经过 Express 中间件,网关在 `server.on('upgrade')` 手动解析 `portal_session` cookie 并校验 Stingray/Jupyter 模块权限；未登录、未授权或未初始化一律断开。
 - **写操作权限**:独立 `X-Spark-Token` 解锁已移除；Spark/Flink/MySQL/Oracle 写操作由模块权限、数据权限矩阵、数据源 `readOnly` 与 db-proxy 资源护栏共同控制，写 SQL 继续执行语句检测与审计。
-- **数据库查询 API Token**:独立于数据同步 token，仅在网关侧开放 Impala、MySQL、Oracle 只读查询与 Spark SQL 只读/授权库写入；token 使用专用虚拟角色 `db-query-api` 和接口白名单，不伪装 admin、不透传到 db-proxy。服务端配置只保存 Token 密钥；数据库权限从 `db-permissions.json` 角色规则读取，缺少虚拟角色规则时拒绝访问。Impala/MySQL/Oracle 仅允许单条只读 SQL；Spark 写库默认无权限，仅开放 `INSERT INTO/OVERWRITE`，PySpark/DDL/Flink/其他引擎拒绝。异步任务状态和取消仅限该 Token 自己提交的 Impala/MySQL/Oracle/Spark job。
+- **数据库查询 API Token**:独立于数据同步 token，仅在网关侧开放 Impala、MySQL、Oracle 只读查询与 Spark SQL 只读/授权库写入；token 使用专用虚拟角色 `db-query-api` 和接口白名单，不伪装 admin、不透传到 db-proxy。服务端配置只保存 Token 密钥；数据库权限从 `db-permissions.json` 角色规则读取，缺少虚拟角色规则时拒绝访问。Impala/MySQL/Oracle 仅允许单条只读 SQL；Spark 写库默认无权限，仅开放 `INSERT INTO/OVERWRITE`，非 SQL、DDL、Flink 和其他引擎拒绝。异步任务状态和取消仅限该 Token 自己提交的 Impala/MySQL/Oracle/Spark job。
 - **MySQL/Oracle/Impala 防线**:同步查询 `/api/dbquery/query` 与异步任务 `/api/db/jobs`(提交)均做只读 SQL 形状与数据权限校验；外部 API Token 仅对 Impala/MySQL/Oracle 开放单条只读查询，且 `/api/db/acl` 仅返回明确授权的数据源；db-proxy 侧 `/jobs` 异步路径同步补齐多语句防护与表级白名单(第二道防线)；`/api/db/jobs` 提交/取消受 EXEC_GATES(dbQuery 模块)约束，GET 状态查询放行。
 - **数据权限矩阵(用户/角色→库)**:`server/data/db-permissions.json`(userRules/roleRules,不存在即无规则不拦截);带 `db` 参数的 MySQL/Oracle/Impala 访问接口(query/jobs/explain 路由内 + tables/fields/ddl/schema GET 前置中间件)按调用者校验,不在其 dbs → 403;**admin 一律放行**,无规则回退 db-proxy 全局白名单;API Token 的虚拟角色缺省则 fail-closed;管理 API `GET/PUT /api/db-perms`(admin only)。详见 `docs/modules/db-permissions.md`
 
@@ -122,7 +122,7 @@ src/
 |---|---|
 | `main.py` | FastAPI 入口:数据源加载、路由、鉴权、护栏(限流/并发信号量) |
 | `impala_engine.py` | Impala SQL 类型检查/修复;元数据读取通过本地 JSON 缓存复用,类型检查与表目录共用 |
-| `spark_engine.py` | Spark 引擎:懒加载 **client 模式常驻 SparkSession**(YARN),串行锁、jobGroup 可取消、120s 超时自动 cancel、FileNotFound 自动 REFRESH 重试一次;SparkSQL 独立 HDFS CSV 导出通过异步 job 写入,不收集全量结果到 driver |
+| `spark_thrift_engine.py` | Spark SQL 通过本机 Beeline / HiveServer2 Spark Thrift 执行;进程级任务管理、输出日志增量回显、取消、有限结果解析及 Thrift SQL HDFS CSV 导出;db-proxy 不创建 SparkSession |
 | `flink_engine.py` | Flink SQL 引擎:流/批双模式,支持 connector jar(paimon/mysql-cdc/kafka/hbase) |
 | `flink_prejob.py` | Flink PreJob 通道:pyflink 脚本生成 + `yarn-per-job` 提交 + YARN 状态/日志/cancel |
 | `flink_connectors.py` | Flink 连接器元数据:批量建表/DDL 生成/表探测 |
@@ -130,11 +130,10 @@ src/
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
 - **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
-- **Spark 查询结果限制**:Spark SQL 与 PySpark DataFrame 默认最多收集 1,000 行,显式 SQL 限制最高 500,000 行。结果在 driver 端最多读取限制值 + 1 行,截断后返回,不对超大原始结果自动导出 HDFS。
-- **Spark Hadoop codec 配置**:db-proxy 的 `spark.sparkConf` 支持通过 `spark.hadoop.*` 注入 Hadoop 配置;当前 Spark4 为兼容环境中未安装的 LZO codec，设置 `spark.hadoop.io.compression.codecs` 为可用 codec 列表，并保留 `spark.hadoop.io.compression.codec.lzo.class` 空值覆盖。
-- **Spark session 恢复**:YARN 外部终止 client application 后,db-proxy 检测到 SparkContext 已停止时先清理 PySpark/JVM 默认 SparkSession 状态,再创建新 session,避免 `getOrCreate()` 复用已停止的 context。
-- **Spark executor 设置**:工作台恢复枚举选择:动态分配(自适应)或固定 5/10/15/20 个 executor;若服务端当前固定值不在枚举内,选择器额外显示该当前值,不自动改写配置。`/api/spark/config` 仍接受非负整数。session 执行、保活与停止/重建共享生命周期锁;取消和 stage 进度查询不等待执行锁。
-- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回
+- **Spark Thrift 查询结果限制**:Spark SQL 默认返回 1,000 行,硬上限 500,000 行;db-proxy 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出,达到上限时标记 truncated。完整结果导出使用 Spark Thrift `INSERT OVERWRITE DIRECTORY ... USING CSV`。
+- **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;没有嵌入 SparkSession、PySpark、executor 管理或 Stage statusTracker。
+- **Spark Thrift 取消与日志**:每个任务跟踪自己的 Beeline 子进程;取消/超时终止子进程,stdout/stderr 增量写入 Spark 日志接口,仅展示真实 CLI 输出。
+- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 通过 Beeline 连接本机 Spark Thrift Server (`127.0.0.1:10001`)
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 
@@ -170,7 +169,7 @@ QueryView.vue
   同宿主机:jupyter 容器(8888,base_url=/apps/jupyter)
 
 客户机 hadoop-task-3(能直连数据库)
-  db-proxy:client 模式常驻 SparkSession,由 Python 3.12 + Spark 4.2 启动
+  db-proxy:Python FastAPI + `$SPARK_HOME/bin/beeline` → `jdbc:hive2://127.0.0.1:10001/default`
 
 集群:YARN RM hadoop-nn-1:8088 / NM hadoop-dn-*:8042
      Hive metastore hadoop-nn-1/2:9083

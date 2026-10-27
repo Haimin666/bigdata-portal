@@ -221,13 +221,13 @@ function save() {
       <!-- Spark 权限 -->
       <div class="rule-section">
         <div class="rule-section-head">
-          <span class="rule-section-title">Spark(SparkSQL / PySpark)</span>
+          <span class="rule-section-title">SparkSQL</span>
           <el-switch v-model="form.sparkOn" size="small" />
         </div>
         <template v-if="form.sparkOn">
           <el-checkbox v-model="form.sparkRead" class="rw-cb">允许只读查询</el-checkbox>
           <el-checkbox v-model="form.sparkWrite" class="rw-cb">
-            {{ subjectKind === 'role' && selectedSubject === DB_QUERY_API_ROLE ? '允许 SQL 写操作' : '允许写操作 / PySpark 代码' }}
+            允许 SQL 写操作
           </el-checkbox>
           <div v-if="subjectKind === 'role' && selectedSubject === DB_QUERY_API_ROLE" class="spark-write-dbs">
             <span class="rule-tip">API Token 仅允许 SQL 写入，选择可写库：</span>

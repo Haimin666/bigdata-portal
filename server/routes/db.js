@@ -272,7 +272,7 @@ export function setupDb(app, auth) {
         }
       }
       // 敏感路径不走透传:
-      //  - /spark/* 由 /api/spark/* 统一鉴权(写解锁 + pyspark 信任模式),防绕过
+      //  - /spark/* 由 /api/spark/* 统一鉴权(写权限矩阵),防绕过
       //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
       //  - /jobs 异步任务提交由上方专用路由鉴权(写检测 + token);此处兜底拦非 POST 变体
       //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts

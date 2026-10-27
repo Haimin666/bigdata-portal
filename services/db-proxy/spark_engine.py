@@ -1,34 +1,7 @@
-"""db-proxy Spark 引擎:集成一个 client 模式常驻 SparkSession。
+"""Legacy SparkSession code plus the shared Spark asynchronous job manager.
 
-设计目标(与门户自建 Spark 网关对齐):
-  - 常驻一个 client 模式 SparkSession(懒加载,首次 /spark/query 才 getOrCreate),
-    SQL 与 PySpark 代码共用同一 session,临时视图跨请求保留。
-  - 串行执行:同一时刻只跑一个请求(threading.Lock),避免 SparkSession 并发串扰。
-  - SQL 写限制:读写权限已收口门户网关侧,引擎不再校验 allowWrite/writeUnlocked,
-    写语句直接放行(网关 /api/spark 已做写检测+token 校验)。
-  - PySpark 代码:信任模式(用户拍板),执行于 {spark, sc} 命名空间,完整审计日志。
-  - 日志透传:log4j 重定向到 spark-jvm.log(独立 JVM 的 driver 日志),
-    Python 侧审计写入 spark-audit.log;GET /spark/logs 增量读取两个文件。
-
-配置(datasources.json 顶层 spark 段,缺省 spark 未配置 = 引擎禁用):
-  "spark": {
-    "enabled": true,
-    "master": "yarn",
-    "deployMode": "client",
-    "appName": "db-proxy-spark",
-    "sparkHome": "/opt/spark/spark-3.4.2-bin-hadoop3",
-    "driverMemory": "4g",
-    "executorMemory": "8g",
-    "executorCores": 2,
-    "maxExecutors": 15,
-    "queue": "default",
-    "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
-    "defaultLimit": 1000,
-    "maxLimit": 500000,
-    "maxSqlLen": 65536,
-    "allowWrite": false,
-    "logDir": "spark-logs"
-  }
+Live Spark SQL requests use SparkThriftEngine in spark_thrift_engine.py. This module
+still provides SparkJobManager and is_write_sql, which Flink reuses for SQL checks.
 """
 
 from __future__ import annotations
@@ -990,54 +963,86 @@ class SparkJobManager:
 
     动机:公司网关固定 60s 读超时,同步 HTTP 长请求(大查询可能跑数十分钟)
     必然被网关掐断返回 504。异步化后提交/查询/取消都是秒级往返,永不撞超时。
-    同一 SparkSession 串行执行(引擎 _lock),多 job 天然排队,state 反映 queued。
+    同一引擎串行执行(引擎 _lock),多 job 排队,state 反映 queued。
     """
 
     def __init__(self, engine: Any, max_jobs: int = 200, ttl: int = 3600) -> None:
         self._engine = engine
         self._jobs: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        self._condition = threading.Condition()
+        self._active_job_id: Optional[str] = None
         self._seq = 0
         self._max_jobs = max_jobs
         self._ttl = ttl  # 完成后保留秒数
 
     def submit(self, sql: str, kind: str = "sql", write_unlocked: bool = False, timeout_ms: int = 600000) -> str:
-        with self._lock:
+        with self._condition:
             self._seq += 1
             job_id = "spk_%d_%04d" % (int(time.time()), self._seq)
             self._jobs[job_id] = {
                 "id": job_id, "state": "queued", "sql": sql, "kind": kind,
                 "write_unlocked": write_unlocked, "timeout_ms": timeout_ms,
                 "created_at": time.time(), "started_at": None, "finished_at": None,
-                "result": None, "error": None,
+                "result": None, "error": None, "cancel_requested": False,
             }
         threading.Thread(target=self._run, args=(job_id,), daemon=True, name="spark-job-%s" % job_id).start()
         return job_id
 
     def _run(self, job_id: str) -> None:
-        j = self._jobs.get(job_id)
-        if not j:
-            return
-        j["state"] = "running"
-        j["started_at"] = time.time()
+        with self._condition:
+            j = self._jobs.get(job_id)
+            if not j:
+                return
+            while self._active_job_id is not None and j["state"] == "queued":
+                self._condition.wait()
+            if j["state"] != "queued":
+                return
+            self._active_job_id = job_id
+            supports_job_cancellation = getattr(self._engine, "supports_job_cancellation", False)
+            if not supports_job_cancellation:
+                j["state"] = "running"
+                j["started_at"] = time.time()
+
+        def mark_running():
+            with self._condition:
+                if j["state"] == "queued":
+                    j["state"] = "running"
+                    j["started_at"] = time.time()
+
         try:
             if j["kind"] == "pyspark":
                 result = self._engine.execute_code(j["sql"], j["timeout_ms"], j["write_unlocked"])
             elif j["kind"] == "export":
-                result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"])
+                if getattr(self._engine, "supports_job_cancellation", False):
+                    result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"],
+                                                     owner_id=job_id, on_start=mark_running)
+                else:
+                    result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"])
             else:
-                result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
-            j["result"] = result
-            j["state"] = "done"
+                if getattr(self._engine, "supports_job_cancellation", False):
+                    result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"],
+                                                      owner_id=job_id, on_start=mark_running)
+                else:
+                    result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
+            with self._condition:
+                j["result"] = result
+                j["state"] = "cancelled" if j["cancel_requested"] else "done"
         except Exception as e:
-            j["error"] = str(e)[:2000]
-            j["state"] = "failed"
+            with self._condition:
+                j["error"] = str(e)[:2000]
+                j["state"] = "cancelled" if j["cancel_requested"] else "failed"
         finally:
-            j["finished_at"] = time.time()
+            with self._condition:
+                j["finished_at"] = time.time()
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+                self._condition.notify_all()
+            if getattr(self._engine, "supports_job_cancellation", False):
+                self._engine.finish_job(job_id)
             self._gc()
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
+        with self._condition:
             j = self._jobs.get(job_id)
             if not j:
                 return None
@@ -1049,29 +1054,60 @@ class SparkJobManager:
             }
 
     def cancel(self, job_id: str) -> bool:
-        """取消 queued/running 的 job。取消的是引擎当前执行中的 jobGroup
-        (同 session 串行,同一时刻只有一个 job 在 execute,故 cancel 命中正在跑的 job)。"""
-        with self._lock:
+        """取消一个排队任务，或仅取消当前拥有引擎的运行中任务。"""
+        queued_cancelled = False
+        with self._condition:
             j = self._jobs.get(job_id)
-            if not j or j["state"] not in ("queued", "running"):
+            if not j:
                 return False
-        try:
-            self._engine.cancel()
+            if j["state"] == "queued":
+                if (self._active_job_id == job_id and
+                        getattr(self._engine, "supports_job_cancellation", False)):
+                    j["cancel_requested"] = True
+                    try:
+                        if not self._engine.cancel(job_id):
+                            j["cancel_requested"] = False
+                            return False
+                    except Exception:
+                        j["cancel_requested"] = False
+                        return False
+                j["state"] = "cancelled"
+                j["error"] = "cancelled before execution"
+                j["finished_at"] = time.time()
+                queued_cancelled = True
+                self._condition.notify_all()
+            elif j["state"] == "running" and self._active_job_id == job_id:
+                j["cancel_requested"] = True
+                try:
+                    if getattr(self._engine, "supports_job_cancellation", False):
+                        cancelled = self._engine.cancel(job_id)
+                    else:
+                        cancelled = self._engine.cancel()
+                    if not cancelled:
+                        j["cancel_requested"] = False
+                        return False
+                    return True
+                except Exception:
+                    j["cancel_requested"] = False
+                    return False
+            else:
+                return False
+        if queued_cancelled:
+            self._gc()
             return True
-        except Exception:
-            return False
+        return False
 
     def _gc(self) -> None:
         """清理:完成后超 ttl 的旧 job + 超上限时淘汰最旧完成项。"""
-        with self._lock:
+        with self._condition:
             now = time.time()
             stale = [
                 i for i, j in self._jobs.items()
-                if j["state"] in ("done", "failed") and (now - (j["finished_at"] or 0)) > self._ttl
+                if j["state"] in ("done", "failed", "cancelled") and (now - (j["finished_at"] or 0)) > self._ttl
             ]
             for i in stale:
                 del self._jobs[i]
-            done_ids = [i for i, j in self._jobs.items() if j["state"] in ("done", "failed")]
+            done_ids = [i for i, j in self._jobs.items() if j["state"] in ("done", "failed", "cancelled")]
             overflow = len(done_ids) - self._max_jobs
             if overflow > 0:
                 for i in sorted(done_ids, key=lambda x: self._jobs[x]["finished_at"] or 0)[:overflow]:

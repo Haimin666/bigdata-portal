@@ -92,6 +92,15 @@ class SparkThriftEngineTests(unittest.TestCase):
         self.assertFalse(result["truncated"])
         self.assertGreaterEqual(result["costMs"], 0)
 
+    def test_query_rows_are_not_echoed_to_logs_but_stderr_progress_is(self):
+        process = BeelineProcess("secret_result\nprivate-value\n", "Query abc: 10% Complete\n")
+        engine = self.engine()
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=process):
+            engine.execute_sql("SELECT private-value")
+        logs = engine.read_logs()["content"]
+        self.assertIn("Query abc: 10% Complete", logs)
+        self.assertNotIn("private-value", logs)
+
     def test_empty_command_output_returns_empty_table(self):
         with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()):
             self.assertEqual(self.engine().execute_sql("CREATE TEMP VIEW v AS SELECT 1")["rows"], [])
@@ -102,6 +111,56 @@ class SparkThriftEngineTests(unittest.TestCase):
             result = self.engine(defaultLimit=2).execute_sql("SHOW TABLES")
         self.assertEqual(result["rows"], [{"id": "1"}, {"id": "2"}])
         self.assertTrue(result["truncated"])
+
+    def test_select_without_limit_gets_default_limit_before_trailing_comment(self):
+        with patch("spark_thrift_engine.subprocess.Popen",
+                   return_value=BeelineProcess("value\n1\n2\n")) as popen:
+            self.engine(defaultLimit=25).execute_sql("SELECT 1 -- keep this comment")
+        args = popen.call_args.args[0]
+        sql = args[args.index("-e") + 1]
+        self.assertEqual(sql, "SELECT 1 LIMIT 25 -- keep this comment")
+
+    def test_default_limit_marks_full_result_as_potentially_truncated(self):
+        with patch("spark_thrift_engine.subprocess.Popen",
+                   return_value=BeelineProcess("value\n1\n2\n")):
+            result = self.engine(defaultLimit=2).execute_sql("SELECT value FROM source")
+        self.assertTrue(result["truncated"])
+
+    def test_explicit_limit_is_capped_at_max_limit(self):
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()) as popen:
+            self.engine(maxLimit=50).execute_sql("SELECT 1 LIMIT 1000;")
+        args = popen.call_args.args[0]
+        sql = args[args.index("-e") + 1]
+        self.assertEqual(sql, "SELECT 1 LIMIT 50;")
+
+    def test_smaller_explicit_limit_is_preserved(self):
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()) as popen:
+            self.engine(maxLimit=50).execute_sql("SELECT 1 LIMIT 20")
+        args = popen.call_args.args[0]
+        self.assertEqual(args[args.index("-e") + 1], "SELECT 1 LIMIT 20")
+
+    def test_limit_in_comment_or_string_does_not_suppress_default_limit(self):
+        sql = "SELECT 'LIMIT 2' AS note /* LIMIT 3 */ -- LIMIT 4\n"
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()) as popen:
+            self.engine(defaultLimit=25).execute_sql(sql)
+        args = popen.call_args.args[0]
+        self.assertEqual(args[args.index("-e") + 1],
+                         "SELECT 'LIMIT 2' AS note LIMIT 25 /* LIMIT 3 */ -- LIMIT 4\n")
+
+    def test_nested_limit_does_not_suppress_outer_default_limit(self):
+        with patch("spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()) as popen:
+            self.engine(defaultLimit=25).execute_sql("WITH x AS (SELECT 1 LIMIT 3) SELECT * FROM x")
+        args = popen.call_args.args[0]
+        self.assertEqual(args[args.index("-e") + 1],
+                         "WITH x AS (SELECT 1 LIMIT 3) SELECT * FROM x LIMIT 25")
+
+    def test_show_desc_and_explain_are_not_rewritten(self):
+        for sql in ("SHOW DATABASES", "DESC db.table", "EXPLAIN SELECT 1"):
+            with self.subTest(sql=sql), patch(
+                    "spark_thrift_engine.subprocess.Popen", return_value=BeelineProcess()) as popen:
+                self.engine().execute_sql(sql)
+                args = popen.call_args.args[0]
+                self.assertEqual(args[args.index("-e") + 1], sql)
 
     def test_default_command_uses_spark_home_local_jdbc_csv2_and_root(self):
         with patch.dict(os.environ, {"SPARK_HOME": "/opt/spark", "JAVA_TOOL_OPTIONS": "-Xmx128m"}), \
@@ -300,7 +359,8 @@ class SparkThriftEngineTests(unittest.TestCase):
         self.assertIn("诊断", first["content"])
         self.assertEqual(set(first["offsets"]), {"jvm", "audit"})
         self.assertEqual(first["offsets"], first["files"])
-        self.assertGreater(first["offsets"]["jvm"], len("id\n北京\n诊断\n"))
+        self.assertEqual(first["offsets"]["jvm"], len("诊断\n".encode("utf-8")))
+        self.assertNotIn("北京", first["content"])
         self.assertEqual(engine.read_logs(first["offsets"])["content"], "")
 
     def test_schema_sql_uses_same_thrift_transport(self):

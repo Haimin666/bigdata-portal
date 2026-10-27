@@ -4,7 +4,7 @@
 // 由 index.js 挂载:app.use(createExecGate(auth))
 
 const EXEC_GATES = [
-  { re: /^\/api\/spark\//, module: 'dbQuery' }, // SQL/PySpark 执行、解锁、停止
+  { re: /^\/api\/spark\//, module: 'dbQuery' }, // Spark SQL 查询、日志与停止
   { re: /^\/api\/flink\//, module: 'dbQuery' }, // Flink 查询/PreJob 提交/停止
   { re: /^\/api\/dbquery\//, module: 'dbQuery' }, // MySQL/Oracle 查询(/schema /explain 已改走 /api/db/* 透传)
   { re: /^\/api\/db\/jobs/, module: 'dbQuery', onlyWrite: true }, // MySQL/Oracle 异步任务提交/取消(GET 状态查询放行)

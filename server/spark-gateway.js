@@ -1,7 +1,5 @@
-// Spark 引擎执行模块:经 db-proxy 的 /spark/* 端点执行 SQL / PySpark。
-// 背景:自建 Spark 网关(放弃 Livy)——db-proxy 集成一个常驻 client 模式 SparkSession,
-// 门户只做网关:写拦截(isSparkWriteSql + X-Spark-Token)在 server/index.js 完成,
-// 解锁后的请求带 writeUnlocked=true 透传给 db-proxy;db-proxy 侧 allowWrite 为第二道防线。
+// Spark SQL 执行模块:经 db-proxy 的 /spark/* 端点连接本机 Spark Thrift Server。
+// 写权限由门户网关检查;db-proxy 的访问认证仍由 X-DB-Token 控制。
 import config from './config.js'
 
 const BASE = config.dbProxyUrl
@@ -44,15 +42,12 @@ export async function schemaFields(db, table) {
   return body.data
 }
   /**
- * 执行 SQL 或 PySpark 代码,返回 { columns, rows, costMs, truncated }
- * @param {string} sql  SQL 文本(kind=sql)或 PySpark 代码(kind=pyspark)
- * @param {{ kind?: 'sql'|'pyspark', writeUnlocked?: boolean, timeoutMs?: number }} [opts]
+ * 执行 Spark SQL,返回 { columns, rows, costMs, truncated }
+ * @param {string} sql SQL 文本
+ * @param {{ writeUnlocked?: boolean, timeoutMs?: number }} [opts]
  */
-export async function query(sql, { kind = 'sql', writeUnlocked = false, timeoutMs = 120000 } = {}) {
-  const payload =
-    kind === 'pyspark'
-      ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
-      : { kind: 'sql', sql, writeUnlocked, timeoutMs }
+export async function query(sql, { writeUnlocked = false, timeoutMs = 120000 } = {}) {
+  const payload = { kind: 'sql', sql, writeUnlocked, timeoutMs }
   // 写解锁凭证:仅当 writeUnlocked=true 时附加共享密钥头,供 db-proxy 侧服务端校验(S1)
   const headers = {}
   if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
@@ -74,9 +69,8 @@ export async function submitJob(
   sql,
   { kind = 'sql', writeUnlocked = false, timeoutMs = 600000 } = {}
 ) {
-  const payload = kind === 'pyspark'
-    ? { kind: 'pyspark', code: sql, writeUnlocked, timeoutMs }
-    : { kind, sql, writeUnlocked, timeoutMs }
+  if (kind !== 'sql' && kind !== 'export') throw new Error('Spark Thrift 仅支持 SparkSQL')
+  const payload = { kind, sql, writeUnlocked, timeoutMs }
   const headers = {}
   if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
   const res = await proxy(kind === 'export' ? '/spark/export/jobs' : '/spark/jobs', {
@@ -113,29 +107,13 @@ export async function readLogs(offsets = { jvm: 0, audit: 0 }) {
   return res.data
 }
 
-/** Spark 引擎状态(session state / appId / 配置快照) */
+/** Spark Thrift 服务状态,用于门户探测引擎可用性 */
 export async function status() {
   const res = await proxy('/spark/status', { timeoutMs: 10000 })
   return res.data
 }
 
-/** 前端设置 Spark executor 数量:0=动态分配;正整数=固定常驻,下次查询生效 */
-export async function setExecutors(executorInstances) {
-  const res = await proxy('/spark/config', {
-    method: 'POST',
-    body: JSON.stringify({ executorInstances }),
-    timeoutMs: 10000,
-  })
-  return res.data
-}
-
-/** Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条) */
-export async function stagesStatus() {
-  const res = await proxy('/spark/stages', { timeoutMs: 10000 })
-  return res.data
-}
-
-/** 取消当前正在执行的 spark 查询/代码(前端"停止"按钮) */
+/** 取消当前正在执行的 Spark SQL(前端"停止"按钮) */
 export async function cancel() {
   const res = await proxy('/spark/cancel', { method: 'POST', timeoutMs: 10000 })
   return res.data

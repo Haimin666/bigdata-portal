@@ -12,8 +12,8 @@ import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { checkSparkAccess } from '../db-permissions.js'
 import {
   query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus,
-  stagesStatus as sparkStages, cancel as sparkCancel, submitJob as sparkSubmitJob,
-  jobStatus as sparkJobStatus, cancelJob as sparkCancelJob, setExecutors as sparkSetExecutors,
+  cancel as sparkCancel, submitJob as sparkSubmitJob,
+  jobStatus as sparkJobStatus, cancelJob as sparkCancelJob,
   schemaDatabases as sparkSchemaDatabases, schemaTables as sparkSchemaTables, schemaFields as sparkSchemaFields
 } from '../spark-gateway.js'
 
@@ -89,22 +89,20 @@ export function setupSpark(app) {
 
     app.post('/api/spark/query', async (req, res) => {
       try {
-        const { sql, kind } = req.body || {}
-        const k = kind === 'pyspark' ? 'pyspark' : 'sql'
-        if (!sql || !String(sql).trim()) {
-          return res.status(400).json({ code: 400, msg: k === 'sql' ? 'sql is required' : 'code is required' })
+        const { sql, kind, code } = req.body || {}
+        if ((kind && kind !== 'sql') || code != null) {
+          return res.status(400).json({ code: 400, msg: 'Spark Thrift 仅支持 SparkSQL' })
         }
-        if (req.dbQueryApiPrincipal && (
-          k !== 'sql' || !isSparkApiSqlShapeAllowed(sql, req.body?.db)
-        )) {
+        if (!sql || !String(sql).trim()) {
+          return res.status(400).json({ code: 400, msg: 'sql is required' })
+        }
+        if (req.dbQueryApiPrincipal && !isSparkApiSqlShapeAllowed(sql, req.body?.db)) {
           return res.status(403).json({ code: 403, msg: 'API Token 仅允许 Spark 只读 SQL，或配置库内的 INSERT 写入' })
         }
-        // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
-        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(sql))
+        // 写 SQL 与只读 SQL 使用门户的数据权限矩阵区分。
+        const isWrite = isSparkWriteSql(sql)
         checkSparkAccess(req, isWrite, req.body?.db)
-        // 写操作(db-proxy 侧 writeUnlocked 语义):已通过权限矩阵即视为解锁 — 门户放行后
-        // 透传 writeUnlocked=true 并附加 X-Spark-Write 共享密钥,db-proxy 才放行写语句。
-        // 读查询保持 false,db-proxy 对所有写语句强制该标记,堵死直连伪造。
+        // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
         const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
@@ -148,19 +146,18 @@ export function setupSpark(app) {
     app.post('/api/spark/jobs', async (req, res) => {
       try {
         const { sql, code, kind } = req.body || {}
-        const k = kind === 'pyspark' ? 'pyspark' : 'sql'
-        const body = String(k === 'pyspark' ? code : sql || '')
+        if ((kind && kind !== 'sql') || code != null) {
+          return res.status(400).json({ code: 400, msg: 'Spark Thrift 仅支持 SparkSQL' })
+        }
+        const body = String(sql || '')
         if (!body.trim()) return res.status(400).json({ code: 400, msg: 'sql is required' })
-        if (req.dbQueryApiPrincipal && (
-          k !== 'sql' || !isSparkApiSqlShapeAllowed(body, req.body?.db)
-        )) {
+        if (req.dbQueryApiPrincipal && !isSparkApiSqlShapeAllowed(body, req.body?.db)) {
           return res.status(403).json({ code: 403, msg: 'API Token 仅允许 Spark 只读 SQL，或配置库内的 INSERT 写入' })
         }
-        // Spark 权限矩阵 v2:sql 写 / pyspark = 写;只读 sql = 读
-        const isWrite = k === 'pyspark' || (k === 'sql' && isSparkWriteSql(body))
+        // 写 SQL 与只读 SQL 使用门户的数据权限矩阵区分。
+        const isWrite = isSparkWriteSql(body)
         checkSparkAccess(req, isWrite, req.body?.db)
-        // 写操作透传 writeUnlocked=true(与 /api/spark/query 一致):权限矩阵放行即解锁,
-        // 附加 X-Spark-Write 头交由 db-proxy 物理校验;读查询保持 false。
+        // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
         const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
@@ -247,32 +244,6 @@ export function setupSpark(app) {
       } catch (e) {
         console.error('[spark/status]', e instanceof Error ? e.message : e)
         res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
-      }
-    })
-
-    // 前端设置 Spark executor 数量(正整数固定常驻;0=动态分配)
-    app.post('/api/spark/config', async (req, res) => {
-      try {
-        const n = req.body?.executorInstances
-        if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
-          return res.status(400).json({ code: 400, msg: 'executorInstances 必须是非负整数' })
-        }
-        const data = await sparkSetExecutors(n)
-        res.json({ code: 0, data })
-      } catch (e) {
-        console.error('[spark/config]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark 配置更新失败' })
-      }
-    })
-
-    // Spark 活跃 job/stage 进度(statusTracker,供日志面板进度条轮询)
-    app.get('/api/spark/stages', async (req, res) => {
-      try {
-        const data = await sparkStages()
-        res.json({ code: 0, data })
-      } catch (e) {
-        console.error('[spark/stages]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark stage 进度获取失败' })
       }
     })
 

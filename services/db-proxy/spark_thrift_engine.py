@@ -115,7 +115,45 @@ def _mask_sql(sql: str) -> str:
     return "".join(chars)
 
 
+def _apply_row_limit(sql: str, default_limit: int, max_limit: int):
+    """Add/cap the top-level SELECT limit without touching comments or literals."""
+    masked = _mask_sql(sql)
+    cap = max(1, int(max_limit))
+    fallback = min(max(1, int(default_limit)), cap)
+    if not re.match(r"^\s*(SELECT|WITH)\b", masked, re.IGNORECASE):
+        return sql, fallback, False
+
+    depth = 0
+    top_level_limits = []
+    for match in re.finditer(r"\bLIMIT\s+(\d+)\b|[()]", masked, re.IGNORECASE):
+        token = match.group(0)
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            top_level_limits.append(match)
+
+    if top_level_limits:
+        limit_match = top_level_limits[-1]
+        requested = int(limit_match.group(1))
+        if requested > cap:
+            start, end = limit_match.span(1)
+            return sql[:start] + str(cap) + sql[end:], cap, True
+        return sql, requested, False
+
+    limit = fallback
+    end = len(masked.rstrip())
+    if end and masked[end - 1] == ";":
+        end -= 1
+        while end and masked[end - 1].isspace():
+            end -= 1
+    return sql[:end].rstrip() + " LIMIT " + str(limit) + sql[end:], limit, True
+
+
 class SparkThriftEngine:
+    supports_job_cancellation = True
+
     def __init__(self, cfg: Dict[str, Any], base_dir: str) -> None:
         self.cfg = cfg
         self.base_dir = base_dir
@@ -126,6 +164,8 @@ class SparkThriftEngine:
         self._logs = {"jvm": bytearray(), "audit": bytearray()}
         self._log_ends = {"jvm": 0, "audit": 0}
         self._process = None
+        self._owner_id = None
+        self._pending_cancelled_owners = set()
         self._cancel_flag = threading.Event()
         self._state = "idle" if self.enabled else "disabled"
         self._busy = False
@@ -215,8 +255,11 @@ class SparkThriftEngine:
             except subprocess.TimeoutExpired:
                 raise RuntimeError("Beeline process did not stop after SIGKILL") from None
 
-    def cancel(self) -> bool:
+    def cancel(self, owner_id: Optional[str] = None) -> bool:
         with self._state_lock:
+            if owner_id is not None and (not self._busy or self._owner_id != owner_id):
+                self._pending_cancelled_owners.add(owner_id)
+                return True
             if not self._busy:
                 return False
             self._cancel_flag.set()
@@ -225,16 +268,27 @@ class SparkThriftEngine:
             self._terminate(process)
         return True
 
+    def finish_job(self, owner_id: str) -> None:
+        """Discard a pending cancel marker if the job completed before it began."""
+        with self._state_lock:
+            self._pending_cancelled_owners.discard(owner_id)
+
     def execute_sql(self, sql: str, write_unlocked: bool = False,
-                    timeout_ms: int = 600000) -> Dict[str, Any]:
-        limit = min(int(self.cfg.get("defaultLimit", 1000)),
-                    int(self.cfg.get("maxLimit", 500000)))
-        return self._execute(sql, timeout_ms, limit)
+                    timeout_ms: int = 600000, owner_id: Optional[str] = None,
+                    on_start=None) -> Dict[str, Any]:
+        default_limit = int(self.cfg.get("defaultLimit", 1000))
+        max_limit = int(self.cfg.get("maxLimit", 500000))
+        bounded_sql, limit, may_be_truncated = _apply_row_limit(sql, default_limit, max_limit)
+        result = self._execute(bounded_sql, timeout_ms, limit, owner_id, on_start)
+        if may_be_truncated and len(result["rows"]) >= limit:
+            result["truncated"] = True
+        return result
 
     def execute_schema_sql(self, sql: str, timeout_ms: int = 600000) -> Dict[str, Any]:
         return self.execute_sql(sql, timeout_ms=timeout_ms)
 
-    def export_sql(self, sql: str, job_id: str, timeout_ms: int = 7200000) -> Dict[str, Any]:
+    def export_sql(self, sql: str, job_id: str, timeout_ms: int = 7200000,
+                   owner_id: Optional[str] = None, on_start=None) -> Dict[str, Any]:
         masked = _mask_sql(sql).rstrip()
         if masked.endswith(";"):
             masked = masked[:-1].rstrip()
@@ -256,10 +310,11 @@ class SparkThriftEngine:
         quoted_path = path.replace("\\", "\\\\").replace("'", "\\'")
         statement = "INSERT OVERWRITE DIRECTORY '%s' USING CSV OPTIONS (header 'true') %s" % (
             quoted_path, sql[:len(masked)].strip())
-        result = self._execute(statement, timeout_ms, 0)
+        result = self._execute(statement, timeout_ms, 0, owner_id, on_start)
         return {"hdfsPath": path, "costMs": result["costMs"]}
 
-    def _execute(self, sql: str, timeout_ms: int, limit: int) -> Dict[str, Any]:
+    def _execute(self, sql: str, timeout_ms: int, limit: int,
+                 owner_id: Optional[str] = None, on_start=None) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("spark engine not enabled")
         if self.cfg.get("password"):
@@ -275,14 +330,19 @@ class SparkThriftEngine:
             started = time.monotonic()
             with self._state_lock:
                 self._busy = True
+                self._owner_id = owner_id
                 self._state = "running"
                 self._last_error = None
                 self._cancel_flag.clear()
+                if owner_id is not None and owner_id in self._pending_cancelled_owners:
+                    self._pending_cancelled_owners.discard(owner_id)
+                    self._cancel_flag.set()
             process = None
             readers = []
             columns = []
             rows = []
             diagnostics = deque(maxlen=20)
+            stdout_diagnostics = deque(maxlen=20)
             parse_errors = []
             truncated = False
             stop_readers = threading.Event()
@@ -295,8 +355,13 @@ class SparkThriftEngine:
                 for line in _pipe_lines(stream, stop_readers, max_line, truncate=not csv_output):
                     excerpt = self._redact(line[:LOG_LINE_BYTES]).encode("utf-8")[:LOG_LINE_BYTES]
                     text = excerpt.decode("utf-8", errors="replace")
-                    self._log("jvm", text + ("\n" if not text.endswith("\n") else ""))
-                    diagnostics.append(text)
+                    if csv_output:
+                        if re.match(r'^\s*"?(?:error|exception|analysisexception|failed)\b',
+                                    text, re.IGNORECASE):
+                            stdout_diagnostics.append(text)
+                    else:
+                        self._log("jvm", text + ("\n" if not text.endswith("\n") else ""))
+                        diagnostics.append(text)
                     yield line
 
             def check_fields(record):
@@ -327,7 +392,8 @@ class SparkThriftEngine:
                         message = self._redact(error)
                     parse_errors.append(message)
                     # Continue draining the pipe so malformed output cannot block Beeline.
-                    for _line in lines(process.stdout):
+                    for _line in _pipe_lines(process.stdout, stop_readers,
+                                             lambda: LOG_LINE_BYTES, truncate=True):
                         pass
 
             def read_stderr():
@@ -335,6 +401,10 @@ class SparkThriftEngine:
                     pass
 
             try:
+                if on_start:
+                    on_start()
+                if self._cancel_flag.is_set():
+                    raise RuntimeError("查询已取消(cancelled)")
                 beeline = self.cfg.get("beelinePath") or os.path.join(
                     os.environ.get("SPARK_HOME", ""), "bin", "beeline")
                 args = [beeline, "-u", self.cfg.get("jdbcUrl", "jdbc:hive2://127.0.0.1:10001/default"),
@@ -371,7 +441,8 @@ class SparkThriftEngine:
                     raise RuntimeError("查询已取消(cancelled)")
                 if exit_code:
                     raise RuntimeError("Beeline exited with code %s: %s" %
-                                       (exit_code, "".join(diagnostics)[-2000:]))
+                                       (exit_code, "".join(
+                                           list(diagnostics) + list(stdout_diagnostics))[-2000:]))
                 if parse_errors:
                     raise RuntimeError("Beeline CSV2 parse failed: %s" % parse_errors[0])
                 self._log("audit", "Beeline SQL finished\n")
@@ -398,4 +469,5 @@ class SparkThriftEngine:
                 finally:
                     with self._state_lock:
                         self._process = None
+                        self._owner_id = None
                         self._busy = False

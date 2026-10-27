@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, cancelSpark, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, sparkStatus, setSparkExecutors, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode, type SparkStage, type SparkStagesData } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, cancelSpark, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -18,12 +18,8 @@ defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'flinksql' | ''>('')
 const db = ref('')
-// Spark executor 数量设置(0=动态分配;固定枚举 5/10/15/20),仅 sparksql 引擎显示
-const sparkExecutors = ref(0)
-const sparkExecutorsCommitted = ref(0)
-const sparkExecutorsLoading = ref(false)
 const loading = ref(false)
 const exportLoading = ref(false)
 const error = ref('')
@@ -36,9 +32,9 @@ const currentSparkJobId = ref('')
 /** Spark 执行:异步任务模式 —— 提交即返回 jobId,前端轮询结果。
  *  动机:公司网关固定 60s 读超时,同步长请求(大查询可能跑数十分钟/小时)
  *  必被掐断 504;异步化后提交/查状态都是秒级往返,永不撞超时。
- *  SQL 写语句或 pyspark(任意代码)未解锁时先弹密码框;只读 SQL 直接执行。 */
-async function execSpark(sql: string, kind: 'sql' | 'pyspark' = 'sql'): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }> {
-  const { jobId } = await submitSparkJob(sql, undefined, kind, 7200000)
+ *  SQL 由 Spark Thrift 异步执行,门户轮询状态。 */
+async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }> {
+  const { jobId } = await submitSparkJob(sql, undefined, 7200000)
   currentSparkJobId.value = jobId
   const deadline = Date.now() + 7200000 // 上限 2 小时
   while (Date.now() < deadline) {
@@ -254,7 +250,6 @@ function switchTab(id: string) {
   const next = tabs.value.find((t) => t.id === id)
   if (next) {
     showTabInEditor(next)
-    if (next.file?.name.toLowerCase().endsWith('.py')) engine.value = 'pyspark'
   }
   editorRef.value?.focus()
 }
@@ -335,10 +330,6 @@ async function onOpenFile(node: ScriptNode) {
     tabs.value.push(tab)
     activeTabId.value = tab.id
     showTabInEditor(tab)
-    // .py 文件自动切到 PySpark 引擎(python 编辑器)
-    if (node.name.toLowerCase().endsWith('.py')) {
-      engine.value = 'pyspark'
-    }
     ElMessage.success(`已打开 ${node.name}`)
     editorRef.value?.focus()
   } catch (e) {
@@ -504,21 +495,18 @@ function onSideDragStart(e: MouseEvent) {
 
 // SparkSQL 虚拟数据源(db-proxy 引擎,不在 /acl 中)
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
-// PySpark 虚拟数据源(python 编辑器,走 db-proxy execute_code 通道)
-const PYSPARK_SOURCE: DbDataSource = { name: 'pyspark', label: 'PySpark', type: 'pyspark', host: '', port: 0, user: '' }
 // FlinkSQL 虚拟数据源(走 db-proxy → Flink SQL Gateway)
 const FLINK_SOURCE: DbDataSource = { name: 'flink', label: 'FlinkSQL', type: 'flinksql', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql/pyspark/flinksql 为虚拟源,不进左侧树)
+// 引擎过滤后的数据源(sparksql/flinksql 为虚拟源,不进左侧树)
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
-  if (engine.value === 'pyspark') return [PYSPARK_SOURCE]
   if (engine.value === 'flinksql') return [FLINK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
 // 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'pyspark' && d.type !== 'flinksql'))
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'flinksql'))
 
 // ── Monaco 编辑器(SqlEditor 封装)─────────────────────────────────────
 const canvasRef = ref<HTMLElement>()
@@ -584,29 +572,11 @@ onUnmounted(() => {
   logResizeObserver = null
 })
 
-// ── Spark driver 日志透传(执行 spark 查询时轮询展示)───────────
+// ── Spark Thrift / Beeline 日志(执行 Spark SQL 时轮询展示)───────────
 const sparkLogText = ref('')
 const dbJobLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 const sparkLogBox = ref<HTMLElement | null>(null)
-/** Spark job/stage 进度(statusTracker,3s 与日志同节奏轮询) */
-const sparkStageData = ref<{ activeJobs: Array<{ jobId: number; status: string; stageIds: number[] }>; stages: SparkStage[]; numActiveJobs: number; numActiveStages: number }>({
-  activeJobs: [],
-  stages: [],
-  numActiveJobs: 0,
-  numActiveStages: 0
-})
-function stagePct(s: SparkStage): number {
-  return s.numTasks > 0 ? Math.round((s.completedTasks / s.numTasks) * 100) : 0
-}
-function stageProgressStatus(s: SparkStage): '' | 'success' | 'exception' {
-  if (s.status === 'FAILED') return 'exception'
-  if (s.status === 'SUCCEEDED') return 'success'
-  return ''
-}
-function stageStatusClass(s: string): string {
-  return String(s || 'UNKNOWN').toLowerCase()
-}
 const maxLogLines = ref(200) // 日志保留行数:按日志容器可视高度动态计算,填满即滚动打印
 let sparkLogTimer: number | null = null
 let sparkLogSeq = 0 // 查询批次标记:丢弃在途旧轮询响应,防止旧日志污染新查询
@@ -653,53 +623,6 @@ watch(dbJobLogText, () => {
   if (activePane.value === 0) scrollLogToBottom()
 })
 
-/** [stage] 完成行解析(由 db-proxy 在查询结束时写入 audit 日志):
- *   [stage] done stage=<id> status=<STATUS> tasks=<done>/<total> name=<name> */
-const stageDoneLineRe = /\[stage\] done stage=(\d+) status=(\w+) tasks=(\d+)\/(\d+) name=(.*)$/
-function parseStageDoneLines(chunk: string): SparkStage[] {
-  const out: SparkStage[] = []
-  for (const line of chunk.split('\n')) {
-    const m = line.match(stageDoneLineRe)
-    if (!m) continue
-    const done = Number(m[3])
-    const total = Number(m[4])
-    out.push({
-      stageId: Number(m[1]),
-      name: m[5],
-      status: m[2].toUpperCase(),
-      numTasks: total,
-      completedTasks: done,
-      failedTasks: 0
-    })
-  }
-  return out
-}
-/** 把 [stage] 完成行合并进面板状态(终态,直接覆盖/新增;完成后仍可追溯) */
-function applyParsedStages(stages: SparkStage[]) {
-  if (!stages.length) return
-  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
-  for (const s of stages) map.set(s.stageId, s)
-  sparkStageData.value = {
-    ...sparkStageData.value,
-    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
-  }
-}
-/** 把 statusTracker 活跃 stage 合并进面板状态(终态不被 RUNNING 覆盖) */
-function applySparkStages(st: SparkStagesData) {
-  const map = new Map(sparkStageData.value.stages.map((s) => [s.stageId, s]))
-  for (const s of st.stages) {
-    const prev = map.get(s.stageId)
-    if (prev && (prev.status === 'SUCCEEDED' || prev.status === 'FAILED')) continue
-    map.set(s.stageId, s)
-  }
-  sparkStageData.value = {
-    activeJobs: st.activeJobs,
-    numActiveJobs: st.numActiveJobs,
-    numActiveStages: st.numActiveStages,
-    stages: [...map.values()].sort((a, b) => a.stageId - b.stageId)
-  }
-}
-
 /** 拉取 spark 日志增量并追加(基线由 clearSparkLogs 在查询开始前建立,这里读到的都是新增) */
 async function pollSparkLogs() {
   const seq = sparkLogSeq
@@ -712,19 +635,8 @@ async function pollSparkLogs() {
       // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
       const lines = sparkLogText.value.split('\n')
       if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
-      // 解析 [stage] 完成行 → 更新 Stage 进度(查询结束后由 db-proxy 写入)
-      applyParsedStages(parseStageDoneLines(data.content))
     }
     sparkLogOffsets.value = data.offsets
-    // spark 引擎:同节奏轮询 job/stage 进度(statusTracker,与 [stage] 行按 stageId 合并)
-    if (engine.value === 'sparksql' || engine.value === 'pyspark') {
-      try {
-        const st = await sparkStages()
-        if (seq === sparkLogSeq) applySparkStages(st)
-      } catch {
-        /* stage 接口不可用不影响日志 */
-      }
-    }
   } catch {
     /* 日志接口失败不打断查询 */
   }
@@ -745,11 +657,10 @@ function stopSparkLogPolling() {
 }
 
 /** 清空并建立新基线:offset 跳到已知文件末尾,新查询只展示新增日志。
- *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志(含旧查询的 [stage] 行)。 */
+ *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志。 */
 async function clearSparkLogs() {
   sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
   sparkLogText.value = ''
-  sparkStageData.value = { activeJobs: [], stages: [], numActiveJobs: 0, numActiveStages: 0 }
   if (sparkLogFileSizes.value.jvm === 0 && sparkLogFileSizes.value.audit === 0) {
     try {
       const base = await sparkLogs({ jvm: 0, audit: 0 })
@@ -768,7 +679,7 @@ function clearDbJobLogs() {
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
 const logEmptyHint = computed(() => {
   if (engine.value === 'impala') return loading.value ? '(等待 db-proxy 执行日志…)': '(Impala 本次查询暂无日志)'
-  if (engine.value !== 'sparksql' && engine.value !== 'pyspark' && engine.value !== 'flinksql') {
+  if (engine.value !== 'sparksql' && engine.value !== 'flinksql') {
     return '(该引擎不产生引擎日志)'
   }
   if (loading.value) return '(等待引擎输出…)'
@@ -917,7 +828,7 @@ function splitSqlSegments(text: string): { start: number; end: number; sql: stri
 }
 
 /**
- * 待执行内容:优先选中;未选中时 SQL 取光标所在段(分号切分),python 取全文。
+ * 待执行内容:优先选中;未选中时取光标所在 SQL 段(分号切分)。
  * 找不到段(如全文只有注释)回退全文。
  */
 function getSqlToRun(): string {
@@ -925,9 +836,7 @@ function getSqlToRun(): string {
   // 1. 有选区 → 执行选中
   const sel = editorRef.value.getSelection()
   if (sel.trim()) return sel
-  // 2. python 编辑器:无选区执行全文(整段提交,不做分号切分)
-  if (engine.value === 'pyspark') return editorRef.value.getValue()
-  // 3. 无选区 → 光标所在段
+  // 2. 无选区 → 光标所在段
   const cursorIdx = editorRef.value.indexFromPos(editorRef.value.getCursor())
   for (const seg of splitSqlSegments(editorRef.value.getValue())) {
     if (seg.start <= cursorIdx && cursorIdx <= seg.end) {
@@ -938,14 +847,14 @@ function getSqlToRun(): string {
   return editorRef.value.getValue()
 }
 
-// ── SQL 格式化(简单:关键字换行缩进;python 模式不支持)─────────────────────────
+// ── SQL 格式化(简单:关键字换行缩进)─────────────────────────
 // 注释/取消注释(Cmd+/)已下沉到 SqlEditor 组件内实现,与旧 commentSelection 等价。
 
 
 /** JSON 复合值折叠查看(弹窗展示格式化文本) */
 
 const engineLabel = computed(() => {
-  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', sparksql: 'SparkSQL', pyspark: 'PySpark', flinksql: 'FlinkSQL' }
+  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', sparksql: 'SparkSQL', flinksql: 'FlinkSQL' }
   return m[engine.value] || engine.value || '—'
 })
 
@@ -971,10 +880,6 @@ function legacyFormatSql(s: string): string {
 /** 格式化:SQl-formatter(方言感知/tabWidth/关键字大小写/查询间空行);失败降级自研 */
 function formatSql() {
   if (!editorRef.value) return
-  if (engine.value === 'pyspark') {
-    ElMessage.info('Python 模式暂不支持格式化')
-    return
-  }
   const s = editorRef.value.getValue().trim()
   if (!s) return
   try {
@@ -1279,9 +1184,8 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
 
 /** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
 async function execOne(sql: string, item: QueryResultItem, seq: number): Promise<void> {
-  const isSpark = engine.value === 'sparksql' || engine.value === 'pyspark'
+  const isSpark = engine.value === 'sparksql'
   const isFlink = engine.value === 'flinksql'
-  const kind = engine.value === 'pyspark' ? ('pyspark' as const) : ('sql' as const)
   if (isSpark) {
     await clearSparkLogs()
     startSparkLogPolling()
@@ -1289,7 +1193,7 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   try {
     let r
     if (isFlink) r = await execFlink(sql)
-    else if (isSpark) r = await execSpark(sql, kind)
+    else if (isSpark) r = await execSpark(sql)
     else r = await execDb(sql)
     if (seq !== runSeq) return // 旧批次已失效,丢弃结果
     // 执行成功 → 写入历史(含结果快照,前 100 行;任务钩子:trim 非空且 ≤2000,同 sql 去重保最新,上限 20)
@@ -1316,7 +1220,7 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   } finally {
     // 仅本批次仍有效时才停日志轮询(否则会停掉新批次的轮询)
     if (isSpark && seq === runSeq) {
-      // 收尾:补一次最终拉取,读到最后写入的 [stage] 完成行与保留的 stage 快照(完成后可追溯)
+      // 收尾:补一次最终拉取,确保查询末尾的 Beeline 日志也能显示
       try {
         await pollSparkLogs()
       } catch {
@@ -1470,7 +1374,7 @@ async function execSegments(segs: string[], seq: number) {
   if (seq === runSeq && results.value.length) activePane.value = results.value.length
 }
 
-/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行;python 整段执行) */
+/** 执行(选中内容 / 光标段;选中内容含多条时逐条执行) */
 async function runQuery() {
   // 每人同时最多提交一批:上一批未结束则拒绝新批(FIFO 排队由批内逐条完成)
   if (loading.value) {
@@ -1491,23 +1395,6 @@ async function runQuery() {
   // 自定义 ${var} 参数:只替换本次执行段内已填值的变量;未填的原样传给引擎
   const varVals = collectRunVars(rawSql)
   const target = expandSqlVars(rawSql, varVals)
-  // python 编辑器整段执行(分号是 python 合法语句分隔符,不能切段)
-  if (engine.value === 'pyspark') {
-    loading.value = true
-    error.value = ''
-    try {
-      const item = { sql: target, columns: [], rows: [], costMs: 0, truncated: false, running: true } as QueryResultItem
-      results.value.push(item)
-      if (results.value.length > MAX_RESULTS) {
-        results.value.splice(0, results.value.length - MAX_RESULTS)
-      }
-      await execOne(target, item, seq)
-      if (seq === runSeq) activePane.value = results.value.indexOf(item) + 1
-    } finally {
-      loading.value = false
-    }
-    return
-  }
   // flinksql 流式模式:整段作为一个整体提交给 pyflink(由后端 execute_script 内部按分号拆分
   // 逐条执行,使 CREATE TABLE 与 INSERT 在同一 t_env 会话生效),绝不在此拆段
   if (engine.value === 'flinksql' && flinkMode.value === 'stream') {
@@ -1565,7 +1452,7 @@ async function stopQuery() {
       } else {
         await cancelFlink()
       }
-    } else if (engine.value === 'sparksql' || engine.value === 'pyspark') {
+    } else if (engine.value === 'sparksql') {
       // 同步请求或提交尚未拿到 jobId 时,按 Spark 当前 job group 取消
       await cancelSpark()
     } else if (currentDbJobId.value) {
@@ -1599,21 +1486,13 @@ onMounted(async () => {
       const first = datasources.value.find(
         (d) => d.type === 'mysql' || d.type === 'oracle' || d.type === 'impala' || d.type === 'sparksql'
       )
-      engine.value = first ? first.type as 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'pyspark' | 'flinksql' : ''
+      engine.value = first ? first.type as 'mysql' | 'oracle' | 'impala' | 'sparksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
       ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
     }
   } catch (e) {
     ElMessage.error(`加载数据源失败:${e instanceof Error ? e.message : e}`)
-  }
-  // 读取 Spark 引擎当前 executor 配置回显(失败静默,不影响主流程)
-  try {
-    const st = (await sparkStatus()) as { config?: { executorInstances?: number } }
-    sparkExecutors.value = st.config?.executorInstances ?? 0
-    sparkExecutorsCommitted.value = sparkExecutors.value
-  } catch {
-    /* 引擎未启用或不可达时忽略 */
   }
 })
 
@@ -1622,33 +1501,9 @@ watch(engine, async (val) => {
   if (!val) return
   const first = filteredDbs.value.find((d) => d.type === val)
   db.value = first?.name || ''
-  // 编辑器语言由 SqlEditor 的 :language prop 驱动(sql ↔ python),无需手动 setOption
+  // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
 
-/** 切换 Spark executor 数量:调后端存配置,停会话下次查询自动重建 */
-async function onSparkExecutorsChange(val: number | undefined) {
-  const previous = sparkExecutorsCommitted.value
-  if (sparkExecutorsLoading.value) {
-    sparkExecutors.value = previous
-    return
-  }
-  if (val == null || ![0, 5, 10, 15, 20].includes(val)) {
-    sparkExecutors.value = previous
-    return
-  }
-  sparkExecutorsLoading.value = true
-  try {
-    await setSparkExecutors(val)
-    sparkExecutorsCommitted.value = val
-    if (val === 0) ElMessage.info('已切换为动态分配;下次 sparksql 查询生效')
-    else ElMessage.info(`已设置固定 ${val} 个 executor;下次 sparksql 查询生效(需重建会话)`)
-  } catch (e) {
-    ElMessage.error(`设置失败:${e instanceof Error ? e.message : e}`)
-    sparkExecutors.value = previous
-  } finally {
-    sparkExecutorsLoading.value = false
-  }
-}
 </script>
 
 <template>
@@ -1668,24 +1523,7 @@ async function onSparkExecutorsChange(val: number | undefined) {
         <el-option label="Oracle" value="oracle" />
         <el-option label="Impala" value="impala" />
         <el-option label="SparkSQL" value="sparksql" />
-        <el-option label="PySpark" value="pyspark" />
         <el-option label="FlinkSQL" value="flinksql" />
-      </el-select>
-      <el-select
-        v-if="engine === 'sparksql'"
-        v-model="sparkExecutors"
-        class="executor-select"
-        placeholder="Executor 数量"
-        :loading="sparkExecutorsLoading"
-        :disabled="loading"
-        @change="onSparkExecutorsChange"
-      >
-        <el-option label="动态分配(自适应)" :value="0" />
-        <el-option v-if="sparkExecutors > 0 && ![5, 10, 15, 20].includes(sparkExecutors)" :label="`当前配置(${sparkExecutors} 个)`" :value="sparkExecutors" />
-        <el-option label="5 个" :value="5" />
-        <el-option label="10 个" :value="10" />
-        <el-option label="15 个" :value="15" />
-        <el-option label="20 个" :value="20" />
       </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
@@ -1765,7 +1603,7 @@ async function onSparkExecutorsChange(val: number | undefined) {
         class="sql-editor"
         :model-id="activeTabId"
         :value="activeTab?.content ?? ''"
-        :language="engine === 'pyspark' ? 'python' : 'sql'"
+        language="sql"
         :theme-mode="themeMode"
         :font-size="fontSize"
         :current-db="db"
@@ -1823,28 +1661,6 @@ async function onSparkExecutorsChange(val: number | undefined) {
                 <el-button text size="small" @click="() => void clearSparkLogs()">清空</el-button>
               </template>
             </span>
-          </div>
-          <div v-if="engine !== 'impala' && sparkStageData.stages.length" class="spark-stages">
-            <div class="spark-stages-head">
-              <span class="spark-stages-title">Stage 进度</span>
-              <span v-if="sparkStageData.numActiveJobs" class="spark-stages-meta">
-                {{ sparkStageData.numActiveJobs }} 个活跃 Job · {{ sparkStageData.numActiveStages }} 个活跃 Stage
-              </span>
-            </div>
-            <div v-for="sl in sparkStageData.stages" :key="(sl as SparkStage).stageId" class="spark-stage">
-              <div class="spark-stage-line">
-                <span class="spark-stage-id">Stage {{ (sl as SparkStage).stageId }}</span>
-                <span class="spark-stage-name" :title="(sl as SparkStage).name">{{ (sl as SparkStage).name }}</span>
-                <span class="spark-stage-status" :class="stageStatusClass((sl as SparkStage).status)">{{ (sl as SparkStage).status }}</span>
-                <span class="spark-stage-count">{{ (sl as SparkStage).completedTasks }}/{{ (sl as SparkStage).numTasks }} tasks</span>
-              </div>
-              <el-progress
-                :percentage="stagePct(sl as SparkStage)"
-                :show-text="false"
-                :stroke-width="5"
-                :status="stageProgressStatus(sl as SparkStage)"
-              />
-            </div>
           </div>
           <pre ref="sparkLogBox" class="spark-logs-body">{{ (engine === 'impala' ? dbJobLogText : sparkLogText) || logEmptyHint }}</pre>
         </div>
@@ -2133,10 +1949,6 @@ async function onSparkExecutorsChange(val: number | undefined) {
   width: 96px;
 }
 
-.executor-select {
-  width: 120px;
-}
-
 .db-select {
   width: 200px;
 }
@@ -2340,93 +2152,6 @@ async function onSparkExecutorsChange(val: number | undefined) {
   display: flex;
   align-items: center;
 }
-/* ── Spark Stage 进度(日志面板顶部) ────────────────────────── */
-.spark-stages {
-  border-bottom: 1px solid $border;
-  padding: 8px 14px;
-  max-height: 200px;
-  overflow: auto;
-
-  .spark-stages-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-
-    .spark-stages-title {
-      font-size: 12px;
-      font-weight: 600;
-      color: $text;
-    }
-
-    .spark-stages-meta {
-      font-size: 11px;
-      color: $muted;
-    }
-  }
-
-  .spark-stage {
-    margin-bottom: 6px;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
-  }
-
-  .spark-stage-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    margin-bottom: 2px;
-
-    .spark-stage-id {
-      color: $primary;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-
-    .spark-stage-name {
-      color: $text;
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .spark-stage-status {
-      flex-shrink: 0;
-      font-size: 10px;
-      padding: 0 5px;
-      border-radius: 3px;
-      color: $muted;
-      background: var(--el-fill-color-light);
-
-      &.running {
-        color: $primary;
-        background: rgba(64, 158, 255, 0.12);
-      }
-
-      &.succeeded {
-        color: #67c23a;
-        background: rgba(103, 194, 58, 0.12);
-      }
-
-      &.failed {
-        color: #f56c6c;
-        background: rgba(245, 108, 108, 0.12);
-      }
-    }
-
-    .spark-stage-count {
-      color: $muted;
-      flex-shrink: 0;
-      font-variant-numeric: tabular-nums;
-    }
-  }
-}
-
 .spark-logs-body {
   flex: 1;
   min-height: 0; /* 关键:日志容器按布局高度收缩并在内部滚动,而不是撑高整页 */

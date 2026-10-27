@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel
 
 # ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
 CONFIG_FILE = "datasources.json"
@@ -96,18 +96,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("db-proxy")
 
-# Spark 引擎配置(顶层 spark 段,缺省 = 禁用;未装 pyspark 不影响 mysql/oracle)
-from spark_engine import init_engine  # noqa: E402
+# Spark SQL 通过本机 Beeline / HiveServer2 Spark Thrift 执行;任务管理器继续复用。
+from spark_engine import SparkJobManager  # noqa: E402
+from spark_thrift_engine import SparkThriftEngine  # noqa: E402
 from impala_engine import ImpalaEngine, ImpalaSchemaCache, schema_summary as _impala_schema_summary  # noqa: E402
 
 SPARK_CFG = CONFIG.get("spark") or {}
 SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SPARK_ENGINE = init_engine(SPARK_CFG, SPARK_BASE_DIR)
+SPARK_ENGINE = SparkThriftEngine(SPARK_CFG, SPARK_BASE_DIR)
+SPARK_JOBS = SparkJobManager(SPARK_ENGINE)
 if SPARK_ENGINE.enabled:
-    from spark_engine import SparkJobManager
-    SPARK_JOBS = SparkJobManager(SPARK_ENGINE)
-    log.info("spark engine enabled (master=%s, queue=%s, allowWrite=%s)",
-             SPARK_CFG.get("master"), SPARK_CFG.get("queue"), SPARK_CFG.get("allowWrite"))
+    log.info("spark thrift engine enabled (jdbcUrl=%s, user=%s)",
+             SPARK_ENGINE.status()["config"]["jdbcUrl"], SPARK_CFG.get("user", "root"))
 
 # Flink 引擎(内嵌 PyFlink,连接常驻 YARN Session;缺省 = 禁用)
 from flink_engine import FlinkEngine, _setup_logger as _flink_setup_logger  # noqa: E402
@@ -1076,18 +1076,16 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     }
 
 
-# ── Spark 引擎(集成:常驻 client session + SQL/PySpark + 日志透传)────
+# ── Spark Thrift 引擎(SQL + Beeline 日志透传)───────────────────────
 class SparkQueryReq(BaseModel):
-    kind: str = "sql"  # "sql" | "pyspark"
+    kind: str = "sql"
     sql: Optional[str] = None
-    code: Optional[str] = None
     writeUnlocked: bool = False
-    timeoutMs: int = 120000  # 与门户/前端默认 120s 对齐;超时自动 cancelJobGroup 释放锁
+    timeoutMs: int = 120000
 
 
 class SparkJobSubmitReq(BaseModel):
     sql: str = ""
-    code: str = ""  # kind=pyspark 用
     kind: str = "sql"
     writeUnlocked: bool = False
     timeoutMs: int = 600000  # 异步任务默认 10 分钟(大查询可传更久,不撞网关超时)
@@ -1096,31 +1094,6 @@ class SparkJobSubmitReq(BaseModel):
 class SparkExportSubmitReq(BaseModel):
     sql: str
     timeoutMs: int = 7200000
-
-
-class SparkConfigReq(BaseModel):
-    executorInstances: StrictInt = 0  # 0=动态分配(后端 maxExecutors);>0=固定常驻数量
-
-
-@app.post("/spark/config")
-def spark_config(
-    req: SparkConfigReq,
-    x_db_token: Optional[str] = Header(default=None),
-) -> Dict[str, Any]:
-    """前端设置 Spark executor 数量(方案A):存 cfg + 停会话,下次查询自动重建生效。"""
-    require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    if req.executorInstances < 0:
-        raise HTTPException(status_code=400, detail="executorInstances 必须是非负整数")
-    try:
-        SPARK_ENGINE.set_executors(req.executorInstances)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    log.info("spark config updated: executorInstances=%s", req.executorInstances)
-    return {"code": 0, "data": {"executorInstances": req.executorInstances}}
 
 
 @app.post("/spark/query")
@@ -1135,14 +1108,11 @@ def spark_query(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
     try:
-        if req.kind == "pyspark":
-            if not req.code:
-                raise HTTPException(status_code=400, detail="code required for pyspark")
-            result = SPARK_ENGINE.execute_code(req.code, req.timeoutMs, req.writeUnlocked)
-        else:
-            if not req.sql:
-                raise HTTPException(status_code=400, detail="sql required")
-            result = SPARK_ENGINE.execute_sql(req.sql, req.writeUnlocked, req.timeoutMs)
+        if req.kind != "sql":
+            raise HTTPException(status_code=400, detail="Spark Thrift 仅支持 SparkSQL")
+        if not req.sql:
+            raise HTTPException(status_code=400, detail="sql required")
+        result = SPARK_ENGINE.execute_sql(req.sql, req.writeUnlocked, req.timeoutMs)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
@@ -1341,16 +1311,6 @@ def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, 
     return {"code": 0, "data": SPARK_ENGINE.status()}
 
 
-@app.get("/spark/stages")
-def spark_stages(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    return {"code": 0, "data": SPARK_ENGINE.stages_status()}
-
-
 @app.post("/spark/jobs")
 def spark_job_submit(
     req: SparkJobSubmitReq,
@@ -1363,12 +1323,13 @@ def spark_job_submit(
         raise HTTPException(
             status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
         )
-    kind = "pyspark" if req.kind == "pyspark" else "sql"
-    sql = req.code if kind == "pyspark" else req.sql
+    if req.kind != "sql":
+        raise HTTPException(status_code=400, detail="Spark Thrift 仅支持 SparkSQL")
+    sql = req.sql
     if not sql or not str(sql).strip():
         raise HTTPException(status_code=400, detail="sql is required")
-    job_id = SPARK_JOBS.submit(str(sql), kind, req.writeUnlocked, req.timeoutMs)
-    log.info("spark job submitted: %s kind=%s", job_id, kind)
+    job_id = SPARK_JOBS.submit(str(sql), "sql", req.writeUnlocked, req.timeoutMs)
+    log.info("spark job submitted: %s kind=sql", job_id)
     return {"code": 0, "data": {"jobId": job_id}}
 
 
@@ -1410,7 +1371,7 @@ def spark_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=Non
 
 @app.post("/spark/cancel")
 def spark_cancel(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    """取消当前正在执行的 spark 查询/代码(手动停止或超时均走此逻辑)。"""
+    """取消当前正在执行的 Spark SQL (手动停止或超时均走此逻辑)。"""
     require_auth(x_db_token)
     if not SPARK_ENGINE.enabled:
         raise HTTPException(

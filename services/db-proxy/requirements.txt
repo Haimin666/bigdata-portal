@@ -12,7 +12,5 @@ oracledb>=1.4,<2.2
 # Impala 引擎(可选);sqlglot 用于 Hive/Impala 方言解析和字段类型检查。
 impyla==0.23.0
 sqlglot==25.34.1
-# Spark 引擎(可选):仅启用 datasources.json 的 spark 段时需要。
-# Spark 4.2 / PySpark 4.2 要求 Python 3.10+、Java 17+;db-proxy 核心可继续使用较低版本 Python。
-# PySpark 版本必须与 sparkHome 中的 Spark 保持一致;引擎从 sparkHome/python/lib/*.zip 加载。
-# pyspark==4.2.*
+# Spark SQL 通过本机 $SPARK_HOME/bin/beeline 连接 Spark Thrift Server;
+# db-proxy Python 环境不安装 PySpark 或 HiveServer2 client 依赖。

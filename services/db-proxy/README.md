@@ -21,7 +21,7 @@
 ```
 
 > ⚠️ **安全边界**:除显式配置 `readOnly: true` 的 Impala 数据源外,db-proxy 对 `8756` 端口零读写限制——谁能持 `X-DB-Token`
-> 谁就能任意读写/执行 pyspark。防护依赖两点:
+> 谁就能通过 Spark Thrift 执行 SQL。防护依赖两点:
 > 1. **防火墙只放行门户服务器 IP** 访问 8756(禁止内网其他机器直连);
 > 2. `authToken` 保密(与门户 `config.local.json` 的 `dbProxyToken` 一致)。
 
@@ -72,7 +72,7 @@
 ## 启动
 
 ```bash
-python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyflink
+python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark Thrift 需本机 SPARK_HOME/bin/beeline
 ```
 
 ## 请求执行生命周期(MySQL/Doris/Oracle/Impala)
@@ -117,11 +117,11 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 | GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
-| POST | `/spark/query` | Spark SQL/pyspark 执行 |
+| POST | `/spark/query` | Spark SQL 执行 |
 | GET | `/spark/schema/databases` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟) |
 | GET | `/spark/schema/tables?db=` | Spark 库下表列表(SHOW TABLES IN) |
 | GET | `/spark/schema/fields?db=&table=` | Spark 表字段列表(DESC,含类型/注释) |
-| GET  | `/spark/status` `/spark/logs` `/spark/stages` | session 状态/日志/阶段 |
+| GET  | `/spark/status` `/spark/logs` | Thrift 连接状态 / Beeline 执行日志 |
 | POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步 |
 | POST | `/flink/query` `/flink/async` (+`/{id}[/cancel]`) | Flink 交互式(批/流) |
 | GET  | `/flink/status` `/flink/connectors` `/flink/jobs` | 状态/连接器/流式任务 |
@@ -130,75 +130,32 @@ python3 main.py        # 依赖 requirements.txt;spark 需 pyspark,flink 需 pyf
 | GET  | `/flink/prejob/config` | PreJob 配置快照 |
 | GET/POST | `/scripts/*` | 已迁移平台的旧脚本接口,保留兼容 |
 
-## Spark 引擎(自建网关,替代 Livy)
+## Spark Thrift 查询
 
-db-proxy 内集成**常驻 client 模式 SparkSession**(懒加载,首次 `/spark/query` 才创建),
-SQL 与 PySpark 共用同一 session,临时视图跨请求保留;`threading.Lock` 串行执行。
+db-proxy 不再在本地创建 SparkSession，而是在部署主机上启动 Beeline 子进程连接 Spark Thrift Server。默认配置对应的命令为：
 
-### 配置(datasources.json 顶层 `spark` 段,缺省 = 引擎禁用)
+```bash
+$SPARK_HOME/bin/beeline -u 'jdbc:hive2://127.0.0.1:10001/default' -n root -e 'SELECT ...'
+```
+
+`datasources.json` 顶层 `spark` 段：
 
 ```json
 "spark": {
   "enabled": true,
-  "master": "yarn",
-  "deployMode": "client",
-  "appName": "db-proxy-spark",
-  "sparkHome": "/opt/spark/spark4/spark4.2",
-  "driverMemory": "4g",
-  "executorMemory": "8g",
-  "executorCores": 4,
-  "executorInstances": 4,
-  "queue": "default",
-  "hiveMetastoreUris": "thrift://hadoop-nn-1.bigdata.shiqiao.com:9083",
-  "sparkConf": {
-    "spark.archives": "hdfs:///spark4/resources/jdk17.zip#jdk,hdfs:///spark4/resources/py312.zip#py3",
-    "spark.yarn.appMasterEnv.JAVA_HOME": "./jdk",
-    "spark.executorEnv.JAVA_HOME": "./jdk",
-    "spark.yarn.appMasterEnv.PYSPARK_PYTHON": "./py3/bin/python",
-    "spark.executorEnv.PYSPARK_PYTHON": "./py3/bin/python",
-    "spark.pyspark.python": "./py3/bin/python",
-    "spark.hadoop.io.compression.codecs": "org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,org.apache.hadoop.io.compress.SnappyCodec,org.apache.hadoop.io.compress.Lz4Codec,org.apache.hadoop.io.compress.ZStandardCodec",
-    "spark.hadoop.io.compression.codec.lzo.class": ""
-  },
+  "jdbcUrl": "jdbc:hive2://127.0.0.1:10001/default",
+  "user": "root",
+  "beelinePath": "",
   "defaultLimit": 1000,
   "maxLimit": 500000,
   "maxSqlLen": 65536,
-  "logDir": "spark-logs"
+  "exportPath": "hdfs:///tmp/db-proxy-spark-exports"
 }
 ```
 
-`spark.hadoop.io.compression.codecs` 显式列出 Spark classpath 中可用的 Hadoop codec并排除缺失的 LZO codec；同时将 `spark.hadoop.io.compression.codec.lzo.class` 设为空字符串。调整后重启 db-proxy 使常驻 SparkSession 重新创建。
+`beelinePath` 留空时使用 `$SPARK_HOME/bin/beeline`；db-proxy 与 Spark Thrift Server 同机且共享网络命名空间时通过回环地址访问。若 db-proxy 在 Docker 容器中，容器内的 `127.0.0.1` 指向容器本身，需把 `jdbcUrl` 配成容器可达的宿主机地址。查询和元数据都通过 HiveServer2 执行；取消会终止当前 Beeline 子进程，日志显示 stderr 进度与诊断信息，结果 CSV 单独解析后返回。HDFS 导出使用 `INSERT OVERWRITE DIRECTORY ... USING CSV` 并仅返回目录路径。此改造不再支持 PySpark、Executor 数量控制或 SparkContext Stage 进度。更新配置后重启 db-proxy。
 
-工作台 executor 选择器提供动态分配(自适应)及固定 5/10/15/20 个选项；服务端 `/api/spark/config` 仍接受任意非负整数，已有的非枚举配置会显示为当前值。设置后当前 session 停止，并在下一次查询时按新数量重建。
-
-**特性**
-- SQL 写语句(**INSERT/CREATE/DROP/ALTER/TRUNCATE/MSCK 等**):引擎不再校验
-  `allowWrite`/`writeUnlocked`,直接放行——写权限由门户网关 `/api/spark` 管控
-- PySpark 代码:信任模式(执行于 `{spark, sc}` 命名空间),结果赋给 `result`
-  变量(DataFrame/dict 列表)即返回表格;完整审计日志
-- 日志透传:log4j 重定向 `spark-logs/spark-jvm.log`,审计 `spark-logs/spark-audit.log`;
-  `GET /spark/logs?offset=N` 增量读取
-
-**依赖**:Spark 4.2 要求 Python 3.10+、Java 17+；当前部署使用 Python 3.12，
-并确保 Spark 安装目录中的 PySpark 与 Spark 版本匹配。client 模式的 driver 在 db-proxy
-进程内运行，因此服务本身必须由 Python 3.12 启动；YARN executors 使用 HDFS archives
-中的 Python 环境。引擎会将 `$SPARK_HOME/python/lib/*.zip` 加入进程 `sys.path` 和
-`PYTHONPATH`，无需在启动脚本里手工设置。运行机器需可提交 YARN(需 `HADOOP_CONF_DIR`)并直连 Hive Metastore。
-Session 创建 30~90s,首个请求等待,之后复用。
-
-启动 db-proxy 的服务环境设置如下；服务进程本身由 Python 3.12 启动。YARN 侧的
-JDK/Python 通过 `spark.archives` 分发；归档解压后的路径应与 `spark.pyspark.python`
-等配置一致。
-
-```bash
-export SPARK_HOME=/opt/spark/spark4/spark4.2
-export JAVA_HOME=/opt/spark/spark4/jdk17
-export PYSPARK_PYTHON=/opt/spark/spark4/py312/bin/python3.12
-export PYSPARK_DRIVER_PYTHON=/opt/spark/spark4/py312/bin/python3.12
-unset PYTHONPATH
-cd /path/to/services/db-proxy
-exec /opt/spark/spark4/py312/bin/python3.12 -m uvicorn main:app --host 0.0.0.0 --port 8756
-```
+普通 `SELECT/WITH` 查询在 SQL 执行前补上默认 `LIMIT`，已有顶层 `LIMIT` 不超过 `maxLimit`；`SHOW`、`DESC`、`EXPLAIN` 不改写。通过 `/spark/query` 或 `/spark/jobs` 提交 PySpark payload 会返回 HTTP 400。
 
 ## Flink 引擎(双通道:交互式 + PreJob)
 
