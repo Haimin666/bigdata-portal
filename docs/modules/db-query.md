@@ -46,6 +46,7 @@
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
 - **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
 - **Spark 查询结果限制与导出**:普通 Spark SQL 无显式 `LIMIT` 时在提交给 Thrift 前补默认 `LIMIT 1000`;显式 SQL 行数上限最高为 `maxLimit`(默认 500,000)。结果从 Beeline CSV 输出解析并设置 `truncated`。工具栏「导出到 HDFS」接受单条只读 `SELECT/WITH`，通过 `INSERT OVERWRITE DIRECTORY ... USING CSV OPTIONS (header 'true')` 在 Spark Thrift 上执行，不将完整结果传回门户；异步执行、可取消，完成后返回 HDFS 路径。
+- **Spark 网关提交**:`/api/spark/query` 与 `/api/spark/jobs` 均向 Spark 网关明确传递 `kind: 'sql'`;不能引用请求中未定义的局部类型变量，否则会在请求到达 db-proxy 前抛出 `ReferenceError`。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
@@ -58,7 +59,7 @@
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);切换/更新结果项时页码重置为第 1 页，避免沿用旧结果页码造成有数据却显示空白;点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化**:el-table `@header-dragend` 按 库.表(或 SQL 前 40 字符)签名写入 localStorage,刷新保留。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
-- **Spark Thrift 日志**:执行期间 3s 轮询 `/api/spark/logs` 展示 Beeline stderr 中的进度与诊断增量输出(结果行单独进入结果表);结束即停。Stage 进度和 SparkSession/JVM 日志接口不再提供。
+- **Spark Thrift 日志与取消**:执行期间 3s 轮询 `/api/spark/logs` 展示 Beeline stderr 中的进度与诊断增量输出(结果行单独进入结果表);结束即停。停止操作只按当前 jobId 取消，提交尚未返回 jobId 时由执行轮询在拿到自己的 jobId 后取消；不得调用会终止共享引擎当前子进程的全局取消接口，以免误停其他用户任务。Stage 进度和 SparkSession/JVM 日志接口不再提供。
 - **解锁体系(已移除)**:写权限密码验证(`/api/spark/auth` + `X-Spark-Token`)已移除 —— 写 SQL 直接执行,权限由「数据权限矩阵」管控,数据源 `readOnly` 兑底;spark/flink 网关不再校验解锁 token(db-proxy 侧 `writeToken` 密钥与资源护栏保留)
 - **编辑器(Monaco)**:`SqlEditor.vue` 封装 —— 构造函数一次、model 池按 tab 切换(`editor.setModel`),撤销历史/光标按 tab 独立;主题 `portal-dark/portal-light`(defineTheme,仅画布,不污染全局)与字号由 props 驱动;Tab 缩进交给 Monaco 原生(浮层选词/多行缩进自动),Shift+Tab 反缩进、Cmd+/ 注释(逐行 `-- ` 切换)组件内实现。选中同一行的 1–64 字符时，在当前 SQL 文档中高亮最多 500 个完全相同的其他匹配项(大小写敏感，不限定 ASCII 标识符)。**SQL 专属折叠**:注册 folding provider,按跨行括号(CTE/子查询/INSERT SELECT)与块注释折叠(状态机跳过注释/字符串内的括号)。**超长行降级**:检测单行 >500 字符 → 自动 wordWrap off 防折行计算卡,恢复后回 on。**行内校验**:同样的词法扫描产出 markers —— 未闭合引号/括号 → 波浪线 + hover 提示(300ms 防抖;跳过 -- # /* */ 注释与字符串)。**卡死根治(2026-08)**:CM5 的"每键全文档扫描 + 上千候选一次性渲染 DOM"不复存在 —— 补全为异步 provider + **文中词行级增量索引**(每键只重建光标 1 行;Enter/粘贴/删除等行数变化低频场景才整表重建)+ 候选上限截断 + Monaco 虚拟滚动渲染;`${var}` 参数行同步在 change 事件中与快照**共用一次 getValue**(不再每键两次全量)
 - **脚本树**:`data/scripts` 本地存储,文件 = 脚本(不入库);**按用户分桶**(2026-08)——`tree.json` 按用户名分桶(`users.<username>.my` 私有桶 + `users.__shared__` 公共桶);前端固定双根:「我的文件夹」(私有,仅本人可见可写)+「共享文件夹」(**所有人可读可写**,全员协作,右键含完整菜单 + 「复制到我的文件夹」,可拖入拖出);旧版顶层 `{my:[]}` 格式首次加载自动迁移进公共桶

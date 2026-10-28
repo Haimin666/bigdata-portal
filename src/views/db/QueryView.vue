@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, cancelSpark, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -1428,7 +1428,7 @@ async function runQuery() {
   }
 }
 
-/** 停止当前查询:中断本批剩余段(前端不再发后续 SQL),并尝试取消引擎 job */
+/** 停止当前查询:中断本批剩余段;Spark 提交返回 jobId 后按 id 精确取消。 */
 async function stopQuery() {
   batchCancelled = true
   runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
@@ -1439,7 +1439,6 @@ async function stopQuery() {
       } catch {
         /* 忽略 */
       }
-      await cancelSpark()
     } else if (engine.value === 'flinksql') {
       // 流式异步任务:精确取消当前 job;batch 同步查询走 cancelFlink
       if (currentFlinkJobId.value) {
@@ -1452,9 +1451,6 @@ async function stopQuery() {
       } else {
         await cancelFlink()
       }
-    } else if (engine.value === 'sparksql') {
-      // 同步请求或提交尚未拿到 jobId 时,按 Spark 当前 job group 取消
-      await cancelSpark()
     } else if (currentDbJobId.value) {
       // mysql/oracle 异步任务:精确取消当前 job(查询可能仍在后台跑,结果丢弃)
       try {

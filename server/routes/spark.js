@@ -1,9 +1,4 @@
-// Spark SQL 执行路由(从 index.js 拆出):
-// 不代理整个 Livy,只暴露查询入口,避免前端直接操作 session。
-// 安全:spark.sql() 无只读限制,写语句(INSERT/CREATE/DROP/ALTER/TRUNCATE 等)
-// 必须携带 POST /api/spark/auth 签发的 X-Spark-Token(密码解锁,类似 Jupyter 登录),
-// 未配置 SPARK_WRITE_PASSWORD 时写操作一律禁止(默认只读)。
-// 暴力破解防护、token 签发/校验/清理(12h TTL、绑定签发用户)均在本模块内。
+// Spark Thrift 查询路由:门户网关执行数据权限检查,db-proxy 负责 Thrift 转发。
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import config from '../config.js'
 import { isSparkWriteSql, isSparkExportSql } from '../utils/sql-write-detect.js'
@@ -105,7 +100,7 @@ export function setupSpark(app) {
         // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
-        const result = await sparkQuery(String(sql), { kind: k, writeUnlocked, timeoutMs })
+        const result = await sparkQuery(String(sql), { kind: 'sql', writeUnlocked, timeoutMs })
         res.json({ code: 0, data: result })
       } catch (e) {
         if (e?.statusCode === 403) {
@@ -142,7 +137,7 @@ export function setupSpark(app) {
     app.get('/api/spark/schema/fields', sparkSchemaHandler((req) => sparkSchemaFields(String(req.query.db || ''), String(req.query.table || ''))))
 
     // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
-    // 写拦截与 /api/spark/query 一致:写语句必须解锁(X-Spark-Token)
+    // 写权限与 /api/spark/query 一致:由门户数据权限矩阵判定。
     app.post('/api/spark/jobs', async (req, res) => {
       try {
         const { sql, code, kind } = req.body || {}
@@ -160,7 +155,7 @@ export function setupSpark(app) {
         // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
         const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
-        const data = await sparkSubmitJob(body, { kind: k, writeUnlocked, timeoutMs })
+        const data = await sparkSubmitJob(body, { kind: 'sql', writeUnlocked, timeoutMs })
         if (req.dbQueryApiPrincipal && data?.jobId) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
         res.json({ code: 0, data })
       } catch (e) {
