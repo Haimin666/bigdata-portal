@@ -45,7 +45,7 @@
 - **文档词候选**:使用 `wordBasedSuggestions: 'off'` 禁用 Monaco 默认词源，保留 `suggest.showWords: true`，否则自定义 provider 的 `Text` 候选（例如已输入字段名）也会被隐藏。
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
 - **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
-- **Spark 查询结果限制与导出**:普通 Spark SQL 无显式 `LIMIT` 时在提交给 Thrift 前补默认 `LIMIT 1000`;显式 SQL 行数上限最高为 `maxLimit`(默认 500,000)。结果从 Beeline CSV 输出解析并设置 `truncated`。工具栏「导出到 HDFS」接受单条只读 `SELECT/WITH`，通过 `INSERT OVERWRITE DIRECTORY ... USING CSV OPTIONS (header 'true')` 在 Spark Thrift 上执行，不将完整结果传回门户；异步执行、可取消，完成后返回 HDFS 路径。
+- **Spark 查询结果限制与导出**:普通 Spark SQL 无显式 `LIMIT` 时在提交给 Thrift 前补默认 `LIMIT 1000`；顶层整数 `LIMIT` 超过 `maxLimit`(默认 500,000)时压到上限，`LIMIT ALL` 替换为上限，其他常量表达式包装 `LEAST(expr, maxLimit)`；只有 `OFFSET` 时默认 `LIMIT` 插在 `OFFSET` 前。扫描跳过字符串、引号标识符及 `--`/嵌套 `/* */` 注释；多条 SQL 在 db-proxy 拒绝。提交给 Beeline `-e` 前确保 SQL 有终止分号(无分号时另起一行追加，避免尾部 `--` 注释吞掉分号)。结果从 Beeline CSV 输出解析并设置 `truncated`。工具栏「导出到 HDFS」接受单条只读 `SELECT/WITH`，通过 `INSERT OVERWRITE DIRECTORY ... USING CSV OPTIONS (header 'true')` 在 Spark Thrift 上执行，不将完整结果传回门户；异步执行、可取消，完成后返回 HDFS 路径。
 - **Spark 网关提交**:`/api/spark/query` 与 `/api/spark/jobs` 均向 Spark 网关明确传递 `kind: 'sql'`;不能引用请求中未定义的局部类型变量，否则会在请求到达 db-proxy 前抛出 `ReferenceError`。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断

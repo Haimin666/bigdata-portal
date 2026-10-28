@@ -120,35 +120,79 @@ def _apply_row_limit(sql: str, default_limit: int, max_limit: int):
     masked = _mask_sql(sql)
     cap = max(1, int(max_limit))
     fallback = min(max(1, int(default_limit)), cap)
+
+    semicolon = re.search(r";", masked)
+    if semicolon and masked[semicolon.end():].strip():
+        raise ValueError("Spark Thrift accepts only one SQL statement")
+    statement_end = semicolon.start() if semicolon else len(masked)
     if not re.match(r"^\s*(SELECT|WITH)\b", masked, re.IGNORECASE):
         return sql, fallback, False
 
     depth = 0
-    top_level_limits = []
-    for match in re.finditer(r"\bLIMIT\s+(\d+)\b|[()]", masked, re.IGNORECASE):
+    top_level = []
+    for match in re.finditer(r"\bLIMIT\b|\bOFFSET\b|[()]", masked[:statement_end], re.IGNORECASE):
         token = match.group(0)
         if token == "(":
             depth += 1
         elif token == ")":
             depth = max(0, depth - 1)
         elif depth == 0:
-            top_level_limits.append(match)
+            top_level.append((token.upper(), match))
 
+    top_level_limits = [match for token, match in top_level if token == "LIMIT"]
     if top_level_limits:
         limit_match = top_level_limits[-1]
-        requested = int(limit_match.group(1))
-        if requested > cap:
-            start, end = limit_match.span(1)
-            return sql[:start] + str(cap) + sql[end:], cap, True
-        return sql, requested, False
+        next_offset = next(
+            (match for token, match in top_level
+             if token == "OFFSET" and match.start() > limit_match.end()),
+            None,
+        )
+        expression_end = next_offset.start() if next_offset else statement_end
+        expression_start = limit_match.end()
+        while expression_start < expression_end and masked[expression_start].isspace():
+            expression_start += 1
+        expression_end = min(expression_end, len(masked))
+        while expression_end > expression_start and masked[expression_end - 1].isspace():
+            expression_end -= 1
+        expression = masked[expression_start:expression_end]
+        if not expression:
+            raise ValueError("Spark LIMIT requires an expression")
 
-    limit = fallback
-    end = len(masked.rstrip())
+        if expression.upper() == "ALL":
+            return (sql[:expression_start] + str(cap) + sql[expression_end:], cap, True)
+        if expression.isdigit():
+            requested = int(expression)
+            if requested > cap:
+                return (sql[:expression_start] + str(cap) + sql[expression_end:], cap, True)
+            return sql, requested, False
+
+        # Spark accepts foldable expressions in LIMIT; clamp those without duplicating the clause.
+        raw_expression = sql[expression_start:expression_end]
+        bounded_expression = "LEAST((%s), %s)" % (raw_expression, cap)
+        return (sql[:expression_start] + bounded_expression + sql[expression_end:], cap, True)
+
+    top_level_offsets = [match for token, match in top_level if token == "OFFSET"]
+    if top_level_offsets:
+        offset_match = top_level_offsets[0]
+        insert_at = len(masked[:offset_match.start()].rstrip())
+        suffix = sql[insert_at:]
+        separator = "" if suffix[:1].isspace() else " "
+        bounded_sql = sql[:insert_at].rstrip() + " LIMIT " + str(fallback) + separator + suffix
+        return bounded_sql, fallback, True
+
+    end = len(masked[:statement_end].rstrip())
     if end and masked[end - 1] == ";":
         end -= 1
         while end and masked[end - 1].isspace():
             end -= 1
-    return sql[:end].rstrip() + " LIMIT " + str(limit) + sql[end:], limit, True
+    return sql[:end].rstrip() + " LIMIT " + str(fallback) + sql[end:], fallback, True
+
+
+def _ensure_beeline_terminator(sql: str) -> str:
+    """Beeline -e expects a terminated statement; put the terminator after trailing comments."""
+    if _mask_sql(sql).rstrip().endswith(";"):
+        return sql
+    return sql.rstrip() + "\n;"
 
 
 class SparkThriftEngine:
@@ -407,9 +451,10 @@ class SparkThriftEngine:
                     raise RuntimeError("查询已取消(cancelled)")
                 beeline = self.cfg.get("beelinePath") or os.path.join(
                     os.environ.get("SPARK_HOME", ""), "bin", "beeline")
+                beeline_sql = _ensure_beeline_terminator(sql)
                 args = [beeline, "-u", self.cfg.get("jdbcUrl", "jdbc:hive2://127.0.0.1:10001/default"),
                         "-n", self.cfg.get("user", "root"), "--outputformat=csv2", "--showHeader=true",
-                        "--silent=true", "--force=false", "--color=false", "-e", sql]
+                        "--silent=true", "--force=false", "--color=false", "-e", beeline_sql]
                 env = dict(os.environ)
                 env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") +
                                             " -Ddisable.quoting.for.sv=false").strip()
