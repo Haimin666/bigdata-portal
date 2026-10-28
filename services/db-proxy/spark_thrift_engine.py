@@ -68,6 +68,21 @@ def _join_readers(readers, timeout):
     return all(not reader.is_alive() for reader in readers)
 
 
+def _diagnostic_excerpt(head, tail, max_chars):
+    tail_lines = list(tail)
+    overlap = min(len(head), len(tail_lines))
+    while overlap and head[-overlap:] != tail_lines[:overlap]:
+        overlap -= 1
+    text = "".join(head + tail_lines[overlap:])
+    if len(text) <= max_chars:
+        return text
+    marker = "\n... diagnostic truncated ...\n"
+    budget = max(0, max_chars - len(marker))
+    first = (budget + 1) // 2
+    last = budget - first
+    return text[:first] + marker + (text[-last:] if last else "")
+
+
 def _mask_sql(sql: str) -> str:
     """Mask comments and quoted values while retaining SQL token positions."""
     chars = list(sql)
@@ -385,11 +400,18 @@ class SparkThriftEngine:
             readers = []
             columns = []
             rows = []
-            diagnostics = deque(maxlen=20)
-            stdout_diagnostics = deque(maxlen=20)
+            diagnostics_head = []
+            diagnostics_tail = deque(maxlen=20)
+            stdout_diagnostics_head = []
+            stdout_diagnostics_tail = deque(maxlen=20)
             parse_errors = []
             truncated = False
             stop_readers = threading.Event()
+
+            def remember_diagnostic(head, tail, text):
+                if len(head) < 20:
+                    head.append(text)
+                tail.append(text)
 
             def lines(stream, csv_output=False):
                 if csv_output:
@@ -402,10 +424,11 @@ class SparkThriftEngine:
                     if csv_output:
                         if re.match(r'^\s*"?(?:error|exception|analysisexception|failed)\b',
                                     text, re.IGNORECASE):
-                            stdout_diagnostics.append(text)
+                            remember_diagnostic(stdout_diagnostics_head,
+                                                stdout_diagnostics_tail, text)
                     else:
                         self._log("jvm", text + ("\n" if not text.endswith("\n") else ""))
-                        diagnostics.append(text)
+                        remember_diagnostic(diagnostics_head, diagnostics_tail, text)
                     yield line
 
             def check_fields(record):
@@ -485,9 +508,12 @@ class SparkThriftEngine:
                 if self._cancel_flag.is_set():
                     raise RuntimeError("查询已取消(cancelled)")
                 if exit_code:
+                    diagnostic = _diagnostic_excerpt(
+                        diagnostics_head, diagnostics_tail, 1400)
+                    stdout_diagnostic = _diagnostic_excerpt(
+                        stdout_diagnostics_head, stdout_diagnostics_tail, 600)
                     raise RuntimeError("Beeline exited with code %s: %s" %
-                                       (exit_code, "".join(
-                                           list(diagnostics) + list(stdout_diagnostics))[-2000:]))
+                                       (exit_code, diagnostic + stdout_diagnostic))
                 if parse_errors:
                     raise RuntimeError("Beeline CSV2 parse failed: %s" % parse_errors[0])
                 self._log("audit", "Beeline SQL finished\n")

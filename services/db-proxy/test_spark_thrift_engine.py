@@ -451,6 +451,19 @@ class SparkThriftEngineTests(unittest.TestCase):
         self.assertLess(len(str(caught.exception).encode("utf-8")), 4096)
         self.assertLess(len(engine.read_logs()["content"].encode("utf-8")), 16384)
 
+    def test_long_stack_trace_keeps_parse_error_and_sql_caret(self):
+        engine = self.engine()
+        stderr = ("ParseException: syntax error near LIMIT\nSELECT 1 LIMIT\n---------^^^\n" +
+                  "".join("  at SparkParser.frame%d\n" % index for index in range(40)))
+        with patch("spark_thrift_engine.subprocess.Popen",
+                   return_value=BeelineProcess(stderr=stderr, returncode=1)):
+            with self.assertRaises(RuntimeError) as caught:
+                engine.execute_sql("SELECT 1")
+        self.assertIn("ParseException: syntax error near LIMIT", str(caught.exception))
+        self.assertIn("---------^^^", str(caught.exception))
+        self.assertIn("SparkParser.frame39", str(caught.exception))
+        self.assertLess(len(str(caught.exception)), 2200)
+
     def test_posix_timeout_uses_own_session_and_kills_process_group(self):
         process = BeelineProcess(timeout=True, ignore_terminate=True)
         with patch("spark_thrift_engine.subprocess.Popen", return_value=process) as popen:
