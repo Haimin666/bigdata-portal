@@ -123,7 +123,8 @@ src/
 | `main.py` | FastAPI 入口:数据源加载、路由、鉴权、护栏(限流/并发信号量) |
 | `impala_engine.py` | Impala SQL 类型检查/修复;元数据读取通过本地 JSON 缓存复用,类型检查与表目录共用 |
 | `spark_thrift_engine.py` | Spark SQL Thrift 通道:通过 Beeline / HiveServer2 执行;进程级任务管理、输出日志增量回显、取消、有限结果解析及 Thrift SQL HDFS CSV 导出 |
-| `spark_engine.py` | Spark SQL session 通道:复用 `datasources.json` 的历史 YARN client 配置创建常驻 PySpark `SparkSession`;不是 `spark-sql` shell |
+| `spark_session_engine.py` | Spark SQL Session 适配器:复用 `spark_engine.SparkEngine` 的历史 YARN client 生命周期,执行 Spark SQL 与 HDFS 导出;不是 `spark-sql` shell |
+| `spark_engine.py` | Spark 共享任务管理与历史 SparkSession 生命周期实现;`SparkJobManager` 记录每个异步任务的执行模式并路由到对应适配器 |
 | `flink_engine.py` | Flink SQL 引擎:流/批双模式,支持 connector jar(paimon/mysql-cdc/kafka/hbase) |
 | `flink_prejob.py` | Flink PreJob 通道:pyflink 脚本生成 + `yarn-per-job` 提交 + YARN 状态/日志/cancel |
 | `flink_connectors.py` | Flink 连接器元数据:批量建表/DDL 生成/表探测 |

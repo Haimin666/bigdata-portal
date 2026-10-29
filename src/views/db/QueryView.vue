@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, listSparkTables, listSparkFields, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -522,8 +522,12 @@ const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'spark
 const canvasRef = ref<HTMLElement>()
 // 编辑器实例(SqlEditor 封装;model 池在组件内部,tab 切换仅换 modelId,撤销/光标各自独立)
 const editorRef = ref<InstanceType<typeof SqlEditor>>()
-// 补全用 schema 加载器:表名/列名(点语法)提示(组件内按 db 缓存)
-const schemaLoader = (db: string): Promise<DbSchema | null> => getSchema(db)
+// 补全元数据:关系库全量 schema;Spark 按所选模式加载指定库的表或指定表的字段
+const schemaLoader = async (db: string, table?: string, executionMode: SparkExecutionMode = sparkExecutionMode.value): Promise<DbSchema | null> => {
+  if (engine.value !== 'sparksql') return getSchema(db)
+  if (table) return { tables: [{ name: table, columns: await listSparkFields(db, table, executionMode) }] }
+  return { tables: (await listSparkTables(db, executionMode)).map((name) => ({ name, columns: [] })) }
+}
 
 // 默认 SQL:清空(用户自行编写);编辑器默认内容由 SqlEditor 的 :value/model 池提供
 // 编辑器主题:dark(默认)/ light,持久化到 localStorage
@@ -1636,6 +1640,8 @@ watch(engine, async (val) => {
         :theme-mode="themeMode"
         :font-size="fontSize"
         :current-db="db"
+        :engine="engine"
+        :execution-mode="sparkExecutionMode"
         :schema-loader="schemaLoader"
         @change="onEditorChange"
         @exec="runQuery"

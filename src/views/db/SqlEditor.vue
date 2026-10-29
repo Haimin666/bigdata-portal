@@ -11,6 +11,7 @@
  * 对外(defineExpose)提供与旧 CodeMirror 兼容的 API 面,QueryView 其余逻辑零改动。
  */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { SparkExecutionMode } from '@/api/db'
 import { monaco, definePortalThemes, editorUri } from '@/utils/monaco-setup'
 import {
   filterSqlStringValues,
@@ -32,7 +33,9 @@ const props = withDefaults(
     themeMode?: 'dark' | 'light'
     fontSize?: number
     currentDb?: string
-    schemaLoader?: (db: string) => Promise<SchemaMeta | null>
+    engine?: string
+    executionMode?: SparkExecutionMode
+    schemaLoader?: (db: string, table?: string, executionMode?: SparkExecutionMode) => Promise<SchemaMeta | null>
   }>(),
   {
     value: '',
@@ -40,6 +43,8 @@ const props = withDefaults(
     themeMode: 'dark',
     fontSize: 14,
     currentDb: '',
+    engine: '',
+    executionMode: 'thrift',
     schemaLoader: undefined
   }
 )
@@ -143,7 +148,7 @@ let suppressChangeEmit = false
 const models = new Map<string, monaco.editor.ITextModel>()
 /** provider 注册句柄(卸载时释放;每次 mount 注册一组,防重复) */
 const providers: monaco.IDisposable[] = []
-/** schema 缓存:db → meta(按 db 记忆,与旧 schemaCache 等价) */
+/** schema 缓存:引擎/执行模式/库/表 → meta;Spark 只按需加载指定前缀。 */
 const schemaCache = new Map<string, SchemaMeta | null>()
 /** 拉取中的 schema(去重:快速输入时 provider 多次触发,避免并发重复请求) */
 const schemaInflight = new Map<string, Promise<SchemaMeta | null>>()
@@ -392,24 +397,38 @@ function docStringValues(model: monaco.editor.ITextModel, prefix: string): strin
 }
 
 // ── schema(带缓存 + in-flight 去重,失败静默)──────────────
-async function loadSchema(dbName: string): Promise<SchemaMeta | null> {
+function schemaKey(dbName: string, table?: string): string {
+  return JSON.stringify([props.engine, props.executionMode, dbName, table ?? ''])
+}
+
+function sparkSchemaContext(before: string): { db: string; table?: string; prefix: string } | null {
+  // Only explicit catalog. or catalog.table. contexts; never enumerate the metastore.
+  const match = before.match(/(?:^|[^\w$.`])(`(?:[^`]|``)+`|[A-Za-z_][\w$]*)\.(?:(`(?:[^`]|``)+`|[A-Za-z_][\w$]*)\.)?([\w$]*)$/)
+  if (!match) return null
+  const unquote = (name: string): string => name.startsWith('`') ? name.slice(1, -1).replace(/``/g, '`') : name
+  return { db: unquote(match[1]), table: match[2] ? unquote(match[2]) : undefined, prefix: match[3] }
+}
+
+async function loadSchema(dbName: string, table?: string): Promise<SchemaMeta | null> {
   if (!dbName) return null
-  if (schemaCache.has(dbName)) return schemaCache.get(dbName) ?? null
-  const inflight = schemaInflight.get(dbName)
+  const key = schemaKey(dbName, table)
+  const executionMode = props.executionMode
+  if (schemaCache.has(key)) return schemaCache.get(key) ?? null
+  const inflight = schemaInflight.get(key)
   if (inflight) return inflight
   const p = (async () => {
     try {
-      const meta = (await props.schemaLoader?.(dbName)) ?? null
-      schemaCache.set(dbName, meta)
+      const meta = (await props.schemaLoader?.(dbName, table, executionMode)) ?? null
+      schemaCache.set(key, meta)
       return meta
     } catch {
-      schemaCache.set(dbName, null)
+      schemaCache.set(key, null)
       return null
     } finally {
-      schemaInflight.delete(dbName)
+      schemaInflight.delete(key)
     }
   })()
-  schemaInflight.set(dbName, p)
+  schemaInflight.set(key, p)
   return p
 }
 
@@ -449,9 +468,38 @@ function registerProvider(language: 'sql' | 'python'): void {
           return { suggestions }
         }
 
-        // Schema is prefetched on database change. Never hold local suggestions behind a cold network request.
-        if (props.currentDb && !schemaCache.has(props.currentDb)) void loadSchema(props.currentDb)
-        const meta = schemaCache.get(props.currentDb) ?? null
+        // Relational schema is prefetched; Spark only loads the explicit catalog/table prefix.
+        // Never hold local suggestions behind a cold network request.
+        const sparkContext = props.engine === 'sparksql' ? sparkSchemaContext(before) : null
+        const schemaDb = props.engine === 'sparksql' ? sparkContext?.db ?? '' : props.currentDb
+        const table = sparkContext?.table
+        const key = schemaKey(schemaDb, table)
+        const schemaPending = !!schemaDb && !schemaCache.has(key)
+        if (schemaPending) {
+          void loadSchema(schemaDb, table).then(() => {
+            const cursor = editor?.getPosition()
+            if (editor?.getModel() === model && cursor?.lineNumber === position.lineNumber && cursor.column === position.column && key === schemaKey(schemaDb, table)) {
+              editor.trigger('schema-loaded', 'editor.action.triggerSuggest', {})
+            }
+          })
+        }
+        const meta = schemaDb ? schemaCache.get(key) ?? null : null
+        if (sparkContext && meta) {
+          const prefix = sparkContext.prefix.toLowerCase()
+          const candidates = table ? meta.tables[0]?.columns ?? [] : meta.tables
+          for (const item of candidates) {
+            if (!item.name.toLowerCase().startsWith(prefix)) continue
+            suggestions.push({
+              label: item.name,
+              kind: table ? monaco.languages.CompletionItemKind.Field : monaco.languages.CompletionItemKind.Class,
+              insertText: item.name,
+              detail: table && 'type' in item ? `${schemaDb}.${table}.${item.name} · ${item.type}` : '表',
+              range: rngAt(position.column - prefix.length)
+            })
+            if (suggestions.length >= MAX_SUGGEST) break
+          }
+          return { suggestions }
+        }
         if (m) {
           const full = m[1]
           const dotIdx = full.lastIndexOf('.')
@@ -472,7 +520,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                 })
                 if (suggestions.length >= MAX_SUGGEST) break
               }
-              return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
+              return { suggestions, incomplete: schemaPending }
             }
           } else if (dotIdx < 0) {
             // 标识符:关键字 + 表名(点号前缀不匹配表时跳过,等价旧逻辑)
@@ -492,7 +540,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                   detail: t.comment || '表',
                   range: rngAt(startCol)
                 })
-                if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
+                if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: schemaPending }
               }
             }
             // 内置函数:插入带参数占位(snippet),光标落在括号内
@@ -507,7 +555,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                 detail: f.sig,
                 range: rngAt(startCol)
               })
-              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
+              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: schemaPending }
             }
             // SQL snippet:缩写字触发常用模板
             for (const s of SNIPPETS) {
@@ -520,7 +568,7 @@ function registerProvider(language: 'sql' | 'python'): void {
                 detail: s.detail,
                 range: rngAt(startCol)
               })
-              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: !!props.currentDb && !schemaCache.has(props.currentDb) }
+              if (suggestions.length >= MAX_SUGGEST) return { suggestions, incomplete: schemaPending }
             }
           }
         }
@@ -534,6 +582,7 @@ function registerProvider(language: 'sql' | 'python'): void {
             if (suggestions.length >= MAX_SUGGEST) break
           }
         }
+        return { suggestions, incomplete: schemaPending }
       } else {
         // python:文中词 + Python 常用关键字
         const pyKws = ['def', 'return', 'import', 'from', 'as', 'if', 'elif', 'else', 'for', 'while', 'range', 'print', 'len', 'df', 'spark', 'sc']
@@ -550,7 +599,7 @@ function registerProvider(language: 'sql' | 'python'): void {
           }
         }
       }
-      return { suggestions, incomplete: language === 'sql' && !!props.currentDb && !schemaCache.has(props.currentDb) }
+      return { suggestions }
     }
   }
   providers.push(monaco.languages.registerCompletionItemProvider(language, provider))
@@ -980,11 +1029,11 @@ watch(
   () => props.fontSize,
   (size) => editor?.updateOptions({ fontSize: size })
 )
-// ── schema 预取:db 就绪/切换时后台拉一次进缓存(补全首字即出候选,无首次等待)──
+// ── 关系库 schema 预取;Spark 只在显式库/表前缀下按需加载 ──
 watch(
-  () => props.currentDb,
-  (db) => {
-    if (db) void loadSchema(db)
+  () => [props.currentDb, props.engine, props.executionMode] as const,
+  ([db, engine]) => {
+    if (db && engine !== 'sparksql') void loadSchema(db)
   },
   { immediate: true }
 )
