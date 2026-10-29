@@ -20,6 +20,8 @@ function savePref(key: string, value: unknown) {
   }
 }
 
+const appRequests = new WeakMap<object, AbortController>()
+
 export const useYarnStore = defineStore('yarn', {
   state: () => ({
     rms: [] as string[],
@@ -35,6 +37,8 @@ export const useYarnStore = defineStore('yarn', {
     loading: false,
     // 请求序号:loadApps 防竞态
     appsSeq: 0,
+    metricsSeq: 0,
+    queuesSeq: 0,
     error: '',
     filters: {
       states: ['RUNNING'],
@@ -70,12 +74,16 @@ export const useYarnStore = defineStore('yarn', {
     },
     async loadApps() {
       if (!this.rm) return
+      appRequests.get(this)?.abort()
+      const controller = new AbortController()
+      appRequests.set(this, controller)
       const seq = ++this.appsSeq
+      const rm = this.rm
       this.loading = true
       this.error = ''
       try {
-        const list = await fetchApps(this.rm, this.filters)
-        if (seq !== this.appsSeq) return // 已有更新的请求,丢弃本次结果
+        const list = await fetchApps(rm, this.filters, controller.signal)
+        if (seq !== this.appsSeq || rm !== this.rm) return // 已有更新的请求,丢弃本次结果
         this.availableAppTypes = this.union(
           this.availableAppTypes,
           list.map((a) => a.applicationType)
@@ -83,25 +91,41 @@ export const useYarnStore = defineStore('yarn', {
         this.availableUsers = this.union(this.availableUsers, list.map((a) => a.user))
         this.apps = list
       } catch (e) {
-        if (seq !== this.appsSeq) return
-        this.apps = []
+        if (seq !== this.appsSeq || rm !== this.rm) return
+        if (controller.signal.aborted) return
         this.error = e instanceof Error ? e.message : String(e)
       } finally {
-        if (seq === this.appsSeq) this.loading = false
+        if (seq === this.appsSeq) {
+          this.loading = false
+          appRequests.delete(this)
+        }
       }
+    },
+    cancelApps() {
+      appRequests.get(this)?.abort()
+      appRequests.delete(this)
+      this.appsSeq++
+      this.loading = false
     },
     async loadMetrics() {
       if (!this.rm) return
+      const rm = this.rm
+      const seq = ++this.metricsSeq
       try {
-        this.metrics = await fetchMetrics(this.rm)
+        const metrics = await fetchMetrics(rm)
+        if (seq !== this.metricsSeq || rm !== this.rm) return
+        this.metrics = metrics
       } catch {
-        this.metrics = {}
+        if (seq === this.metricsSeq && rm === this.rm) this.metrics = {}
       }
     },
     async loadQueues() {
       if (!this.rm) return
+      const rm = this.rm
+      const seq = ++this.queuesSeq
       try {
-        const node = await fetchScheduler(this.rm)
+        const node = await fetchScheduler(rm)
+        if (seq !== this.queuesSeq || rm !== this.rm) return
         // 调度器类型:FairScheduler 的根队列在 schedulerInfo.rootQueue,CapacityScheduler 直接是 schedulerInfo
         const isFair = (node.type ?? '').toLowerCase().includes('fair')
         const root: QueueNode = isFair && node.rootQueue ? node.rootQueue : node
@@ -147,6 +171,7 @@ export const useYarnStore = defineStore('yarn', {
         walk(root)
         this.queues = result.sort((a, b) => a.localeCompare(b))
       } catch {
+        if (seq !== this.queuesSeq || rm !== this.rm) return
         this.queues = []
         this.queueTree = []
       }

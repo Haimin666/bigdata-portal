@@ -30,11 +30,12 @@ export async function fetchResourceManagers(): Promise<string[]> {
   }
 }
 
-export async function fetchApps(rm: string, filters: AppFilters): Promise<YarnApp[]> {
+export async function fetchApps(rm: string, filters: AppFilters, signal?: AbortSignal): Promise<YarnApp[]> {
   const qs = new URLSearchParams(filtersToParams(filters)).toString()
   const data = await request<{ apps?: { app: YarnApp[] } }>(
     `/hadoopapi/ws/v1/cluster/apps?${qs}`,
-    rm
+    rm,
+    { signal }
   )
   return data?.apps?.app ?? []
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQuery } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowUp, Document, Folder, HomeFilled, Position } from '@element-plus/icons-vue'
 import { listStatus, fetchHdfsDiskOverview } from '@/api/hdfs'
@@ -12,6 +12,7 @@ import StateView from '@/components/StateView.vue'
 
 defineOptions({ name: 'HdfsView' })
 
+const props = withDefaults(defineProps<{ active?: boolean; initialQuery?: LocationQuery }>(), { active: true })
 const route = useRoute()
 const router = useRouter()
 
@@ -26,11 +27,12 @@ const diskData = ref<HdfsDiskOverview | null>(null)
 const diskLoading = ref(false)
 
 async function loadDisk() {
+  if (diskLoading.value) return
   diskLoading.value = true
   try {
     diskData.value = await fetchHdfsDiskOverview()
   } catch {
-    diskData.value = null
+    // Preserve the previous snapshot on transient errors.
   } finally {
     diskLoading.value = false
   }
@@ -38,11 +40,25 @@ async function loadDisk() {
 
 // 磁盘相关 30s 自动刷新(仅磁盘监控,不刷新目录列表)
 let diskTimer: number | undefined
+const pageVisible = ref(document.visibilityState !== 'hidden')
+let mounted = false
+function onVisibilityChange() {
+  pageVisible.value = document.visibilityState !== 'hidden'
+}
+watch(() => props.active && pageVisible.value, (active) => {
+  if (diskTimer) clearInterval(diskTimer)
+  diskTimer = undefined
+  if (!active) return
+  if (mounted) void loadDisk()
+  diskTimer = window.setInterval(() => void loadDisk(), 30000)
+}, { immediate: true })
 onMounted(() => {
-  diskTimer = window.setInterval(() => loadDisk(), 30000)
+  mounted = true
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 onUnmounted(() => {
   if (diskTimer) clearInterval(diskTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 // 分页(前端分页:WebHDFS LISTSTATUS 不支持分页参数)
@@ -148,13 +164,13 @@ function onRowClick(row: HdfsFileStatus) {
 
 // 进入页面时从 URL query 恢复路径;路径变化写回 query,顶栏刷新(重挂)后停留当前目录
 onMounted(() => {
-  const q = route.query.path
+  const q = (props.initialQuery ?? route.query).path
   load(typeof q === 'string' && q ? q : '/')
   loadDisk()
 })
 
 watch(path, (p) => {
-  router.replace({ query: p === '/' ? {} : { path: p } })
+  if (props.active) router.replace({ query: p === '/' ? {} : { path: p } })
 })
 </script>
 

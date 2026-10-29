@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { useRoute, type LocationQuery } from 'vue-router'
 import SubAppView from '@/views/subapp/SubAppView.vue'
 import SubappTabs, { type PortalTab, type TabContextAction } from '@/views/subapp/SubappTabs.vue'
 // 原生视图一律异步(加载器集中在 nativeViews.ts,SideBar hover 复用同一份预热);
@@ -32,6 +32,26 @@ const route = useRoute()
 const nativeComponents = nativeViewComponents
 
 const activePath = computed(() => route.path)
+const mountedPaths = ref(new Set<string>())
+const initialQueries = new Map<string, LocationQuery>()
+let lastPath = ''
+let lastQuery = ''
+watch([activePath, () => props.tabs.map((tab) => tab.path), () => JSON.stringify(route.query)], ([path, paths, query]) => {
+  const open = new Set(paths)
+  for (const key of initialQueries.keys()) {
+    if (!open.has(key)) initialQueries.delete(key)
+  }
+  const next = new Set([...mountedPaths.value].filter((p) => open.has(p)))
+  if (open.has(path)) {
+    if (!initialQueries.has(path) || Object.keys(route.query).length > 0 || (path === lastPath && query !== lastQuery)) {
+      initialQueries.set(path, { ...route.query })
+    }
+    next.add(path)
+  }
+  lastPath = path
+  lastQuery = query
+  mountedPaths.value = next
+}, { immediate: true })
 </script>
 
 <template>
@@ -53,7 +73,7 @@ const activePath = computed(() => route.path)
     <!-- 常驻池:v-show 仅隐藏不卸载,状态保留;关闭 tab 才真正销毁 -->
     <div class="view-stage">
       <template v-for="tab in props.tabs" :key="tab.path">
-        <div v-show="tab.path === activePath" class="view-item">
+        <div v-if="mountedPaths.has(tab.path)" v-show="tab.path === activePath" class="view-item">
           <!-- 子应用:iframe 常驻 -->
           <SubAppView
             v-if="tab.menu.kind === 'subapp'"
@@ -65,6 +85,7 @@ const activePath = computed(() => route.path)
             v-else
             :is="nativeComponents[tab.menu.name]"
             :key="tab.refreshKey"
+            v-bind="tab.menu.name === 'yarn' || tab.menu.name === 'hdfs' ? { active: tab.path === activePath, initialQuery: initialQueries.get(tab.path) } : {}"
           />
         </div>
       </template>
