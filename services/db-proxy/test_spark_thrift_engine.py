@@ -1,3 +1,4 @@
+import ast
 import os
 import signal
 import subprocess
@@ -7,9 +8,12 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
+from typing import Any, Dict, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(__file__))
 import spark_thrift_engine
+from spark_engine import SparkJobManager
 try:
     from spark_thrift_engine import SparkThriftEngine
 except ModuleNotFoundError:
@@ -543,6 +547,193 @@ class SparkThriftEngineTests(unittest.TestCase):
         self.assertTrue(all(not thread.is_alive() for thread in created))
         self.assertTrue(process.stdout.closed)
         self.assertFalse(engine.status()["busy"])
+
+
+class SparkModeRoutingTests(unittest.TestCase):
+    """Run the real handlers without loading site config or optional HTTP/DB packages."""
+
+    def setUp(self):
+        class HttpError(Exception):
+            def __init__(self, status_code, detail):
+                self.status_code, self.detail = status_code, detail
+
+        class Adapter:
+            enabled = True
+
+            def __init__(self, mode):
+                self.mode, self.calls, self.cancelled = mode, [], False
+
+            def execute_sql(self, sql, write_unlocked=False, timeout_ms=600000):
+                self.calls.append((sql, write_unlocked, timeout_ms))
+                if sql == "bad":
+                    raise RuntimeError(self.mode + " original error")
+                return {"columns": ["mode"], "rows": [{"mode": self.mode}],
+                        "costMs": 1, "truncated": False}
+
+            def execute_schema_sql(self, sql, timeout_ms=600000):
+                self.calls.append((sql, False, timeout_ms))
+                if sql.startswith("SHOW TABLES"):
+                    rows = [{"tableName": self.mode + "_table"}]
+                elif sql.startswith("DESC"):
+                    rows = [{"col_name": self.mode + "_column", "data_type": "string", "comment": ""}]
+                else:
+                    rows = [{"namespace": self.mode + "_db"}]
+                return {"columns": list(rows[0]), "rows": rows, "costMs": 1, "truncated": False}
+
+            def export_sql(self, sql, job_id, timeout_ms=7200000):
+                return {"hdfsPath": "hdfs:///" + self.mode + "/" + job_id, "costMs": 1}
+
+            def status(self):
+                return {"enabled": self.enabled, "state": "idle", "config": {"mode": self.mode}}
+
+            def stages_status(self):
+                return {"stages": [{"stageId": 1, "name": self.mode}]}
+
+            def read_logs(self, offsets):
+                return {"content": self.mode, "offsets": offsets, "files": offsets}
+
+            def cancel(self):
+                self.cancelled = True
+                return True
+
+        self.http_error = HttpError
+        self.thrift, self.session = Adapter("thrift"), Adapter("session")
+        self.manager = SparkJobManager({"thrift": self.thrift, "session": self.session})
+        self.ns = {
+            "BaseModel": SimpleNamespace, "HTTPException": HttpError,
+            "Header": lambda default=None: default,
+            "app": SimpleNamespace(get=lambda path: lambda fn: fn, post=lambda path: lambda fn: fn),
+            "Any": Any, "Dict": Dict, "Optional": Optional, "Tuple": Tuple,
+            "time": time, "log": SimpleNamespace(info=lambda *args: None),
+            "require_auth": lambda token: None,
+            "SPARK_ENGINE": self.thrift, "SPARK_ENGINES": {"thrift": self.thrift, "session": self.session},
+            "SPARK_JOBS": self.manager,
+        }
+        with open(os.path.join(os.path.dirname(__file__), "main.py"), encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+        tree.body = [node for node in tree.body if (
+            isinstance(node, (ast.FunctionDef, ast.ClassDef)) and
+            node.name.startswith(("spark_", "_spark_", "Spark"))
+        ) or (
+            isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and
+            node.target.id == "_SPARK_SCHEMA_CACHE"
+        ) or (
+            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and
+            target.id == "_SPARK_SCHEMA_TTL" for target in node.targets)
+        )]
+        exec(compile(tree, "main.py", "exec"), self.ns)
+
+    def call(self, name, *args, **kwargs):
+        return self.ns[name](*args, x_db_token=None, **kwargs)["data"]
+
+    def request(self, name, **kwargs):
+        return self.ns[name](**kwargs)
+
+    def wait_for_job(self, job_id, mode="thrift"):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            job = self.call("spark_job_status", job_id, executionMode=mode)
+            if job["state"] in ("done", "failed", "cancelled"):
+                return job
+            time.sleep(0.01)
+        self.fail("job did not finish")
+
+    def test_query_defaults_to_thrift_and_session_preserves_result_shape(self):
+        for kwargs, expected in (({}, "thrift"), ({"executionMode": "session"}, "session")):
+            req = self.request("SparkQueryReq", sql="SELECT 1", writeUnlocked=True, timeoutMs=55, **kwargs)
+            result = self.call("spark_query", req)
+            self.assertEqual(result, {"columns": ["mode"], "rows": [{"mode": expected}],
+                                      "costMs": 1, "truncated": False})
+        self.assertEqual(self.session.calls, [("SELECT 1", True, 55)])
+        self.assertEqual(self.thrift.calls, [("SELECT 1", True, 55)])
+
+    def test_invalid_mode_and_pyspark_never_execute_sql(self):
+        for kwargs in ({"executionMode": "unknown"}, {"kind": "pyspark", "executionMode": "session"}):
+            with self.assertRaises(self.http_error) as caught:
+                self.call("spark_query", self.request("SparkQueryReq", sql="SELECT 1", **kwargs))
+            self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(self.thrift.calls + self.session.calls, [])
+
+    def test_session_error_is_returned_without_fallback(self):
+        with self.assertRaises(self.http_error) as caught:
+            self.call("spark_query", self.request("SparkQueryReq", sql="bad", executionMode="session"))
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(caught.exception.detail, "session original error")
+        self.assertEqual(self.thrift.calls, [])
+
+    def test_logs_status_stages_and_direct_cancel_use_selected_mode(self):
+        self.assertEqual(self.call("spark_logs", executionMode="session", jvm=12, audit=34),
+                         {"content": "session", "offsets": {"jvm": 12, "audit": 34},
+                          "files": {"jvm": 12, "audit": 34}})
+        self.assertEqual(self.call("spark_status", executionMode="session")["config"], {"mode": "session"})
+        self.assertEqual(self.call("spark_stages", executionMode="session"),
+                         {"stages": [{"stageId": 1, "name": "session"}]})
+        self.assertEqual(self.call("spark_cancel", self.request("SparkModeReq", executionMode="session")),
+                         {"cancelled": True})
+        self.assertTrue(self.session.cancelled)
+        self.assertFalse(self.thrift.cancelled)
+
+    def test_thrift_stages_return_empty_snapshot_without_session_access(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            self.ns["SPARK_ENGINES"]["thrift"] = SparkThriftEngine({"enabled": True}, base_dir)
+            self.assertEqual(self.call("spark_stages"),
+                             {"activeJobs": [], "stages": [], "numActiveJobs": 0, "numActiveStages": 0})
+
+    def test_disabled_selected_mode_returns_503_without_fallback(self):
+        self.session.enabled = False
+        with self.assertRaises(self.http_error) as caught:
+            self.call("spark_query", self.request("SparkQueryReq", sql="SELECT 1", executionMode="session"))
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(self.thrift.calls, [])
+
+    def test_schema_uses_metadata_interface_and_caches_each_mode_separately(self):
+        for mode in ("thrift", "session", "thrift", "session"):
+            self.assertEqual(self.call("spark_schema_databases", executionMode=mode), [mode + "_db"])
+            self.assertEqual(self.call("spark_schema_tables", db="db", executionMode=mode), [mode + "_table"])
+            self.assertEqual(self.call("spark_schema_fields", db="db", table="tbl", executionMode=mode),
+                             [{"name": mode + "_column", "type": "string", "comment": ""}])
+        self.assertEqual(len(self.thrift.calls), 3)
+        self.assertEqual(len(self.session.calls), 3)
+
+    def test_job_and_export_polling_retain_mode_after_selection_changes(self):
+        for handler, model in (("spark_job_submit", "SparkJobSubmitReq"),
+                               ("spark_export_job_submit", "SparkExportSubmitReq")):
+            job_id = self.call(handler, self.request(model, sql="SELECT 1", executionMode="session"))["jobId"]
+            job = self.wait_for_job(job_id, mode="thrift")
+            self.assertEqual(job["executionMode"], "session")
+            self.assertEqual(job["state"], "done")
+            if handler == "spark_job_submit":
+                self.assertEqual(job["result"]["rows"], [{"mode": "session"}])
+            else:
+                self.assertEqual(job["result"]["hdfsPath"], "hdfs:///session/" + job_id)
+        self.assertEqual(self.thrift.calls, [])
+
+    def test_job_cancel_ignores_changed_request_mode(self):
+        started, release = threading.Event(), threading.Event()
+
+        def execute(*args):
+            started.set()
+            release.wait(2)
+            raise RuntimeError("session query cancelled")
+
+        def cancel():
+            self.session.cancelled = True
+            release.set()
+            return True
+
+        self.session.execute_sql, self.session.cancel = execute, cancel
+        job_id = self.call("spark_job_submit", self.request("SparkJobSubmitReq", sql="SELECT 1",
+                                                          executionMode="session"))["jobId"]
+        try:
+            self.assertTrue(started.wait(1))
+            self.assertEqual(self.call("spark_job_cancel", job_id,
+                                      self.request("SparkModeReq", executionMode="thrift")), {"cancelled": True})
+            job = self.wait_for_job(job_id, mode="thrift")
+            self.assertEqual((job["state"], job["executionMode"]), ("cancelled", "session"))
+            self.assertTrue(self.session.cancelled)
+            self.assertFalse(self.thrift.cancelled)
+        finally:
+            release.set()
 
 
 if __name__ == "__main__":

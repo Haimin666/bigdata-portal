@@ -967,7 +967,7 @@ class SparkJobManager:
     """
 
     def __init__(self, engine: Any, max_jobs: int = 200, ttl: int = 3600) -> None:
-        self._engine = engine
+        self._engines = engine if isinstance(engine, dict) else {"thrift": engine}
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._condition = threading.Condition()
         self._active_job_id: Optional[str] = None
@@ -975,12 +975,18 @@ class SparkJobManager:
         self._max_jobs = max_jobs
         self._ttl = ttl  # 完成后保留秒数
 
-    def submit(self, sql: str, kind: str = "sql", write_unlocked: bool = False, timeout_ms: int = 600000) -> str:
+    def submit(self, sql: str, kind: str = "sql", write_unlocked: bool = False, timeout_ms: int = 600000,
+               execution_mode: str = "thrift") -> str:
+        if execution_mode not in self._engines:
+            raise ValueError("invalid Spark executionMode: %s" % execution_mode)
+        if kind not in ("sql", "export"):
+            raise ValueError("Spark jobs support SQL and export only")
         with self._condition:
             self._seq += 1
             job_id = "spk_%d_%04d" % (int(time.time()), self._seq)
             self._jobs[job_id] = {
                 "id": job_id, "state": "queued", "sql": sql, "kind": kind,
+                "executionMode": execution_mode,
                 "write_unlocked": write_unlocked, "timeout_ms": timeout_ms,
                 "created_at": time.time(), "started_at": None, "finished_at": None,
                 "result": None, "error": None, "cancel_requested": False,
@@ -998,7 +1004,8 @@ class SparkJobManager:
             if j["state"] != "queued":
                 return
             self._active_job_id = job_id
-            supports_job_cancellation = getattr(self._engine, "supports_job_cancellation", False)
+            engine = self._engines[j["executionMode"]]
+            supports_job_cancellation = getattr(engine, "supports_job_cancellation", False)
             if not supports_job_cancellation:
                 j["state"] = "running"
                 j["started_at"] = time.time()
@@ -1010,20 +1017,18 @@ class SparkJobManager:
                     j["started_at"] = time.time()
 
         try:
-            if j["kind"] == "pyspark":
-                result = self._engine.execute_code(j["sql"], j["timeout_ms"], j["write_unlocked"])
-            elif j["kind"] == "export":
-                if getattr(self._engine, "supports_job_cancellation", False):
-                    result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"],
-                                                     owner_id=job_id, on_start=mark_running)
+            if j["kind"] == "export":
+                if getattr(engine, "supports_job_cancellation", False):
+                    result = engine.export_sql(j["sql"], j["id"], j["timeout_ms"],
+                                               owner_id=job_id, on_start=mark_running)
                 else:
-                    result = self._engine.export_sql(j["sql"], j["id"], j["timeout_ms"])
+                    result = engine.export_sql(j["sql"], j["id"], j["timeout_ms"])
             else:
-                if getattr(self._engine, "supports_job_cancellation", False):
-                    result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"],
-                                                      owner_id=job_id, on_start=mark_running)
+                if getattr(engine, "supports_job_cancellation", False):
+                    result = engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"],
+                                                owner_id=job_id, on_start=mark_running)
                 else:
-                    result = self._engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
+                    result = engine.execute_sql(j["sql"], j["write_unlocked"], j["timeout_ms"])
             with self._condition:
                 j["result"] = result
                 j["state"] = "cancelled" if j["cancel_requested"] else "done"
@@ -1037,8 +1042,8 @@ class SparkJobManager:
                 if self._active_job_id == job_id:
                     self._active_job_id = None
                 self._condition.notify_all()
-            if getattr(self._engine, "supports_job_cancellation", False):
-                self._engine.finish_job(job_id)
+            if getattr(engine, "supports_job_cancellation", False):
+                engine.finish_job(job_id)
             self._gc()
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -1048,7 +1053,7 @@ class SparkJobManager:
                 return None
             return {
                 "id": j["id"], "state": j["state"], "sql": j["sql"][:500],
-                "kind": j["kind"], "createdAt": j["created_at"],
+                "kind": j["kind"], "executionMode": j["executionMode"], "createdAt": j["created_at"],
                 "startedAt": j["started_at"], "finishedAt": j["finished_at"],
                 "result": j["result"], "error": j["error"],
             }
@@ -1060,12 +1065,13 @@ class SparkJobManager:
             j = self._jobs.get(job_id)
             if not j:
                 return False
+            engine = self._engines[j["executionMode"]]
             if j["state"] == "queued":
                 if (self._active_job_id == job_id and
-                        getattr(self._engine, "supports_job_cancellation", False)):
+                        getattr(engine, "supports_job_cancellation", False)):
                     j["cancel_requested"] = True
                     try:
-                        if not self._engine.cancel(job_id):
+                        if not engine.cancel(job_id):
                             j["cancel_requested"] = False
                             return False
                     except Exception:
@@ -1079,10 +1085,10 @@ class SparkJobManager:
             elif j["state"] == "running" and self._active_job_id == job_id:
                 j["cancel_requested"] = True
                 try:
-                    if getattr(self._engine, "supports_job_cancellation", False):
-                        cancelled = self._engine.cancel(job_id)
+                    if getattr(engine, "supports_job_cancellation", False):
+                        cancelled = engine.cancel(job_id)
                     else:
-                        cancelled = self._engine.cancel()
+                        cancelled = engine.cancel()
                     if not cancelled:
                         j["cancel_requested"] = False
                         return False

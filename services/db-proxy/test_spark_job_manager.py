@@ -104,6 +104,52 @@ class SparkJobManagerCancellationTests(unittest.TestCase):
         self.assertEqual(engine.cancel_calls, 1)
         self.assertIsNotNone(manager.get(job_id)["finishedAt"])
 
+    def test_default_mode_uses_thrift_and_records_mode(self):
+        thrift, session = SerializedEngine(), SerializedEngine()
+        manager = SparkJobManager({"thrift": thrift, "session": session})
+        job_id = manager.submit("first")
+        try:
+            self.assertTrue(thrift.started.wait(1))
+            self.assertFalse(session.started.is_set())
+            self.assertEqual(manager.get(job_id)["executionMode"], "thrift")
+        finally:
+            thrift.release.set()
+        self.wait_for_state(manager, job_id, "done")
+
+    def test_session_job_cancellation_uses_original_adapter(self):
+        thrift, session = SerializedEngine(), SerializedEngine()
+        manager = SparkJobManager({"thrift": thrift, "session": session})
+        job_id = manager.submit("first", execution_mode="session")
+        try:
+            self.assertTrue(session.started.wait(1))
+            self.assertEqual(manager.get(job_id)["executionMode"], "session")
+            self.assertTrue(manager.cancel(job_id))
+            self.assertTrue(session.cancelled.is_set())
+            self.assertFalse(thrift.cancelled.is_set())
+            self.wait_for_state(manager, job_id, "cancelled")
+        finally:
+            session.release.set()
+
+    def test_session_failure_is_reported_without_thrift_retry(self):
+        class FailingSession(SerializedEngine):
+            def execute_sql(self, *args, **kwargs):
+                raise RuntimeError("session original failure")
+
+        thrift = SerializedEngine()
+        manager = SparkJobManager({"thrift": thrift, "session": FailingSession()})
+        job_id = manager.submit("first", execution_mode="session")
+        job = self.wait_for_state(manager, job_id, "failed")
+        self.assertEqual(job["error"], "session original failure")
+        self.assertEqual(job["executionMode"], "session")
+        self.assertFalse(thrift.started.is_set())
+
+    def test_invalid_mode_and_pyspark_are_rejected_before_submission(self):
+        manager = SparkJobManager({"thrift": SerializedEngine(), "session": SerializedEngine()})
+        with self.assertRaises(ValueError):
+            manager.submit("SELECT 1", execution_mode="other")
+        with self.assertRaises(ValueError):
+            manager.submit("print(1)", kind="pyspark", execution_mode="session")
+
     def test_job_waiting_for_sync_query_lock_does_not_cancel_sync_process(self):
         class BlockingProcess:
             def __init__(self):

@@ -96,15 +96,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("db-proxy")
 
-# Spark SQL 通过本机 Beeline / HiveServer2 Spark Thrift 执行;任务管理器继续复用。
+# Spark SQL 双通道:Thrift / 历史 YARN client SparkSession;缺省 Thrift。
 from spark_engine import SparkJobManager  # noqa: E402
 from spark_thrift_engine import SparkThriftEngine  # noqa: E402
+from spark_session_engine import SparkSessionEngine  # noqa: E402
 from impala_engine import ImpalaEngine, ImpalaSchemaCache, schema_summary as _impala_schema_summary  # noqa: E402
 
 SPARK_CFG = CONFIG.get("spark") or {}
 SPARK_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SPARK_ENGINE = SparkThriftEngine(SPARK_CFG, SPARK_BASE_DIR)
-SPARK_JOBS = SparkJobManager(SPARK_ENGINE)
+SPARK_ENGINES = {
+    "thrift": SPARK_ENGINE,
+    "session": SparkSessionEngine(SPARK_CFG, SPARK_BASE_DIR),
+}
+SPARK_JOBS = SparkJobManager(SPARK_ENGINES)
 if SPARK_ENGINE.enabled:
     log.info("spark thrift engine enabled (jdbcUrl=%s, user=%s)",
              SPARK_ENGINE.status()["config"]["jdbcUrl"], SPARK_CFG.get("user", "root"))
@@ -1076,22 +1081,37 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     }
 
 
-# ── Spark Thrift 引擎(SQL + Beeline 日志透传)───────────────────────
-class SparkQueryReq(BaseModel):
+# ── Spark SQL 双执行模式───────────────────────────────────────────
+class SparkModeReq(BaseModel):
+    executionMode: str = "thrift"
+
+
+def _spark_engine(execution_mode: str = "thrift"):
+    if execution_mode not in SPARK_ENGINES:
+        raise HTTPException(status_code=400, detail="executionMode must be thrift or session")
+    engine = SPARK_ENGINES[execution_mode]
+    if not engine.enabled:
+        raise HTTPException(
+            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
+        )
+    return engine
+
+
+class SparkQueryReq(SparkModeReq):
     kind: str = "sql"
     sql: Optional[str] = None
     writeUnlocked: bool = False
     timeoutMs: int = 120000
 
 
-class SparkJobSubmitReq(BaseModel):
+class SparkJobSubmitReq(SparkModeReq):
     sql: str = ""
     kind: str = "sql"
     writeUnlocked: bool = False
     timeoutMs: int = 600000  # 异步任务默认 10 分钟(大查询可传更久,不撞网关超时)
 
 
-class SparkExportSubmitReq(BaseModel):
+class SparkExportSubmitReq(SparkModeReq):
     sql: str
     timeoutMs: int = 7200000
 
@@ -1103,16 +1123,13 @@ def spark_query(
     x_spark_write: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
+    engine = _spark_engine(req.executionMode)
     try:
         if req.kind != "sql":
-            raise HTTPException(status_code=400, detail="Spark Thrift 仅支持 SparkSQL")
+            raise HTTPException(status_code=400, detail="Spark 仅支持 SparkSQL")
         if not req.sql:
             raise HTTPException(status_code=400, detail="sql required")
-        result = SPARK_ENGINE.execute_sql(req.sql, req.writeUnlocked, req.timeoutMs)
+        result = engine.execute_sql(req.sql, req.writeUnlocked, req.timeoutMs)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
@@ -1128,14 +1145,12 @@ def spark_query(
 
 @app.get("/spark/logs")
 def spark_logs(
-    jvm: int = 0, audit: int = 0, x_db_token: Optional[str] = Header(default=None)
+    jvm: int = 0, audit: int = 0, x_db_token: Optional[str] = Header(default=None),
+    executionMode: str = "thrift",
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    return {"code": 0, "data": SPARK_ENGINE.read_logs({"jvm": jvm, "audit": audit})}
+    engine = _spark_engine(executionMode)
+    return {"code": 0, "data": engine.read_logs({"jvm": jvm, "audit": audit})}
 
 
 # ── Spark 元数据(表结构树/补全:库→表→字段;只读 SHOW/DESC,TTL 缓存防重复打集群)──
@@ -1153,9 +1168,9 @@ def _spark_schema_cached(key: str, loader) -> list:
     return val
 
 
-def _spark_meta_one_col(sql: str) -> list:
+def _spark_meta_one_col(sql: str, engine) -> list:
     """执行只读元数据 SQL,取每行首个非空字段值(SHOW DATABASES 列名随版本:result/databaseName)"""
-    r = SPARK_ENGINE.execute_sql(sql, False, 60000)
+    r = engine.execute_schema_sql(sql, 60000)
     out = []
     for x in r.get("rows") or []:
         v = x.get("result") or x.get("databaseName")
@@ -1166,9 +1181,9 @@ def _spark_meta_one_col(sql: str) -> list:
     return out
 
 
-def _spark_table_names(sql: str) -> list:
+def _spark_table_names(sql: str, engine) -> list:
     """SHOW TABLES IN:列名随版本(tableName/tab_name/name),显式取表名列"""
-    r = SPARK_ENGINE.execute_sql(sql, False, 60000)
+    r = engine.execute_schema_sql(sql, 60000)
     out = []
     for x in r.get("rows") or []:
         v = x.get("tableName") or x.get("tab_name") or x.get("name")
@@ -1186,43 +1201,38 @@ def _spark_ident(name: str) -> str:
 
 
 @app.get("/spark/schema/databases")
-def spark_schema_databases(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def spark_schema_databases(
+    x_db_token: Optional[str] = Header(default=None), executionMode: str = "thrift"
+) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    return {"code": 0, "data": _spark_schema_cached("sp:databases", lambda: _spark_meta_one_col("SHOW DATABASES"))}
+    engine = _spark_engine(executionMode)
+    return {"code": 0, "data": _spark_schema_cached(f"sp:{executionMode}:databases", lambda: _spark_meta_one_col("SHOW DATABASES", engine))}
 
 
 @app.get("/spark/schema/tables")
 def spark_schema_tables(
-    db: str = "", x_db_token: Optional[str] = Header(default=None)
+    db: str = "", x_db_token: Optional[str] = Header(default=None),
+    executionMode: str = "thrift",
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
+    engine = _spark_engine(executionMode)
     name = _spark_ident(db)
-    key = f"sp:tables:{name}"
-    return {"code": 0, "data": _spark_schema_cached(key, lambda: _spark_table_names(f"SHOW TABLES IN `{name}`"))}
+    key = f"sp:{executionMode}:tables:{name}"
+    return {"code": 0, "data": _spark_schema_cached(key, lambda: _spark_table_names(f"SHOW TABLES IN `{name}`", engine))}
 
 
 @app.get("/spark/schema/fields")
 def spark_schema_fields(
-    db: str = "", table: str = "", x_db_token: Optional[str] = Header(default=None)
+    db: str = "", table: str = "", x_db_token: Optional[str] = Header(default=None),
+    executionMode: str = "thrift",
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
+    engine = _spark_engine(executionMode)
     dbn, tbl = _spark_ident(db), _spark_ident(table)
-    key = f"sp:fields:{dbn}:{tbl}"
+    key = f"sp:{executionMode}:fields:{dbn}:{tbl}"
 
     def load() -> list:
-        r = SPARK_ENGINE.execute_sql(f"DESC `{dbn}`.`{tbl}`", False, 60000)
+        r = engine.execute_schema_sql(f"DESC `{dbn}`.`{tbl}`", 60000)
         out = []
         for x in r.get("rows") or []:
             n = x.get("col_name") or x.get("name")
@@ -1302,13 +1312,24 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
 
 
 @app.get("/spark/status")
-def spark_status(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def spark_status(
+    x_db_token: Optional[str] = Header(default=None), executionMode: str = "thrift"
+) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    return {"code": 0, "data": SPARK_ENGINE.status()}
+    engine = _spark_engine(executionMode)
+    return {"code": 0, "data": engine.status()}
+
+
+@app.get("/spark/stages")
+def spark_stages(
+    x_db_token: Optional[str] = Header(default=None), executionMode: str = "thrift"
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    engine = _spark_engine(executionMode)
+    stages = engine.stages_status() if executionMode == "session" else {
+        "activeJobs": [], "stages": [], "numActiveJobs": 0, "numActiveStages": 0,
+    }
+    return {"code": 0, "data": stages}
 
 
 @app.post("/spark/jobs")
@@ -1319,16 +1340,14 @@ def spark_job_submit(
 ) -> Dict[str, Any]:
     """异步提交 spark 任务:立即返回 jobId,后台线程执行(网关 60s 超时安全)。"""
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
+    _spark_engine(req.executionMode)
     if req.kind != "sql":
-        raise HTTPException(status_code=400, detail="Spark Thrift 仅支持 SparkSQL")
+        raise HTTPException(status_code=400, detail="Spark 仅支持 SparkSQL")
     sql = req.sql
     if not sql or not str(sql).strip():
         raise HTTPException(status_code=400, detail="sql is required")
-    job_id = SPARK_JOBS.submit(str(sql), "sql", req.writeUnlocked, req.timeoutMs)
+    job_id = SPARK_JOBS.submit(str(sql), "sql", req.writeUnlocked, req.timeoutMs,
+                               execution_mode=req.executionMode)
     log.info("spark job submitted: %s kind=sql", job_id)
     return {"code": 0, "data": {"jobId": job_id}}
 
@@ -1340,21 +1359,22 @@ def spark_export_job_submit(
 ) -> Dict[str, Any]:
     """提交只读 Spark SQL 的 HDFS CSV 导出任务。"""
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
+    _spark_engine(req.executionMode)
     sql = str(req.sql or "")
     if not sql.strip():
         raise HTTPException(status_code=400, detail="sql is required")
-    job_id = SPARK_JOBS.submit(sql, "export", False, req.timeoutMs)
+    job_id = SPARK_JOBS.submit(sql, "export", False, req.timeoutMs,
+                               execution_mode=req.executionMode)
     log.info("spark export job submitted: %s", job_id)
     return {"code": 0, "data": {"jobId": job_id}}
 
 
 @app.get("/spark/jobs/{job_id}")
-def spark_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def spark_job_status(
+    job_id: str, x_db_token: Optional[str] = Header(default=None), executionMode: str = "thrift"
+) -> Dict[str, Any]:
     require_auth(x_db_token)
+    # The stored job identity owns its mode; a changed caller selection is ignored.
     j = SPARK_JOBS.get(job_id)
     if not j:
         raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
@@ -1362,22 +1382,24 @@ def spark_job_status(job_id: str, x_db_token: Optional[str] = Header(default=Non
 
 
 @app.post("/spark/jobs/{job_id}/cancel")
-def spark_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def spark_job_cancel(
+    job_id: str, req: Optional[SparkModeReq] = None, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
     require_auth(x_db_token)
+    # Cancellation resolves the adapter from the job, not the optional request mode.
     if not SPARK_JOBS.cancel(job_id):
         raise HTTPException(status_code=404, detail="job not found or already finished: %s" % job_id)
     return {"code": 0, "data": {"cancelled": True}}
 
 
 @app.post("/spark/cancel")
-def spark_cancel(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def spark_cancel(
+    req: Optional[SparkModeReq] = None, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
     """取消当前正在执行的 Spark SQL (手动停止或超时均走此逻辑)。"""
     require_auth(x_db_token)
-    if not SPARK_ENGINE.enabled:
-        raise HTTPException(
-            status_code=503, detail="spark engine not enabled (datasources.json spark.enabled=false)"
-        )
-    cancelled = SPARK_ENGINE.cancel()
+    engine = _spark_engine(req.executionMode if req else "thrift")
+    cancelled = engine.cancel()
     return {"code": 0, "data": {"cancelled": cancelled}}
 
 

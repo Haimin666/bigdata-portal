@@ -90,6 +90,7 @@
 - Thrift 使用 `datasources.json` 的 `spark` 段 `enabled`、`jdbcUrl`、`user`、可选 `beelinePath`、`defaultLimit`、`maxLimit`、`maxSqlLen` 和 `exportPath` 字段。未设置 `beelinePath` 时使用 `$SPARK_HOME/bin/beeline`；查询、SHOW/DESC 元数据与 HDFS CSV 导出经 Thrift Server 执行。
 - Session 使用同一 `spark` 段的历史 YARN client 配置字段，包括 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances` 与 `sparkConf`；它在 db-proxy 进程中使用常驻 PySpark `SparkSession`。写入权限仍由门户网关数据权限矩阵控制。
 - Thrift 子进程与 SparkSession 各自报告所选通道的执行状态和诊断；停止和超时只作用于所选通道的 job。Stage 状态仅由提供该信息的 session 通道返回。
+- `/api/spark/stages?executionMode=` 与 db-proxy `/spark/stages?executionMode=` 按所选模式读取 Stage 快照；Thrift 暂无 Stage 数据时返回空状态，session 返回最近一次 SQL 的 Stage 信息。
 - Thrift 请求使用 JDBC URL 默认库或 SQL 中显式库名；session 请求使用常驻 SparkSession 的既有会话语义。两个模式都只接受 SQL 工作台请求，不执行用户提交的 PySpark 代码。更新配置后重启 db-proxy；发布门户工作台选择器需重建门户镜像。
 
 ## 6. 外部 API Token（网关侧）
