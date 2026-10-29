@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
@@ -23,57 +23,55 @@ const db = ref('')
 const loading = ref(false)
 const exportLoading = ref(false)
 const error = ref('')
+const SPARK_MODE_KEY = 'db-query-spark-execution-mode'
+const sparkExecutionMode = ref<SparkExecutionMode>(localStorage.getItem(SPARK_MODE_KEY) === 'session' ? 'session' : 'thrift')
+const sparkBatchActive = ref(false)
+watch(sparkExecutionMode, (mode) => {
+  localStorage.setItem(SPARK_MODE_KEY, mode)
+  stopSparkLogPolling()
+  sparkLogSeq++
+  sparkLogText.value = ''
+  sparkLogOffsets.value = { jvm: 0, audit: 0 }
+  sparkLogFileSizes.value = { jvm: 0, audit: 0 }
+  sparkStageSnapshot.value = null
+})
 
 // 写权限密码验证已移除(由网关库权限矩阵管控 + 数据源 readOnly 兜底),以下直接执行
 
-/** 当前 Spark 异步任务的 jobId(供停止按钮精确取消) */
-const currentSparkJobId = ref('')
+/** 当前 Spark 异步任务及提交时模式(供停止按钮精确取消) */
+const currentSparkJob = ref<{ jobId: string; executionMode: SparkExecutionMode } | null>(null)
 
 /** Spark 执行:异步任务模式 —— 提交即返回 jobId,前端轮询结果。
  *  动机:公司网关固定 60s 读超时,同步长请求(大查询可能跑数十分钟/小时)
  *  必被掐断 504;异步化后提交/查状态都是秒级往返,永不撞超时。
- *  SQL 由 Spark Thrift 异步执行,门户轮询状态。 */
+ *  SQL 按提交时的执行模式异步执行,门户轮询状态。 */
 async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }> {
-  const { jobId } = await submitSparkJob(sql, undefined, 7200000)
-  currentSparkJobId.value = jobId
-  const deadline = Date.now() + 7200000 // 上限 2 小时
-  while (Date.now() < deadline) {
-    if (batchCancelled) {
-      try {
-        await cancelSparkJob(jobId)
-      } catch {
-        /* 忽略 */
-      }
-      throw new Error('已取消')
-    }
-    const j = await getSparkJob(jobId)
-    if (j.state === 'done') {
-      currentSparkJobId.value = ''
-      return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }
-    }
-    if (j.state === 'failed') {
-      currentSparkJobId.value = ''
-      throw new Error(j.error || '任务执行失败')
-    }
-    if (j.state === 'cancelled') {
-      // 后端已取消(其他会话/后端主动停止):同样结束轮询,避免空转到超时
-      currentSparkJobId.value = ''
-      throw new Error('已取消')
-    }
-    await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
-  }
+  const executionMode = sparkExecutionMode.value
+  const { jobId } = await submitSparkJob(sql, undefined, 7200000, executionMode)
+  currentSparkJob.value = { jobId, executionMode }
   try {
-    await cancelSparkJob(jobId)
-  } catch {
-    /* 忽略 */
+    const deadline = Date.now() + 7200000 // 上限 2 小时
+    while (Date.now() < deadline) {
+      if (batchCancelled) {
+        await cancelSparkJob(jobId, executionMode).catch(() => undefined)
+        throw new Error('已取消')
+      }
+      const j = await getSparkJob(jobId, executionMode)
+      if (j.state === 'done') return j.result as { columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean; hdfsPath?: string }
+      if (j.state === 'failed') throw new Error(j.error || '任务执行失败')
+      if (j.state === 'cancelled') throw new Error('已取消')
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+    await cancelSparkJob(jobId, executionMode).catch(() => undefined)
+    throw new Error('任务超时(2 小时),已自动取消')
+  } finally {
+    if (currentSparkJob.value?.jobId === jobId) currentSparkJob.value = null
   }
-  currentSparkJobId.value = ''
-  throw new Error('任务超时(2 小时),已自动取消')
 }
 
 /** 导出当前 SparkSQL 语句到 HDFS；结果集不经过 driver collect，也不创建表格结果 tab。 */
 async function exportSparkResult() {
-  if (loading.value || exportLoading.value) return
+  if (loading.value || exportLoading.value || sparkBatchActive.value) return
   if (engine.value !== 'sparksql') return
   if (!ensureDb()) {
     ElMessage.warning('请先选择数据库')
@@ -89,16 +87,19 @@ async function exportSparkResult() {
   exportLoading.value = true
   loading.value = true
   error.value = ''
+  const executionMode = sparkExecutionMode.value
   try {
-    const { jobId } = await submitSparkExportJob(db.value, sql)
-    currentSparkJobId.value = jobId
+    await clearSparkLogs()
+    startSparkLogPolling()
+    const { jobId } = await submitSparkExportJob(db.value, sql, 7200000, executionMode)
+    currentSparkJob.value = { jobId, executionMode }
     const deadline = Date.now() + 7200000
     while (Date.now() < deadline) {
       if (batchCancelled) {
-        await cancelSparkJob(jobId).catch(() => undefined)
+        await cancelSparkJob(jobId, executionMode).catch(() => undefined)
         throw new Error('已取消')
       }
-      const job = await getSparkJob(jobId)
+      const job = await getSparkJob(jobId, executionMode)
       if (job.state === 'done') {
         const path = job.result?.hdfsPath
         if (!path) throw new Error('导出任务完成，但未返回 HDFS 路径')
@@ -109,7 +110,7 @@ async function exportSparkResult() {
       if (job.state === 'cancelled') throw new Error('已取消')
       await new Promise((resolve) => setTimeout(resolve, 3000))
     }
-    await cancelSparkJob(jobId).catch(() => undefined)
+    await cancelSparkJob(jobId, executionMode).catch(() => undefined)
     throw new Error('导出超时(2 小时)，已请求取消')
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
@@ -118,7 +119,9 @@ async function exportSparkResult() {
       ElMessage.error(message)
     }
   } finally {
-    currentSparkJobId.value = ''
+    await pollSparkLogs()
+    stopSparkLogPolling()
+    currentSparkJob.value = null
     exportLoading.value = false
     loading.value = false
   }
@@ -376,7 +379,12 @@ function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record
 }
 
 /** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
-async function onOpenTable(payload: { db: string; table: string }) {
+async function onOpenTable(payload: { db: string; table: string; engine?: string }) {
+  const isSpark = payload.engine === 'spark'
+  if (isSpark && (loading.value || sparkBatchActive.value)) {
+    ElMessage.warning('上一批 SQL 仍在执行,预览已取消,请等待完成')
+    return
+  }
   if (tabs.value.length >= MAX_TABS) {
     ElMessage.warning(`最多同时打开 ${MAX_TABS} 个 tab,请先关闭部分 tab`)
     return
@@ -385,11 +393,12 @@ async function onOpenTable(payload: { db: string; table: string }) {
   const isOracle = src?.type === 'oracle'
   const isImpala = src?.type === 'impala'
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL/Impala 用 LIMIT)
-  engine.value = isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
-  db.value = payload.db
-  const ident = isOracle ? `"${payload.table}"` : `\`${payload.table}\``
+  engine.value = isSpark ? 'sparksql' : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
+  db.value = isSpark ? SPARK_SOURCE.name : payload.db
+  const sparkIdent = (value: string) => '`' + value.replace(/`/g, '``') + '`'
+  const ident = isSpark ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}` : isOracle ? `"${payload.table}"` : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
-  const tabId = `tbl-${payload.db}.${payload.table}`
+  const tabId = `${isSpark ? 'spark-' : ''}tbl-${payload.db}.${payload.table}`
   const existing = tabs.value.find((t) => t.id === tabId)
   flushActiveContent()
   if (existing) {
@@ -416,7 +425,7 @@ async function onOpenTable(payload: { db: string; table: string }) {
   await runQuery()
   // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
   const r = results.value[results.value.length - 1]
-  if (r && !r.error && r.sql.trim() === sql.trim()) {
+  if (!isSpark && r && !r.error && r.sql.trim() === sql.trim()) {
     r.editable = !isImpala
     r.db = payload.db
     r.table = payload.table
@@ -572,8 +581,17 @@ onUnmounted(() => {
   logResizeObserver = null
 })
 
-// ── Spark Thrift / Beeline 日志(执行 Spark SQL 时轮询展示)───────────
+// ── Spark 所选执行模式日志(执行 Spark SQL 时轮询展示)───────────
 const sparkLogText = ref('')
+const sparkStageSnapshot = ref<SparkStageSnapshot | null>(null)
+const sparkStageSummary = computed(() => {
+  if (sparkExecutionMode.value === 'thrift') return 'Stage 状态不可用 (Thrift)'
+  const snapshot = sparkStageSnapshot.value
+  if (!snapshot || snapshot.error) return 'Stage 状态暂不可用'
+  if (!snapshot.stages.length) return '暂无 Stage'
+  return `Stage ${snapshot.numActiveStages} 运行中 · ` + snapshot.stages.slice(-4)
+    .map((stage) => `#${stage.stageId} ${stage.status} ${stage.completedTasks}/${stage.numTasks}`).join(' · ')
+})
 const dbJobLogText = ref('')
 const sparkLogOffsets = ref<{ jvm: number; audit: number }>({ jvm: 0, audit: 0 })
 const sparkLogBox = ref<HTMLElement | null>(null)
@@ -626,19 +644,22 @@ watch(dbJobLogText, () => {
 /** 拉取 spark 日志增量并追加(基线由 clearSparkLogs 在查询开始前建立,这里读到的都是新增) */
 async function pollSparkLogs() {
   const seq = sparkLogSeq
-  try {
-    const data = await sparkLogs(sparkLogOffsets.value)
-    if (seq !== sparkLogSeq) return // 已有新查询/已清空,丢弃过期响应
+  const executionMode = sparkExecutionMode.value
+  const [logs, stages] = await Promise.allSettled([
+    sparkLogs(sparkLogOffsets.value, executionMode),
+    sparkStages(executionMode)
+  ])
+  if (seq !== sparkLogSeq) return
+  sparkStageSnapshot.value = stages.status === 'fulfilled' ? stages.value : null
+  if (logs.status === 'fulfilled') {
+    const data = logs.value
     sparkLogFileSizes.value = data.files
     if (data.content) {
       sparkLogText.value += data.content
-      // 保留行数按日志容器可视高度动态计算:填满当前页面即滚动打印(终端式)
       const lines = sparkLogText.value.split('\n')
       if (lines.length > maxLogLines.value) sparkLogText.value = lines.slice(-maxLogLines.value).join('\n')
     }
     sparkLogOffsets.value = data.offsets
-  } catch {
-    /* 日志接口失败不打断查询 */
   }
 }
 
@@ -659,17 +680,20 @@ function stopSparkLogPolling() {
 /** 清空并建立新基线:offset 跳到已知文件末尾,新查询只展示新增日志。
  *  会话首次(未知文件大小)先探一次拿到当前大小,避免读到既有历史日志。 */
 async function clearSparkLogs() {
-  sparkLogSeq++ // 使在途 pollSparkLogs 响应失效
+  const seq = ++sparkLogSeq // 使在途 pollSparkLogs 响应失效
+  const executionMode = sparkExecutionMode.value
+  sparkStageSnapshot.value = null
   sparkLogText.value = ''
   if (sparkLogFileSizes.value.jvm === 0 && sparkLogFileSizes.value.audit === 0) {
     try {
-      const base = await sparkLogs({ jvm: 0, audit: 0 })
+      const base = await sparkLogs({ jvm: 0, audit: 0 }, executionMode)
+      if (seq !== sparkLogSeq) return
       sparkLogFileSizes.value = base.files
     } catch {
       /* 探基线失败则沿用 {0,0},代价是本次会读到历史日志 */
     }
   }
-  sparkLogOffsets.value = { ...sparkLogFileSizes.value }
+  if (seq === sparkLogSeq) sparkLogOffsets.value = { ...sparkLogFileSizes.value }
 }
 
 function clearDbJobLogs() {
@@ -1188,6 +1212,7 @@ async function execOne(sql: string, item: QueryResultItem, seq: number): Promise
   const isFlink = engine.value === 'flinksql'
   if (isSpark) {
     await clearSparkLogs()
+    if (seq !== runSeq) return
     startSparkLogPolling()
   }
   try {
@@ -1377,7 +1402,7 @@ async function execSegments(segs: string[], seq: number) {
 /** 执行(选中内容 / 光标段;选中内容含多条时逐条执行) */
 async function runQuery() {
   // 每人同时最多提交一批:上一批未结束则拒绝新批(FIFO 排队由批内逐条完成)
-  if (loading.value) {
+  if (loading.value || sparkBatchActive.value || exportLoading.value) {
     ElMessage.warning('上一批 SQL 仍在执行,请等待完成后再提交')
     return
   }
@@ -1420,10 +1445,12 @@ async function runQuery() {
     return
   }
   loading.value = true
+  sparkBatchActive.value = engine.value === 'sparksql'
   error.value = ''
   try {
     await execSegments(segs, seq)
   } finally {
+    sparkBatchActive.value = false
     loading.value = false
   }
 }
@@ -1433,9 +1460,10 @@ async function stopQuery() {
   batchCancelled = true
   runSeq++ // 使当前批次在途结果/日志失效,防止旧批覆盖停止后新执行的批次
   try {
-    if (currentSparkJobId.value) {
+    if (currentSparkJob.value) {
       try {
-        await cancelSparkJob(currentSparkJobId.value)
+        const job = currentSparkJob.value
+        await cancelSparkJob(job.jobId, job.executionMode)
       } catch {
         /* 忽略 */
       }
@@ -1507,7 +1535,7 @@ watch(engine, async (val) => {
     <!-- 左目录面板 + 右查询区 -->
     <div class="db-main">
       <div class="db-side" :style="{ width: sideWidth + 'px' }">
-        <SqlTreePanel ref="treePanelRef" :dbs="treeDbs" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" @run-sql="onRunHistorySql" />
+        <SqlTreePanel ref="treePanelRef" :dbs="treeDbs" :execution-mode="sparkExecutionMode" @open="onOpenFile" @insert="onInsert" @open-table="onOpenTable" @run-sql="onRunHistorySql" />
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
@@ -1520,6 +1548,10 @@ watch(engine, async (val) => {
         <el-option label="Impala" value="impala" />
         <el-option label="SparkSQL" value="sparksql" />
         <el-option label="FlinkSQL" value="flinksql" />
+      </el-select>
+      <el-select v-if="engine === 'sparksql'" v-model="sparkExecutionMode" size="small" style="width: 132px" :disabled="loading || sparkBatchActive || exportLoading" aria-label="Spark 执行方式">
+        <el-option label="Thrift" value="thrift" />
+        <el-option label="SparkSession" value="session" />
       </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
@@ -1658,6 +1690,7 @@ watch(engine, async (val) => {
               </template>
             </span>
           </div>
+          <div v-if="engine === 'sparksql'" class="spark-stage-status">{{ sparkStageSummary }}</div>
           <pre ref="sparkLogBox" class="spark-logs-body">{{ (engine === 'impala' ? dbJobLogText : sparkLogText) || logEmptyHint }}</pre>
         </div>
       </template>
@@ -2115,6 +2148,16 @@ watch(engine, async (val) => {
     font-size: 11px;
     opacity: 0.75;
   }
+}
+
+.spark-stage-status {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: $muted;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Spark 引擎日志透传面板 */

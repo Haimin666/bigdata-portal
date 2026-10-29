@@ -20,7 +20,7 @@
 | 视图 | `src/views/db/QueryResults.vue` | 查询结果面板(2026-09 从 QueryView 拆出):结果 tab 栏(日志 tab 内容经 slot 注入)+ 分页表格 + 单元格行内编辑(提交走 queryDb + emit rerun 重查)+ 复制(单元格/本页/整表 TSV)+ CSV 导出;结果 tab 右键菜单支持关闭当前、关闭左侧、关闭右侧、关闭其他;props: results/activePane/db/loading |
 | 视图 | `src/views/db/SqlEditor.vue` | Monaco 编辑器封装(2026-08 替代 CodeMirror):**model 池**(每 tab 一个 ITextModel,独立撤销/光标)、补全 provider(关键字+**内置函数**+**SQL snippet**+schema 表/列点语法+文中词/字符串值行级增量索引——打字只重建光标行 O(行内容),Enter/粘贴/删除才整表重建;输入变更按 SQL 光标上下文显式触发自动提示(80ms 防抖),本地候选不等网络;**当前编辑 Tab 内 SQL 字符串字面量**按前缀补全,不扫描注释、不跨 Tab/历史)、**schema 预取** db 就绪即拉缓存)、快捷键(Cmd+Enter/S/Cmd+Shift+F/Cmd+/、Ctrl+Tab 缩进、Shift+Tab 反缩进)、主题 portal-dark/light 与字号联动 |
 | 工具 | `src/utils/monaco-setup.ts` | Monaco 环境:worker 注册(Vite `?worker` 内联 EditorWorker)、主题 definePortalThemes(portal-dark/light)、model URI 约定(`portal-sql://editor/<modelId>`,供补全 provider 归属判定) |
-| 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(**引擎 → 库 → 表 → 字段**:mysql/oracle/impala 数据源分组展示 + Spark 组(经新 `/spark/schema/*` 元数据,SHOW/DESC 只读+db-proxy 侧 5 分钟 TTL 缓存,Spark 可用性由 spark/status 探测),含表/字段注释,双击表预览,复制表名(Spark 带 db. 前缀)/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
+| 视图 | `src/views/db/SqlTreePanel.vue` | 脚本文件树(本地 scripts 存储,右键新建/重命名/删除) + 表目录(**引擎 → 库 → 表 → 字段**:mysql/oracle/impala 数据源分组展示 + Spark 组(经 `/spark/schema/*` 元数据,SHOW/DESC 只读+db-proxy 侧 5 分钟 TTL 缓存,Spark 状态与 Schema 请求随工作台 `executionMode` 路由),含表/字段注释,双击表预览,复制表名(Spark 带 db. 前缀)/建表语句) + **历史/收藏**(localStorage 持久化,点击回填编辑器执行) |
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
@@ -91,6 +91,7 @@
 - Session 使用同一 `spark` 段的历史 YARN client 配置字段，包括 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances` 与 `sparkConf`；它在 db-proxy 进程中使用常驻 PySpark `SparkSession`。写入权限仍由门户网关数据权限矩阵控制。
 - Thrift 子进程与 SparkSession 各自报告所选通道的执行状态和诊断；停止和超时只作用于所选通道的 job。Stage 状态仅由提供该信息的 session 通道返回。
 - `/api/spark/stages?executionMode=` 与 db-proxy `/spark/stages?executionMode=` 按所选模式读取 Stage 快照；Thrift 暂无 Stage 数据时返回空状态，session 返回最近一次 SQL 的 Stage 信息。
+- Spark 表双击预览标记数据源引擎并通过当前 `executionMode` 执行 Spark SQL；Spark 预览只读，不触发行内关系库编辑和主键加载。
 - Thrift 请求使用 JDBC URL 默认库或 SQL 中显式库名；session 请求使用常驻 SparkSession 的既有会话语义。两个模式都只接受 SQL 工作台请求，不执行用户提交的 PySpark 代码。更新配置后重启 db-proxy；发布门户工作台选择器需重建门户镜像。
 
 ## 6. 外部 API Token（网关侧）

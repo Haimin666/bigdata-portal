@@ -165,13 +165,16 @@ export async function cancelDbJob(jobId: string): Promise<{ cancelled: boolean }
   return body.data as { cancelled: boolean }
 }
 
-/** Spark SQL 查询(经网关 /api/spark/query 走 db-proxy Spark Thrift)
+export type SparkExecutionMode = 'thrift' | 'session'
+
+/** Spark SQL 查询(经网关 /api/spark/query 按执行模式路由)
  *  timeoutMs:前端侧 AbortSignal 超时 + 透传后端统一超时,默认 120s。
  *  超时后自动请求 cancelSpark 清理后端挂起的 job,避免查询无限等待占锁。 */
 export async function querySpark(
   sql: string,
   writeToken?: string,
-  timeoutMs = 120000
+  timeoutMs = 120000,
+  executionMode: SparkExecutionMode = 'thrift'
 ): Promise<DbQueryResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
@@ -179,7 +182,7 @@ export async function querySpark(
     fetch('/api/spark/query', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ sql, kind: 'sql', timeoutMs: t }),
+      body: JSON.stringify({ sql, kind: 'sql', timeoutMs: t, executionMode }),
       signal: AbortSignal.timeout(t)
     })
   let res: Response
@@ -188,7 +191,7 @@ export async function querySpark(
   } catch (e) {
     // 前端/网关超时:尝试取消后端 job,避免 collect 挂起占住 db-proxy 串行锁
     try {
-      await fetch('/api/spark/cancel', { method: 'POST' })
+      await cancelSpark(executionMode)
     } catch {
       /* 忽略取消失败 */
     }
@@ -198,7 +201,7 @@ export async function querySpark(
   // 自动重试一次 —— 第二次 session 已就绪,通常秒回;重试超时给更长(180s)
   if (res.status === 504) {
     try {
-      await fetch('/api/spark/cancel', { method: 'POST' })
+      await cancelSpark(executionMode)
     } catch {
       /* 忽略 */
     }
@@ -206,7 +209,7 @@ export async function querySpark(
       res = await run(Math.max(timeoutMs, 180000))
     } catch (e) {
       try {
-        await fetch('/api/spark/cancel', { method: 'POST' })
+        await cancelSpark(executionMode)
       } catch {
         /* 忽略 */
       }
@@ -229,8 +232,8 @@ export async function querySpark(
 }
 
 /** 停止当前执行的 Spark 查询(前端"停止"按钮) */
-export async function cancelSpark(): Promise<{ cancelled: boolean }> {
-  const res = await fetch('/api/spark/cancel', { method: 'POST' })
+export async function cancelSpark(executionMode: SparkExecutionMode = 'thrift'): Promise<{ cancelled: boolean }> {
+  const res = await fetch('/api/spark/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ executionMode }) })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -248,6 +251,7 @@ export async function cancelSpark(): Promise<{ cancelled: boolean }> {
 
 // ── Spark 异步任务(大查询/长任务,规避公司网关 60s 超时)────────
 export interface SparkJobInfo {
+  executionMode?: SparkExecutionMode
   id: string
   state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   sql?: string
@@ -265,11 +269,12 @@ export interface SparkJobInfo {
 export async function submitSparkJob(
   sql: string,
   writeToken?: string,
-  timeoutMs = 600000
+  timeoutMs = 600000,
+  executionMode: SparkExecutionMode = 'thrift'
 ): Promise<{ jobId: string }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
-  const payload = { kind: 'sql', sql, timeoutMs }
+  const payload = { kind: 'sql', sql, timeoutMs, executionMode }
   const res = await fetch('/api/spark/jobs', { method: 'POST', headers, body: JSON.stringify(payload) })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -290,12 +295,13 @@ export async function submitSparkJob(
 export async function submitSparkExportJob(
   db: string,
   sql: string,
-  timeoutMs = 7200000
+  timeoutMs = 7200000,
+  executionMode: SparkExecutionMode = 'thrift'
 ): Promise<{ jobId: string }> {
   const res = await fetch('/api/spark/export/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ db, sql, timeoutMs })
+    body: JSON.stringify({ db, sql, timeoutMs, executionMode })
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -313,8 +319,8 @@ export async function submitSparkExportJob(
 }
 
 /** 查询异步任务状态 */
-export async function getSparkJob(jobId: string): Promise<SparkJobInfo> {
-  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}`)
+export async function getSparkJob(jobId: string, executionMode: SparkExecutionMode = 'thrift'): Promise<SparkJobInfo> {
+  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}?executionMode=${executionMode}`)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -331,8 +337,8 @@ export async function getSparkJob(jobId: string): Promise<SparkJobInfo> {
 }
 
 /** 取消异步任务(大查询中途停止) */
-export async function cancelSparkJob(jobId: string): Promise<{ cancelled: boolean }> {
-  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+export async function cancelSparkJob(jobId: string, executionMode: SparkExecutionMode = 'thrift'): Promise<{ cancelled: boolean }> {
+  const res = await fetch(`/api/spark/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ executionMode }) })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -590,15 +596,16 @@ export async function cancelFlink(): Promise<{ cancelled: boolean }> {
   return body.data as { cancelled: boolean }
 }
 
-/** Spark Thrift / Beeline 日志增量读取(经网关透传 db-proxy;per-file offset 防漂移) */
-export async function sparkLogs(offsets: { jvm?: number; audit?: number } = {}): Promise<{
+/** 所选 Spark 通道日志增量读取(经网关透传 db-proxy;per-file offset 防漂移) */
+export async function sparkLogs(offsets: { jvm?: number; audit?: number } = {}, executionMode: SparkExecutionMode = 'thrift'): Promise<{
   content: string
   offsets: { jvm: number; audit: number }
   files: { jvm: number; audit: number }
 }> {
   const q = new URLSearchParams({
     jvm: String(offsets.jvm || 0),
-    audit: String(offsets.audit || 0)
+    audit: String(offsets.audit || 0),
+    executionMode
   })
   const res = await fetch(`/api/spark/logs?${q}`)
   if (!res.ok) {
@@ -624,9 +631,9 @@ export async function sparkLogs(offsets: { jvm?: number; audit?: number } = {}):
   }
 }
 
-/** Spark Thrift 引擎状态,供左侧表目录探测可用性 */
-export async function sparkStatus(): Promise<Record<string, unknown>> {
-  const res = await fetch('/api/spark/status')
+/** 所选 Spark 通道状态,供左侧表目录探测可用性 */
+export async function sparkStatus(executionMode: SparkExecutionMode = 'thrift'): Promise<Record<string, unknown>> {
+  const res = await fetch(`/api/spark/status?executionMode=${executionMode}`)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -642,9 +649,27 @@ export async function sparkStatus(): Promise<Record<string, unknown>> {
   return body.data as Record<string, unknown>
 }
 
+export interface SparkStageSnapshot {
+  activeJobs: Array<{ jobId: number; status: string; stageIds: number[] }>
+  stages: Array<{ stageId: number; name: string; status: string; numTasks: number; completedTasks: number }>
+  numActiveJobs: number
+  numActiveStages: number
+  error?: string
+}
+
+/** Session 最近一次 SQL 的 Stage 快照;Thrift 返回空状态。 */
+export async function sparkStages(executionMode: SparkExecutionMode = 'thrift'): Promise<SparkStageSnapshot> {
+  const res = await fetch(`/api/spark/stages?executionMode=${executionMode}`)
+  const body = (await res.json()) as ApiResponse<SparkStageSnapshot>
+  if (!res.ok || (body.code !== undefined && body.code !== 0)) {
+    throw new Error(body.detail || body.msg || `HTTP ${res.status}`)
+  }
+  return body.data as SparkStageSnapshot
+}
+
 /** Spark 元数据(SHOW/DESC 只读;db-proxy 侧 TTL 缓存,不重复打集群) */
-async function sparkSchemaRequest<T>(path: string): Promise<T> {
-  const res = await fetch(`/api/spark/schema/${path}`)
+async function sparkSchemaRequest<T>(path: string, executionMode: SparkExecutionMode): Promise<T> {
+  const res = await fetch(`/api/spark/schema/${path}${path.includes('?') ? '&' : '?'}executionMode=${executionMode}`)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -661,19 +686,19 @@ async function sparkSchemaRequest<T>(path: string): Promise<T> {
 }
 
 /** Spark 库列表(SHOW DATABASES) */
-export async function listSparkDatabases(): Promise<string[]> {
-  return sparkSchemaRequest<string[]>('databases')
+export async function listSparkDatabases(executionMode: SparkExecutionMode = 'thrift'): Promise<string[]> {
+  return sparkSchemaRequest<string[]>('databases', executionMode)
 }
 
 /** Spark 库下表列表(SHOW TABLES IN) */
-export async function listSparkTables(db: string): Promise<string[]> {
-  return sparkSchemaRequest<string[]>(`tables?db=${encodeURIComponent(db)}`)
+export async function listSparkTables(db: string, executionMode: SparkExecutionMode = 'thrift'): Promise<string[]> {
+  return sparkSchemaRequest<string[]>(`tables?db=${encodeURIComponent(db)}`, executionMode)
 }
 
 /** Spark 表字段列表(DESC,含类型/注释) */
-export async function listSparkFields(db: string, table: string): Promise<TableField[]> {
+export async function listSparkFields(db: string, table: string, executionMode: SparkExecutionMode = 'thrift'): Promise<TableField[]> {
   const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`
-  return sparkSchemaRequest<TableField[]>(`fields?${q}`)
+  return sparkSchemaRequest<TableField[]>(`fields?${q}`, executionMode)
 }
 
 /** Spark 写操作解锁:密码换取 token(类似 Jupyter 登录) */

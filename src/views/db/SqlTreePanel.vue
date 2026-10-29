@@ -16,6 +16,7 @@ import {
   listSparkFields,
   sparkStatus,
   searchTables,
+  type SparkExecutionMode,
   type TableSearchHit,
   type ScriptNode,
   type DbDataSource,
@@ -27,11 +28,11 @@ import { useAuthStore } from '@/store/auth'
 
 defineOptions({ name: 'SqlTreePanel' })
 
-const props = defineProps<{ dbs: DbDataSource[] }>()
+const props = withDefaults(defineProps<{ dbs: DbDataSource[]; executionMode?: SparkExecutionMode }>(), { executionMode: 'thrift' })
 const emit = defineEmits<{
   (e: 'open', node: ScriptNode): void
   (e: 'insert', text: string): void
-  (e: 'openTable', payload: { db: string; table: string }): void
+  (e: 'openTable', payload: { db: string; table: string; engine?: string }): void
   (e: 'runSql', sql: string, result?: HistResult): void
 }>()
 
@@ -188,16 +189,17 @@ interface CatNode extends Record<string, unknown> {
   typeName?: string
 }
 
-/** Spark 引擎可用性:挂载时探测一次(spark/status),不可用则树里不显示 Spark 组 */
+/** Spark 引擎可用性:挂载与执行模式切换时探测,不可用则不显示 Spark 组 */
 const showSpark = ref(false)
-onMounted(async () => {
+watch(() => props.executionMode, async (executionMode) => {
+  showSpark.value = false
   try {
-    const st = await sparkStatus()
-    showSpark.value = !!st?.enabled
+    const st = await sparkStatus(executionMode)
+    if (executionMode === props.executionMode) showSpark.value = !!st?.enabled
   } catch {
-    showSpark.value = false
+    if (executionMode === props.executionMode) showSpark.value = false
   }
-})
+}, { immediate: true })
 
 const ENGINE_LABEL: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', spark: 'Spark' }
 
@@ -222,7 +224,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
     if (data.kind === 'engine') {
       // 引擎组 → 库列表
       if (data.engine === 'spark') {
-        const dbs = await listSparkDatabases()
+        const dbs = await listSparkDatabases(props.executionMode)
         resolve(dbs.map((n) => ({ id: `spark-db:${n}`, name: n, kind: 'db', isLeaf: false, db: n, engine: 'spark' })))
       } else {
         resolve(
@@ -236,7 +238,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
     if (data.kind === 'db') {
       // 库 → 表
       if (data.engine === 'spark') {
-        const tables = await listSparkTables(data.db || '')
+        const tables = await listSparkTables(data.db || '', props.executionMode)
         resolve(tables.map((t) => ({ id: `spark-t:${t}`, name: t, kind: 'table', isLeaf: false, db: data.db, table: t, engine: 'spark' })))
         return
       }
@@ -258,7 +260,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
     if (data.kind === 'table') {
       // 表 → 字段
       if (data.engine === 'spark') {
-        const fields = await listSparkFields(data.db || '', data.table || data.name)
+        const fields = await listSparkFields(data.db || '', data.table || data.name, props.executionMode)
         resolve(
           fields.map((f) => ({
             id: `spark-f:${data.table}:${f.name}`,
@@ -304,7 +306,7 @@ function onCatalogClick(data: CatNode) {
 /** 双击表:预览数据(交给父组件开新 tab 查 SELECT * LIMIT 100) */
 function onTableDblClick(data: CatNode) {
   if (data.kind !== 'table') return
-  emit('openTable', { db: data.db || '', table: data.table || data.name })
+  emit('openTable', { db: data.db || '', table: data.table || data.name, engine: data.engine })
 }
 
 /** 复制表名到画布(点 + 按钮);Spark 表带库前缀(db.table,避免同名歧义) */
@@ -440,7 +442,7 @@ watch(activeTab, (v) => {
 // datasources 异步到达后重建表目录树(重新加载根库列表)
 // 树 key:数据源 + Spark 可用性探测结果(showSpark 异步完成时强制重建根节点,
 // 否则先渲染的树可能没有 Spark 组且永不刷新 —— 竞态修复 2026-09)
-const dbsKey = computed(() => props.dbs.map((d) => d.name).join(',') + `|spark:${showSpark.value}`)
+const dbsKey = computed(() => props.dbs.map((d) => d.name).join(',') + `|spark:${props.executionMode}:${showSpark.value}`)
 
 // ── 右键菜单(我的目录节点)──────────────────────────────────
 const ctx = ref<{ show: boolean; x: number; y: number; node: ScriptNode | null }>({
