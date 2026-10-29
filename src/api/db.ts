@@ -5,7 +5,7 @@ export interface DbDataSource {
   name: string
   /** 显示别名(缺省回退 name) */
   label?: string
-  type: 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'flinksql'
+  type: 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'sparksession' | 'flinksql'
   host: string
   port: number
   user: string

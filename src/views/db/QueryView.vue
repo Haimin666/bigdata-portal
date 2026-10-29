@@ -18,16 +18,15 @@ defineOptions({ name: 'DbQueryView' })
 
 // ── 状态 ─────────────────────────────────────────────────────
 const datasources = ref<DbDataSource[]>([])
-const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'flinksql' | ''>('')
+const engine = ref<'mysql' | 'oracle' | 'impala' | 'sparksql' | 'sparksession' | 'flinksql' | ''>('')
 const db = ref('')
 const loading = ref(false)
 const exportLoading = ref(false)
 const error = ref('')
-const SPARK_MODE_KEY = 'db-query-spark-execution-mode'
-const sparkExecutionMode = ref<SparkExecutionMode>(localStorage.getItem(SPARK_MODE_KEY) === 'session' ? 'session' : 'thrift')
+const isSparkEngine = computed(() => engine.value === 'sparksql' || engine.value === 'sparksession')
+const sparkExecutionMode = computed<SparkExecutionMode>(() => engine.value === 'sparksession' ? 'session' : 'thrift')
 const sparkBatchActive = ref(false)
-watch(sparkExecutionMode, (mode) => {
-  localStorage.setItem(SPARK_MODE_KEY, mode)
+watch(sparkExecutionMode, () => {
   stopSparkLogPolling()
   sparkLogSeq++
   sparkLogText.value = ''
@@ -72,7 +71,7 @@ async function execSpark(sql: string): Promise<{ columns: string[]; rows: Record
 /** 导出当前 SparkSQL 语句到 HDFS；结果集不经过 driver collect，也不创建表格结果 tab。 */
 async function exportSparkResult() {
   if (loading.value || exportLoading.value || sparkBatchActive.value) return
-  if (engine.value !== 'sparksql') return
+  if (!isSparkEngine.value) return
   if (!ensureDb()) {
     ElMessage.warning('请先选择数据库')
     return
@@ -394,7 +393,7 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   const isOracle = !isSpark && src?.type === 'oracle'
   const isImpala = src?.type === 'impala'
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL/Impala 用 LIMIT)
-  engine.value = isSpark ? 'sparksql' : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
+  engine.value = isSpark ? (engine.value === 'sparksession' ? 'sparksession' : 'sparksql') : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
   db.value = isSpark ? SPARK_SOURCE.name : payload.db
   const sparkIdent = (value: string) => '`' + value.replace(/`/g, '``') + '`'
   const ident = isSpark ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}` : isOracle ? `"${payload.table}"` : `\`${payload.table}\``
@@ -505,18 +504,20 @@ function onSideDragStart(e: MouseEvent) {
 
 // SparkSQL 虚拟数据源(db-proxy 引擎,不在 /acl 中)
 const SPARK_SOURCE: DbDataSource = { name: 'spark', label: 'SparkSQL', type: 'sparksql', host: '', port: 0, user: '' }
+const SPARK_SESSION_SOURCE: DbDataSource = { ...SPARK_SOURCE, label: 'SparkSession', type: 'sparksession' }
 // FlinkSQL 虚拟数据源(走 db-proxy → Flink SQL Gateway)
 const FLINK_SOURCE: DbDataSource = { name: 'flink', label: 'FlinkSQL', type: 'flinksql', host: '', port: 0, user: '' }
 
-// 引擎过滤后的数据源(sparksql/flinksql 为虚拟源,不进左侧树)
+// SparkSQL、SparkSession、FlinkSQL 为虚拟源,不进左侧树
 const filteredDbs = computed(() => {
   if (engine.value === 'sparksql') return [SPARK_SOURCE]
+  if (engine.value === 'sparksession') return [SPARK_SESSION_SOURCE]
   if (engine.value === 'flinksql') return [FLINK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
 // 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
-const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'flinksql'))
+const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'sparksession' && d.type !== 'flinksql'))
 
 // ── Monaco 编辑器(SqlEditor 封装)─────────────────────────────────────
 const canvasRef = ref<HTMLElement>()
@@ -524,7 +525,7 @@ const canvasRef = ref<HTMLElement>()
 const editorRef = ref<InstanceType<typeof SqlEditor>>()
 // 补全元数据:关系库全量 schema;Spark 按所选模式加载指定库的表或指定表的字段
 const schemaLoader = async (db: string, table?: string, executionMode: SparkExecutionMode = sparkExecutionMode.value): Promise<DbSchema | null> => {
-  if (engine.value !== 'sparksql') return getSchema(db)
+  if (!isSparkEngine.value) return getSchema(db)
   if (table) return { tables: [{ name: table, columns: await listSparkFields(db, table, executionMode) }] }
   return { tables: (await listSparkTables(db, executionMode)).map((name) => ({ name, columns: [] })) }
 }
@@ -708,7 +709,7 @@ function clearDbJobLogs() {
 /** 日志空状态提示:区分执行中/成功/失败,避免“查询成功时面板看起来像收起” */
 const logEmptyHint = computed(() => {
   if (engine.value === 'impala') return loading.value ? '(等待 db-proxy 执行日志…)': '(Impala 本次查询暂无日志)'
-  if (engine.value !== 'sparksql' && engine.value !== 'flinksql') {
+  if (!isSparkEngine.value && engine.value !== 'flinksql') {
     return '(该引擎不产生引擎日志)'
   }
   if (loading.value) return '(等待引擎输出…)'
@@ -883,7 +884,7 @@ function getSqlToRun(): string {
 /** JSON 复合值折叠查看(弹窗展示格式化文本) */
 
 const engineLabel = computed(() => {
-  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', sparksql: 'SparkSQL', flinksql: 'FlinkSQL' }
+  const m: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', sparksql: 'SparkSQL', sparksession: 'SparkSession', flinksql: 'FlinkSQL' }
   return m[engine.value] || engine.value || '—'
 })
 
@@ -914,7 +915,7 @@ function formatSql() {
   try {
     // 方言:Oracle 在 sql-formatter 中为 plsql、spark 覆盖 sparksql/flinksql;Impala 用兼容的 MySQL 格式化降级
     const lang: SqlLanguage =
-      engine.value === 'oracle' ? 'plsql' : engine.value === 'sparksql' || engine.value === 'flinksql' ? 'spark' : 'mysql'
+      engine.value === 'oracle' ? 'plsql' : isSparkEngine.value || engine.value === 'flinksql' ? 'spark' : 'mysql'
     // ${var} 非标准 token,先占位保护(防 sql-formatter 拆散/转义);格式化后还原
     const varNames: string[] = []
     const masked = s.replace(/\$\{[A-Za-z_][A-Za-z0-9_-]*\}/g, (m) => {
@@ -1213,7 +1214,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
 
 /** 执行单条 SQL 并记录结果;seq 为批次号,停止后旧批次在途结果丢弃,避免覆盖新批 */
 async function execOne(sql: string, item: QueryResultItem, seq: number): Promise<void> {
-  const isSpark = engine.value === 'sparksql'
+  const isSpark = isSparkEngine.value
   const isFlink = engine.value === 'flinksql'
   if (isSpark) {
     await clearSparkLogs()
@@ -1450,7 +1451,7 @@ async function runQuery() {
     return
   }
   loading.value = true
-  sparkBatchActive.value = engine.value === 'sparksql'
+  sparkBatchActive.value = isSparkEngine.value
   error.value = ''
   try {
     await execSegments(segs, seq)
@@ -1528,7 +1529,7 @@ onMounted(async () => {
 watch(engine, async (val) => {
   // 写权限密码验证已移除,切换引擎不再要求解锁
   if (!val) return
-  const first = filteredDbs.value.find((d) => d.type === val)
+  const first = filteredDbs.value.find((d) => d.type === val || (isSparkEngine.value && (d.type === 'sparksql' || d.type === 'sparksession')))
   db.value = first?.name || ''
   // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
@@ -1547,16 +1548,13 @@ watch(engine, async (val) => {
     <!-- 顶部工具条 -->
     <div class="toolbar">
       <div class="toolbar-group toolbar-group-context">
-      <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable @change="db = filteredDbs[0]?.name || ''">
+      <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable :disabled="loading || sparkBatchActive || exportLoading" @change="db = filteredDbs[0]?.name || ''">
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="Impala" value="impala" />
         <el-option label="SparkSQL" value="sparksql" />
+        <el-option label="SparkSession" value="sparksession" />
         <el-option label="FlinkSQL" value="flinksql" />
-      </el-select>
-      <el-select v-if="engine === 'sparksql'" v-model="sparkExecutionMode" size="small" style="width: 132px" :disabled="loading || sparkBatchActive || exportLoading" aria-label="Spark 执行方式">
-        <el-option label="Thrift" value="thrift" />
-        <el-option label="SparkSession" value="session" />
       </el-select>
       <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
@@ -1593,7 +1591,7 @@ watch(engine, async (val) => {
       <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" :disabled="loading" @click="formatSql" /></el-tooltip>
       <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" :loading="explainLoading" :disabled="loading" @click="runExplain" /></el-tooltip>
       <el-tooltip v-if="loading" content="停止" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery" /></el-tooltip>
-      <el-tooltip v-if="engine === 'sparksql'" content="导出当前 SQL 完整结果到 HDFS" placement="top">
+      <el-tooltip v-if="isSparkEngine" content="导出当前 SQL 完整结果到 HDFS" placement="top">
         <el-button :icon="Download" :loading="exportLoading" :disabled="loading && !exportLoading" @click="exportSparkResult">导出到 HDFS</el-button>
       </el-tooltip>
       <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" :loading="loading" :disabled="loading" @click="runQuery" /></el-tooltip>
@@ -1697,7 +1695,7 @@ watch(engine, async (val) => {
               </template>
             </span>
           </div>
-          <div v-if="engine === 'sparksql'" class="spark-stage-status">{{ sparkStageSummary }}</div>
+          <div v-if="isSparkEngine" class="spark-stage-status">{{ sparkStageSummary }}</div>
           <pre ref="sparkLogBox" class="spark-logs-body">{{ (engine === 'impala' ? dbJobLogText : sparkLogText) || logEmptyHint }}</pre>
         </div>
       </template>

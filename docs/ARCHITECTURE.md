@@ -131,12 +131,12 @@ src/
 | `selfcheck_guards.py` | 护栏自检(12 例) |
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
-- **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
-- **Spark 查询结果限制**:两种 Spark 模式保持相同结果结构与行数上限。Thrift 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出;SparkSession 通过相同限行规则有界收集;达到上限时标记 truncated。HDFS 导出按所选模式执行。
-- **Spark 双模式选择**:Spark 查询请求可携带 `executionMode: "thrift" | "session"`;缺省为 `thrift` 以兼容既有调用。`session` 是历史 YARN client PySpark `SparkSession`,不是 `spark-sql` 命令行。Thrift 使用 `spark` 配置段的 JDBC/Beeline 字段;session 使用同段已有的 `master`、YARN `queue`、executor 与 `sparkConf` 等字段。
+- **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、SparkSession、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
+- **Spark 查询结果限制**:SparkSQL 与 SparkSession 保持相同结果结构与行数上限。SparkSQL/Thrift 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出;SparkSession 通过相同限行规则有界收集;达到上限时标记 truncated。HDFS 导出由对应引擎执行。
+- **Spark 引擎选择**:工作台将 `SparkSQL`(Thrift) 与 `SparkSession`(历史 YARN client PySpark Session)列为两个独立引擎，不提供混在 SparkSQL 下的执行模式下拉。底层 API 继续使用 `executionMode: "thrift" | "session"`;旧调用缺省为 `thrift` 以保持兼容。SparkSession 不是 `spark-sql` 命令行。Thrift 使用 `spark` 配置段的 JDBC/Beeline 字段;session 使用同段已有的 `master`、YARN `queue`、executor 与 `sparkConf` 等字段。
 - **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;每个请求模式路由到对应适配器，不因失败切换或重试另一模式。
 - **Spark 取消与日志**:任务状态、取消、日志/Stage 状态、Schema 补全及 HDFS 导出均按请求的 `executionMode` 路由;两种模式共享门户权限检查与响应结构。失败请求不会重试另一模式。
-- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 按 `executionMode` 走 Spark Thrift 或 SparkSession 适配器
+- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 与 SparkSession 是两个门户引擎，分别走 Spark Thrift 和历史 PySpark Session 适配器
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 
@@ -153,7 +153,7 @@ QueryView.vue
                            └─ 超过有效行数限制:只收集限制值 + 1 行并标记 truncated
 ```
 
-Spark 的 `/api/spark/*` 与 db-proxy `/spark/*` 查询、异步任务、状态/取消、日志、Schema 和导出请求透传同一 `executionMode`;未提供时使用 `thrift`。两种模式沿用相同门户模块/数据权限与写 SQL 校验。部署 session 通道需重启 db-proxy；工作台选择器随门户前端发布，需重建门户镜像。
+SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固定向 `/api/spark/*` 与 db-proxy `/spark/*` 透传 `executionMode=thrift` 和 `executionMode=session`，覆盖查询、异步任务、状态/取消、日志、Stage、Schema 补全和导出。两者沿用相同门户模块/数据权限与写 SQL 校验。部署 session 通道需重启 db-proxy；发布独立引擎选项需重建门户镜像。
 
 ## 6. 配置体系
 
