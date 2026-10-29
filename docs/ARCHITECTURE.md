@@ -30,7 +30,7 @@
 src/
 ├── main.ts             # 入口:主题初始化 + 加载管理端主题覆盖
 ├── App.vue             # 根组件
-├── router/index.ts     # 路由:native 静态路由 + 菜单驱动的 subapp 占位路由
+├── router/index.ts     # 路由:原生页面同步占位路由 + 菜单驱动的 subapp 占位路由
 ├── layouts/            # 门户壳
 │   ├── MainLayout.vue      # 侧栏 + TabStage
 │   └── components/
@@ -51,7 +51,7 @@ src/
 
 ### 2.2 关键机制
 
-- **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁
+- **tab 常驻池**:`TabStage` 用 `v-show` 保留所有打开过 tab 的组件状态(iframe 池保留子应用滚动/登录态),关闭才销毁;原生路由使用同步空壳立即完成导航，实际视图由 `TabStage` 从 `nativeViews.ts` 的 `defineAsyncComponent` 加载，菜单 hover 预热同一 chunk，超过 200ms 未加载时显示 `ViewLoading` 骨架。这样 Vue Router 不会提前等待同一页面 chunk，静态引入也不会把 G6/Monaco 等重依赖拖进首屏。tab 支持拖拽排序(顺序随 `sessionStorage` 持久化),右键菜单动作经 `TabStage` 透传给 `MainLayout`
 - **tab 交互**:`SubappTabs` 提供刷新、关闭当前、关闭左右侧/其他 tab 的上下文操作;操作只改变内存中的常驻池,不改变页面内容区尺寸
 - **列表状态**:`StateView` 统一加载完成后的空数据、错误和重试反馈;保留表格的 loading 遮罩,不改变内容区高度
 - **表格工具栏**:`TableToolbar` 统一刷新、表格密度和筛选/操作插槽;密度偏好按页面保存在 localStorage,列显隐仍由业务页面维护
@@ -60,7 +60,7 @@ src/
 - **业务页规范**:YARN、工作流、HDFS、数据库查询和数据同步页面不重复展示模块标题,业务操作保持原有内容区,通过 `TableToolbar`、状态卡和结果面板统一交互反馈;Web 开发助手复用门户同源 `/agent?user_id=1030437`,Android 使用原生移动对话界面,固定普通用户选择其被分配的 `operations-agent`,并经现有门户白名单代理调用 Datadeck 会话与 SSE Run API
 - **危险操作反馈**:工作流实例、任务节点、YARN 应用和同步生成等异步操作必须在目标按钮上显示 loading,成功后刷新或展示结果,失败保留可重试入口;不得用全局遮罩阻塞无关页面操作
 - **桌面端视觉层**:桌面壳采用低饱和蓝灰中性色、系统无衬线字体和语义主题变量;侧栏/标签页统一使用轻量层级和明确 hover/active/focus 状态,不改变业务页面的宽表格、SQL 画布和内容区尺寸。侧栏折叠入口固定在顶部壳层左侧,使用 `Fold/Expand` 图标切换 220px/64px 宽度;深浅主题入口固定在顶部操作区,切换状态持久化到 `localStorage` 并同步 `html.dark`
-- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`
+- **主题体系**:`variables.scss` 定义 `:root`(浅色)/`html.dark`(深色)两套 CSS 变量(`--bd-*`);`theme.ts` 负责切换、`readCssVarSet` 读真实默认、管理端覆盖注入 `data/theme.json`;`applyTheme` 派发 `portal-theme-change` 事件,SQL 画布等局部区域据此跟随全局主题(不再维护第二套深浅色开关)
 - **菜单**:`SideBar` 按 `enabledModules`(配置白名单,空=全部)+ 用户角色过滤;`userManage`/`theme` 仅 admin;**路由守卫同样校验模块白名单**(URL 直达受限页面重定向回首页,后端执行门禁兜底)。征信数据字典 `creditDictionary` 为原生只读模块，静态加载 `src/data/credit-dictionary.json`，不访问网关 API
 - **字体**:全局系统无衬线字体栈 `--bd-font`;SQL/日志等数据组件按需使用等宽字体,管理端可覆盖
 

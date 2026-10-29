@@ -35,7 +35,7 @@ export function yarnStateHex(state: string): string | undefined {
 }
 
 export function formatTimestamp(ts: number, humanize: boolean): string {
-  if (!ts) return 'n/a'
+  if (!ts) return '—'
   if (!humanize) return String(ts)
   const date = new Date(ts)
   const diff = Date.now() - ts
@@ -43,12 +43,14 @@ export function formatTimestamp(ts: number, humanize: boolean): string {
   if (diff < 60000) rel = '刚刚'
   else if (diff < 3600000) rel = `${Math.floor(diff / 60000)} 分钟前`
   else if (diff < 86400000) rel = `${Math.floor(diff / 3600000)} 小时前`
-  else rel = `${Math.floor(diff / 86400000)} 天前`
+  else if (diff < 30 * 86400000) rel = `${Math.floor(diff / 86400000)} 天前`
+  // 超过 30 天的相对时间没有参考价值(如 "(1813 天前)"),只保留绝对时间
+  else return date.toLocaleString()
   return `${date.toLocaleString()} (${rel})`
 }
 
 export function formatElapsed(ms: number, humanize: boolean): string {
-  if (!ms) return 'n/a'
+  if (!ms) return '—'
   if (!humanize) return String(ms)
   const s = Math.floor(ms / 1000)
   const d = Math.floor(s / 86400)
@@ -67,7 +69,7 @@ const MEM_UNITS = ['MB', 'GB', 'TB', 'PB']
 
 /** 内存格式化:MB → 自适应单位(GB/TB),humanize=false 时原样返回数字 */
 export function formatMem(mb: number, humanize: boolean): string {
-  if (!Number.isFinite(mb) || mb < 0) return 'n/a'
+  if (!Number.isFinite(mb) || mb < 0) return '—'
   if (!humanize || mb < 1024) return `${Math.round(mb)} MB`
   let v = mb
   let i = 0

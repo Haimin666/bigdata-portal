@@ -6,6 +6,7 @@ import { getEnabledModules } from '@/api/db'
 import { Monitor, Timer, Folder, Odometer, Search, DataLine, Cpu, Coin, Notebook, UserFilled, MagicStick, Lock, Message, Refresh } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 import RobotIcon from '@/components/RobotIcon.vue'
+import { prefetchNativeView } from './nativeViews'
 
 defineOptions({ name: 'SideBar' })
 
@@ -80,7 +81,12 @@ onMounted(async () => {
       class="portal-menu"
       @select="(path: string) => emit('select', path)"
     >
-      <el-menu-item v-for="m in filteredMenus" :key="m.path" :index="m.path">
+      <el-menu-item
+        v-for="m in filteredMenus"
+        :key="m.path"
+        :index="m.path"
+        @mouseenter="m.kind === 'native' && prefetchNativeView(m.name)"
+      >
         <el-icon><component :is="icons[m.icon]" /></el-icon>
         <template #title>
           <span>{{ m.title }}</span>

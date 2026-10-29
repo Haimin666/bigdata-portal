@@ -25,6 +25,8 @@ const emit = defineEmits<{
   toggleFullscreen: []
   toggleCollapse: []
   contextAction: [action: TabContextAction, path: string]
+  /** 拖拽排序:把 from 位置的 tab 移到 to 位置 */
+  reorder: [from: number, to: number]
 }>()
 
 const props = defineProps<{
@@ -46,6 +48,41 @@ const auth = useAuthStore()
 const router = useRouter()
 
 const contextMenu = ref<{ path: string; left: number; top: number } | null>(null)
+
+// ── 拖拽排序 ──
+// 原生 DragEvent:dragstart 记录源索引,dragover 记录悬停索引,drop 时发 reorder。
+const dragIndex = ref<number | null>(null)
+const dragOverIndex = ref<number | null>(null)
+
+function onDragStart(index: number, event: DragEvent) {
+  dragIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox 需要 setData 才会开始拖拽
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onDragOver(index: number) {
+  if (dragIndex.value === null || dragIndex.value === index) return
+  dragOverIndex.value = index
+}
+
+function onDragLeave(index: number) {
+  if (dragOverIndex.value === index) dragOverIndex.value = null
+}
+
+function resetDrag() {
+  dragIndex.value = null
+  dragOverIndex.value = null
+}
+
+function onDrop(index: number) {
+  const from = dragIndex.value
+  resetDrag()
+  if (from === null || from === index) return
+  emit('reorder', from, index)
+}
 
 function openContextMenu(event: MouseEvent, path: string) {
   const menuWidth = 168
@@ -114,10 +151,20 @@ function goUserManage() {
     </div>
     <div class="tab-list">
       <div
-        v-for="t in props.tabs"
+        v-for="(t, i) in props.tabs"
         :key="t.path"
         class="tab"
-        :class="{ active: t.path === props.activePath }"
+        :class="{
+          active: t.path === props.activePath,
+          dragging: dragIndex === i,
+          'drop-target': dragOverIndex === i
+        }"
+        draggable="true"
+        @dragstart="onDragStart(i, $event)"
+        @dragover.prevent="onDragOver(i)"
+        @dragleave="onDragLeave(i)"
+        @drop.prevent="onDrop(i)"
+        @dragend="resetDrag"
         @click="emit('switch', t.path)"
         @contextmenu.prevent.stop="openContextMenu($event, t.path)"
       >
@@ -229,6 +276,26 @@ function goUserManage() {
     font-weight: 600;
     border-color: color-mix(in srgb, $primary 18%, transparent);
     background: var(--bd-primary-soft);
+  }
+
+  /* 拖拽排序:源 tab 半透明,落点显示竖向指示线 */
+  &.dragging {
+    opacity: 0.4;
+  }
+
+  &.drop-target {
+    position: relative;
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: -4px;
+      top: 5px;
+      bottom: 5px;
+      width: 2px;
+      border-radius: 1px;
+      background: $primary;
+    }
   }
 }
 

@@ -4,6 +4,10 @@ import LoginView from '@/views/LoginView.vue'
 import { menus } from '@/config/menu'
 import { useAuthStore } from '@/store/auth'
 
+// 原生模块页面由 MainLayout/TabStage 按 tab 独立懒加载。
+// 路由只需匹配路径；若这里再用动态 import，Vue Router 会先等待页面 chunk，TabStage 的加载骨架就无法及时显示。
+const nativeRoutePlaceholder = { render: () => null }
+
 // 子应用路由由菜单表驱动:kind === 'subapp' 的菜单项都进 SubAppView。
 // 实际内容由 MainLayout 的常驻 iframe 池渲染(tab 化,保留状态),此处仅占位空壳。
 const subappRoutes: RouteRecordRaw[] = menus
@@ -31,43 +35,43 @@ const router = createRouter({
         {
           path: 'yarn',
           name: 'yarn',
-          component: () => import('@/views/yarn/YarnView.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'ds-task',
           name: 'dsTask',
-          component: () => import('@/views/ds/DsTaskMonitor.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'hdfs',
           name: 'hdfs',
-          component: () => import('@/views/hdfs/HdfsView.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'db-query',
           name: 'dbQuery',
-          component: () => import('@/views/db/QueryView.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'users',
           name: 'userManage',
-          component: () => import('@/views/admin/UserManageView.vue'),
+          component: nativeRoutePlaceholder,
           meta: { adminOnly: true }
         },
         {
           path: 'dataleap',
           name: 'dataleap',
-          component: () => import('@/views/dataleap/DataLeapView.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'sync',
           name: 'sync',
-          component: () => import('@/views/sync/SyncCodeView.vue')
+          component: nativeRoutePlaceholder
         },
         {
           path: 'credit-dictionary',
           name: 'creditDictionary',
-          component: () => import('@/views/credit-dictionary/CreditDictionaryView.vue')
+          component: nativeRoutePlaceholder
         },
         ...subappRoutes
       ]

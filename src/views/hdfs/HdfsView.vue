@@ -66,15 +66,30 @@ const sortedEntries = computed(() =>
   })
 )
 
+// 当前目录内名称过滤(WebHDFS 不支持服务端过滤,前端处理)
+const nameFilter = ref('')
+
+const filteredEntries = computed(() => {
+  const kw = nameFilter.value.trim().toLowerCase()
+  if (!kw) return sortedEntries.value
+  return sortedEntries.value.filter((e) => e.pathSuffix.toLowerCase().includes(kw))
+})
+
 const pagedEntries = computed(() =>
-  sortedEntries.value.slice(page.value * pageSize.value, (page.value + 1) * pageSize.value)
+  filteredEntries.value.slice(page.value * pageSize.value, (page.value + 1) * pageSize.value)
 )
+
+watch(nameFilter, () => {
+  page.value = 0
+})
 
 // 请求序号:防止快速切换目录时旧响应覆盖新结果
 let loadSeq = 0
 
 async function load(dir: string): Promise<boolean> {
   const seq = ++loadSeq
+  // 切换目录时清空名称过滤;同目录刷新保留过滤条件
+  if (dir !== path.value) nameFilter.value = ''
   path.value = dir
   loading.value = true
   error.value = ''
@@ -165,6 +180,13 @@ watch(path, (p) => {
         </template>
       </el-input>
 
+      <el-input
+        v-model="nameFilter"
+        class="filter-input"
+        placeholder="筛选当前目录名称"
+        clearable
+      />
+
       <el-tooltip content="上级目录">
         <el-button :disabled="isRoot" :icon="ArrowUp" circle @click="goUp" />
       </el-tooltip>
@@ -224,7 +246,11 @@ watch(path, (p) => {
         </template>
       </el-table-column>
       <template #empty>
-        <StateView mode="empty" compact description="空目录" />
+        <StateView
+          mode="empty"
+          compact
+          :description="nameFilter.trim() ? `没有匹配「${nameFilter.trim()}」的文件` : '空目录'"
+        />
       </template>
     </el-table>
 
@@ -232,7 +258,7 @@ watch(path, (p) => {
       <el-pagination
         :current-page="page + 1"
         :page-size="pageSize"
-        :total="sortedEntries.length"
+        :total="filteredEntries.length"
         :page-sizes="[10, 20, 50, 100]"
         layout="total, sizes, prev, pager, next, jumper"
         @current-change="(p: number) => (page = p - 1)"
@@ -267,6 +293,11 @@ watch(path, (p) => {
 .path-input {
   flex: 1;
   min-width: 260px;
+}
+
+.filter-input {
+  width: 200px;
+  flex-shrink: 0;
 }
 
 .path-bar {

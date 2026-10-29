@@ -62,6 +62,14 @@ function closeTab(path: string) {
   }
 }
 
+/** 拖拽排序:调整内存中的 tab 顺序,持久化交给下面的 watch(tabs) */
+function handleTabReorder(from: number, to: number) {
+  const list = tabs.value
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return
+  const [moved] = list.splice(from, 1)
+  list.splice(to, 0, moved)
+}
+
 restoreTabs()
 
 watch(tabs, persistTabs, { deep: true })
@@ -179,6 +187,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             :collapsed="collapsed"
             @toggle-collapse="collapsed = !collapsed"
             @context-action="handleTabContextAction"
+            @reorder="handleTabReorder"
           />
         </el-main>
       </el-container>

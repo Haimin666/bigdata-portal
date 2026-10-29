@@ -26,6 +26,8 @@ HdfsView → GET /api/hdfs/df(容量总览)
 
 - 容量数据来自 WebHDFS `fs/df` + NameNode jmx(`Hadoop:service=NameNode,name=FSNamesystemState` 等)
 - 30s 自动刷新(页面可见时),刷新后保持节点折叠状态
+- 目录列表支持按名称过滤(前端过滤 `filteredEntries`,WebHDFS 无服务端过滤);切换目录清空过滤,同目录刷新保留
+- 修改时间超过 30 天不再附加相对时间(如「(1813 天前)」无参考价值),只显示绝对时间
 - 卡片紧凑化,不挤压 HDFS 主浏览功能
 - 桌面端视觉层按标题、磁盘摘要、路径工具栏、面包屑和文件列表分层;磁盘摘要与 DataNode 明细使用统一面板层级,路径和文件名保留等宽/高辨识度样式
 - 标题策略:主页面不重复展示“HDFS”标题,侧栏与 Tab 负责导航标识,路径栏直接承载当前浏览上下文

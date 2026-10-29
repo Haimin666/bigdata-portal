@@ -241,16 +241,18 @@ function onRowsChange(s: number) {
           <el-radio-button value="card">卡片</el-radio-button>
         </el-radio-group>
 
-        <el-tooltip content="自动刷新">
+        <span class="toolbar-switch" title="按下方间隔自动刷新应用列表">
+          <span class="toolbar-switch-label">自动刷新</span>
           <el-switch v-model="autoRefreshModel" class="toolbar-item" />
-        </el-tooltip>
+        </span>
         <el-select v-if="store.autoRefresh" v-model="refreshIntervalModel" class="toolbar-item interval-select">
           <el-option v-for="i in REFRESH_INTERVALS" :key="i" :label="`${i}s`" :value="i" />
         </el-select>
 
-        <el-tooltip content="人性化时间">
+        <span class="toolbar-switch" title="时间列显示为「绝对时间 (相对时间)」">
+          <span class="toolbar-switch-label">人性化时间</span>
           <el-switch v-model="humanizeModel" class="toolbar-item" />
-        </el-tooltip>
+        </span>
 
         <el-popover placement="bottom" :width="260" trigger="click">
           <template #reference>
@@ -323,6 +325,19 @@ function onRowsChange(s: number) {
 
 .toolbar-item {
   max-width: 220px;
+}
+
+/* 开关可读性:之前只有 tooltip,不看悬停不知道是什么 */
+.toolbar-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.toolbar-switch-label {
+  font-size: 12px;
+  color: $muted;
 }
 
 .yarn-view :deep(.data-toolbar) {

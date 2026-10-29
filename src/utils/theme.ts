@@ -3,6 +3,9 @@
 
 const THEME_KEY = 'bigdata-portal.theme'
 
+/** 主题变更事件:需要跟随全局主题的局部区域(SQL 画布等)监听此事件 */
+export const THEME_EVENT = 'portal-theme-change'
+
 export type ThemeMode = 'light' | 'dark'
 
 export function getTheme(): ThemeMode {
@@ -16,6 +19,7 @@ export function applyTheme(mode: ThemeMode): void {
   } catch {
     /* 隐私模式等场景忽略 */
   }
+  window.dispatchEvent(new CustomEvent<ThemeMode>(THEME_EVENT, { detail: mode }))
 }
 
 export function toggleTheme(): ThemeMode {

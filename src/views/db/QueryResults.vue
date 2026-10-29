@@ -426,7 +426,7 @@ async function showJson(v: unknown) {
                 :key="c"
                 :prop="c"
                 :label="c"
-                :width="colInitWidth(c)"
+                :min-width="colInitWidth(c)"
                 sortable
                 :align="colIsNumeric(c) ? 'right' : 'left'"
                 show-overflow-tooltip

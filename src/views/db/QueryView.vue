@@ -2,12 +2,12 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
-import { CaretRight, Loading, MagicStick, Sunny, Moon, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, Download } from '@element-plus/icons-vue'
+import { CaretRight, Loading, MagicStick, DocumentChecked, Document, Plus, Close, VideoPause, Promotion, Download } from '@element-plus/icons-vue'
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
 import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, listSparkTables, listSparkFields, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
-import { getTheme } from '@/utils/theme'
+import { getTheme, THEME_EVENT, type ThemeMode } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
@@ -516,6 +516,15 @@ const filteredDbs = computed(() => {
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
 
+// 库下拉占位:区分「没选引擎」「加载失败」「该引擎无库」三种空状态,避免用户对着禁用框猜测
+const dbPlaceholder = computed(() => {
+  // 先报加载失败:此时引擎/库都是空的,提示「请先选择引擎」会误导用户
+  if (datasourceError.value) return '数据源不可用'
+  if (!engine.value) return '请先选择引擎'
+  if (!filteredDbs.value.length) return '该引擎无可用库'
+  return '选择数据库'
+})
+
 // 左侧树排除 spark/flink 虚拟源(db-proxy 无此库,拉表会报错)
 const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'sparksql' && d.type !== 'sparksession' && d.type !== 'flinksql'))
 
@@ -531,25 +540,19 @@ const schemaLoader = async (db: string, table?: string, executionMode: SparkExec
 }
 
 // 默认 SQL:清空(用户自行编写);编辑器默认内容由 SqlEditor 的 :value/model 池提供
-// 编辑器主题:dark(默认)/ light,持久化到 localStorage
-// 只作用于本页 sql-canvas 画布(Monaco 区域),与全局主题解耦:
-// 初始跟随全局(getTheme),之后用户按按钮仅切画布,不影响全局
-const THEME_KEY = 'db-query-theme'
-const themeMode = ref<'dark' | 'light'>(
-  localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
-)
+// 画布主题跟随全局主题(单一口径):门户切深浅色时画布同步,
+// 画布按钮也直接切全局主题,不再维护第二套 localStorage 键。
+const themeMode = ref<ThemeMode>(getTheme())
+
+function onGlobalThemeChange(event: Event) {
+  themeMode.value = (event as CustomEvent<ThemeMode>).detail
+}
 
 // 字体大小(px),默认 15(比原 13 大 2),持久化
 const FONT_KEY = 'db-query-fontsize'
 const fontSize = ref(parseInt(localStorage.getItem(FONT_KEY) || '15', 10) || 15)
 const MIN_FONT = 11
 const MAX_FONT = 24
-
-function toggleTheme() {
-  themeMode.value = themeMode.value === 'dark' ? 'light' : 'dark'
-  localStorage.setItem(THEME_KEY, themeMode.value)
-  // 仅切换画布 class(.sql-canvas.dark / .light);Monaco 主题由 SqlEditor watch themeMode prop 自动 setTheme
-}
 
 function adjustFont(delta: number) {
   fontSize.value = Math.min(MAX_FONT, Math.max(MIN_FONT, fontSize.value + delta))
@@ -577,6 +580,7 @@ function onEditorReady() {
 }
 
 onUnmounted(() => {
+  window.removeEventListener(THEME_EVENT, onGlobalThemeChange)
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer)
     autoSaveTimer = undefined
@@ -721,6 +725,8 @@ const logEmptyHint = computed(() => {
 // 画布高度(可拖拽)
 const canvasHeight = ref(280)
 const MIN_H = 120
+// 没有结果时画布占满内容区:首屏写 SQL 的空间翻倍,执行出结果后再按可拖拽高度分屏
+const canvasStyle = computed(() => (results.value.length ? { height: `${canvasHeight.value}px` } : {}))
 
 function onDragStart(e: MouseEvent) {
   const startY = e.clientY
@@ -1505,11 +1511,11 @@ async function stopQuery() {
 
 
 // ── 初始化 ───────────────────────────────────────────────────
-onMounted(async () => {
-  // 编辑器主题与全局主题对齐(全局 dark 时编辑器默认 dark,除非用户单独设置过)
-  if (!localStorage.getItem(THEME_KEY)) {
-    themeMode.value = getTheme() === 'dark' ? 'dark' : 'light'
-  }
+/** 数据源加载失败/为空时保留页内提示(原来的 ElMessage 一闪而过,用户看不到原因) */
+const datasourceError = ref('')
+
+async function loadDataSources() {
+  datasourceError.value = ''
   try {
     datasources.value = await listDataSources()
     if (datasources.value.length) {
@@ -1519,18 +1525,28 @@ onMounted(async () => {
       engine.value = first ? first.type as 'mysql' | 'oracle' | 'impala' | 'sparksql' : ''
       db.value = filteredDbs.value[0]?.name || ''
     } else {
-      ElMessage.warning('未配置数据库源(检查网关 DB_PROXY_URL)')
+      datasourceError.value = '未配置数据库源(检查网关 DB_PROXY_URL)'
     }
   } catch (e) {
-    ElMessage.error(`加载数据源失败:${e instanceof Error ? e.message : e}`)
+    datasourceError.value = `加载数据源失败:${e instanceof Error ? e.message : e}`
   }
+}
+
+onMounted(async () => {
+  // 跟随门户主题变化(顶栏/标签栏的主题按钮),避免出现两套互不同步的深浅色
+  window.addEventListener(THEME_EVENT, onGlobalThemeChange)
+  await loadDataSources()
 })
 
 watch(engine, async (val) => {
   // 写权限密码验证已移除,切换引擎不再要求解锁
-  if (!val) return
-  const first = filteredDbs.value.find((d) => d.type === val || (isSparkEngine.value && (d.type === 'sparksql' || d.type === 'sparksession')))
-  db.value = first?.name || ''
+  if (!val) {
+    // 引擎被清空时同步清空库,避免禁用控件里残留上一个引擎的库名
+    db.value = ''
+    return
+  }
+  const selected = filteredDbs.value.find((d) => d.type === val || (isSparkEngine.value && (d.type === 'sparksql' || d.type === 'sparksession')))
+  db.value = selected?.name || ''
   // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
 
@@ -1545,10 +1561,23 @@ watch(engine, async (val) => {
       </div>
       <div class="db-resizer" title="拖拽调整目录宽度" @mousedown.prevent="onSideDragStart" />
       <div class="db-right">
+    <!-- 数据源异常常驻提示(原来的 toast 一闪而过,用户不知道引擎/库为什么是空的) -->
+    <el-alert
+      v-if="datasourceError"
+      class="datasource-alert"
+      :title="datasourceError"
+      type="warning"
+      show-icon
+      :closable="false"
+    >
+      <template #default>
+        <el-button size="small" @click="loadDataSources">重试</el-button>
+      </template>
+    </el-alert>
     <!-- 顶部工具条 -->
     <div class="toolbar">
       <div class="toolbar-group toolbar-group-context">
-      <el-select v-model="engine" class="engine-select" placeholder="引擎" clearable :disabled="loading || sparkBatchActive || exportLoading" @change="db = filteredDbs[0]?.name || ''">
+      <el-select v-model="engine" class="engine-select" placeholder="选择引擎" clearable :disabled="loading || sparkBatchActive || exportLoading">
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="Impala" value="impala" />
@@ -1556,7 +1585,7 @@ watch(engine, async (val) => {
         <el-option label="SparkSession" value="sparksession" />
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
-      <el-select v-model="db" class="db-select" placeholder="选择数据库" filterable>
+      <el-select v-model="db" class="db-select" :placeholder="dbPlaceholder" filterable :disabled="!engine">
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       </div>
@@ -1590,17 +1619,13 @@ watch(engine, async (val) => {
       </template>
       <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" :disabled="loading" @click="formatSql" /></el-tooltip>
       <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" :loading="explainLoading" :disabled="loading" @click="runExplain" /></el-tooltip>
-      <el-tooltip v-if="loading" content="停止" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery" /></el-tooltip>
+      <el-tooltip v-if="loading" content="停止当前批次" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery">停止</el-button></el-tooltip>
       <el-tooltip v-if="isSparkEngine" content="导出当前 SQL 完整结果到 HDFS" placement="top">
         <el-button :icon="Download" :loading="exportLoading" :disabled="loading && !exportLoading" @click="exportSparkResult">导出到 HDFS</el-button>
       </el-tooltip>
-      <el-tooltip content="执行(Cmd+Enter)" placement="top"><el-button type="primary" :icon="CaretRight" :loading="loading" :disabled="loading" @click="runQuery" /></el-tooltip>
-      </div>
-      <el-divider direction="vertical" />
-      <div class="toolbar-group toolbar-group-view">
-      <el-tooltip :content="themeMode === 'dark' ? '切换到浅色' : '切换到深色'" placement="top">
-        <el-button class="theme-btn" text @click="toggleTheme">
-          <el-icon><Sunny v-if="themeMode === 'dark'" /><Moon v-else /></el-icon>
+      <el-tooltip content="执行(Cmd+Enter)" placement="top">
+        <el-button type="primary" :icon="CaretRight" :loading="loading" :disabled="loading" @click="runQuery">
+          {{ loading ? '执行中' : '执行' }}
         </el-button>
       </el-tooltip>
       </div>
@@ -1627,8 +1652,9 @@ watch(engine, async (val) => {
       <span class="file-tabs-spacer" />
     </div>
 
-    <!-- SQL 画布(Monaco,由 SqlEditor 封装:model 池/补全/快捷键/主题) -->
-    <div ref="canvasRef" class="sql-canvas" :class="themeMode" :style="{ height: canvasHeight + 'px' }">
+    <!-- SQL 画布(Monaco,由 SqlEditor 封装:model 池/补全/快捷键/主题)
+         无结果时占满内容区,有结果后按可拖拽高度分屏 -->
+    <div ref="canvasRef" class="sql-canvas" :class="[themeMode, { expanded: !results.length }]" :style="canvasStyle">
       <SqlEditor
         ref="editorRef"
         class="sql-editor"
@@ -1647,10 +1673,14 @@ watch(engine, async (val) => {
         @format="formatSql"
         @ready="onEditorReady"
       />
+      <div v-if="!(activeTab?.content || '').trim()" class="canvas-hint" aria-hidden="true">
+        <p class="canvas-hint-title">在这里编写 SQL</p>
+        <p>Ctrl/Cmd + Enter 执行 · 左侧「表目录」点击表名/字段即可插入</p>
+      </div>
     </div>
 
-    <!-- 拖拽分割条 -->
-    <div class="sql-dragbar" @mousedown="onDragStart">
+    <!-- 拖拽分割条:只在有结果、画布与结果区分屏时出现 -->
+    <div v-if="results.length" class="sql-dragbar" @mousedown="onDragStart">
       <span class="drag-dots">⠿</span>
     </div>
     <!-- $ 传参行:自动识别 ${var},内联填值后执行;无变量时不占位 -->
@@ -1701,10 +1731,6 @@ watch(engine, async (val) => {
       </template>
     </QueryResults>
 
-    <!-- 空状态 -->
-    <div v-else-if="!loading && !error" class="empty-state">
-      <el-empty description="选择数据库,编写 SQL 后执行(Ctrl/Cmd + Enter)" />
-    </div>
       </div>
     </div>
 
@@ -1721,7 +1747,7 @@ watch(engine, async (val) => {
       </template>
       <span v-else-if="loading" class="sb-item sb-running"><el-icon class="tab-spin"><Loading /></el-icon> 执行中…</span>
       <span class="sb-spacer" />
-      <span class="sb-item sb-hints">Ctrl/Cmd + Enter 执行 · Tab 缩进 · Ctrl/Cmd + Space 补全 · 拖拽分割条调整画布高度</span>
+      <span class="sb-item sb-hints">Ctrl/Cmd + Enter 执行 · Tab 缩进 · Ctrl/Cmd + Space 补全<span v-if="results.length"> · 拖拽分割条调整画布高度</span></span>
       <span class="sb-item">{{ themeMode === 'dark' ? '深色' : '浅色' }}主题</span>
     </div>
   </div>
@@ -1835,6 +1861,11 @@ watch(engine, async (val) => {
   overflow: hidden;
 }
 
+.datasource-alert {
+  margin: 8px 12px 0;
+  flex-shrink: 0;
+}
+
 .save-btn {
   max-width: 180px;
   overflow: hidden;
@@ -1931,7 +1962,9 @@ watch(engine, async (val) => {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  /* 窄屏放不下时换行,避免右侧「执行」被内容区 overflow 裁掉 */
+  flex-wrap: wrap;
+  gap: 4px 6px;
   background: $panel;
   border: 1px solid $border;
   border-radius: 8px;
@@ -1963,14 +1996,13 @@ watch(engine, async (val) => {
 
 .toolbar-group-context {
   gap: 5px;
+  /* 允许引擎/库下拉在窄屏收缩,而不是把右侧操作挤出去 */
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .toolbar-group-run {
   gap: 4px;
-}
-
-.toolbar-group-view {
-  gap: 2px;
 }
 
 :deep(.toolbar .el-divider--vertical) {
@@ -1980,11 +2012,13 @@ watch(engine, async (val) => {
 }
 
 .engine-select {
-  width: 96px;
+  flex: 0 1 96px;
+  min-width: 76px;
 }
 
 .db-select {
-  width: 200px;
+  flex: 0 1 200px;
+  min-width: 110px;
 }
 
 .toolbar-spacer {
@@ -1995,11 +2029,6 @@ watch(engine, async (val) => {
   min-width: 28px;
   padding: 0 6px;
   font-weight: 700;
-}
-
-.theme-btn {
-  padding: 4px;
-  font-size: 16px;
 }
 
 .exec-kbd {
@@ -2024,7 +2053,41 @@ watch(engine, async (val) => {
   &.light {
     background: var(--bd-panel);
   }
+
+  /* 无结果时占满剩余高度:首屏写 SQL 的空间不再被空态插图吃掉 */
+  &.expanded {
+    flex: 1 1 auto;
+    min-height: 160px;
+  }
 }
+
+/* 空画布提示:浮在 Monaco 中央,不拦截点击与光标 */
+.canvas-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: $muted;
+  pointer-events: none;
+
+  p {
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .canvas-hint-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: color-mix(in srgb, $text 75%, transparent);
+  }
+}
+
 .sql-editor {
   flex: 1;
   min-width: 0;
@@ -2123,6 +2186,13 @@ watch(engine, async (val) => {
   border-radius: 7px;
   box-shadow: 0 1px 2px color-mix(in srgb, $text 4%, transparent);
   user-select: none;
+  overflow: hidden;
+
+  /* 状态项各自不换行,窄屏只收缩提示,不把「引擎/库」拆成两行 */
+  .sb-item {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
 
   .sb-label {
     color: $muted;
@@ -2163,6 +2233,13 @@ watch(engine, async (val) => {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/* 窄屏优先保留引擎/库/主题,隐藏快捷键长提示(画布中央已有等价提示) */
+@media (max-width: 900px) {
+  .statusbar .sb-hints {
+    display: none;
+  }
 }
 
 /* Spark 引擎日志透传面板 */
