@@ -237,6 +237,28 @@ test('Spark table preview retains Spark engine and skips relational editing meta
   assert.equal(context.results.value[0].editable, undefined)
 })
 
+test('Spark preview uses LIMIT when its database name collides with an Oracle datasource', async () => {
+  let previewSql = ''
+  const context = {
+    loading: { value: false }, sparkBatchActive: { value: false }, tabs: { value: [] }, MAX_TABS: 10,
+    datasources: { value: [{ name: 'analytics', type: 'oracle' }] }, engine: { value: 'mysql' }, db: { value: '' }, SPARK_SOURCE: { name: 'spark' },
+    activeTabId: { value: '' }, results: { value: [] },
+    flushActiveContent() {}, showTabInEditor() {},
+    editorRef: { value: { setValue(sql) { previewSql = sql } } },
+    runQuery: async () => {
+      assert.equal(context.engine.value, 'sparksql')
+      assert.equal(context.db.value, 'spark')
+      context.results.value.push({ sql: previewSql, rows: [] })
+    },
+    loadPreviewPk: () => { assert.fail('Spark preview must not request relational primary keys') },
+    ElMessage: { warning(message) { assert.fail(message) } }
+  }
+  const preview = await workbenchFunction('onOpenTable', context)
+  await preview({ db: 'analytics', table: 't`x', engine: 'spark' })
+  assert.equal(previewSql, 'SELECT * FROM `analytics`.`t``x` LIMIT 100')
+  assert.equal(context.results.value[0].editable, undefined)
+})
+
 test('HDFS export cancellation retains submission mode after selection changes', async () => {
   const events = []
   const context = {
@@ -260,4 +282,34 @@ test('HDFS export cancellation retains submission mode after selection changes',
   assert.deepEqual(events, [['submit', 'session'], ['poll', 'export-session', 'session'], ['cancel', 'export-session', 'session']])
   assert.equal(context.currentSparkJob.value, null)
   assert.equal(context.exportLoading.value, false)
+})
+
+test('Stop during the export log baseline prevents backend submission and polling restart', async () => {
+  let finishBaseline
+  const events = []
+  const context = {
+    loading: { value: false }, exportLoading: { value: false }, sparkBatchActive: { value: false },
+    engine: { value: 'sparksql' }, db: { value: 'spark' }, error: { value: '' },
+    sparkExecutionMode: { value: 'session' }, currentSparkJob: { value: null }, batchCancelled: false, runSeq: 0, currentDbJobId: { value: '' }, Date,
+    ensureDb: () => true, getSqlToRun: () => 'SELECT 1', collectRunVars: () => ({}), expandSqlVars: (sql) => sql,
+    clearSparkLogs: () => new Promise((resolve) => { finishBaseline = resolve }),
+    startSparkLogPolling: () => { events.push('start polling') },
+    pollSparkLogs: async () => {}, stopSparkLogPolling() {},
+    submitSparkExportJob: async () => { events.push('submit'); return { jobId: 'unexpected-export' } },
+    cancelSparkJob: async () => { events.push('cancel') },
+    ElMessage: { info() {}, warning(message) { assert.fail(message) }, error(message) { assert.fail(message) } }
+  }
+  const run = await workbenchFunction('exportSparkResult', context)
+  const stop = await workbenchFunction('stopQuery', context)
+  const pending = run()
+  assert.equal(context.exportLoading.value, true)
+  await stop()
+  assert.equal(context.batchCancelled, true)
+  finishBaseline()
+  await pending
+  assert.deepEqual(events, [])
+  assert.equal(context.currentSparkJob.value, null)
+  assert.equal(context.exportLoading.value, false)
+  assert.equal(context.loading.value, false)
+  assert.equal(context.error.value, '')
 })

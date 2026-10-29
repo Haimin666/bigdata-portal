@@ -90,6 +90,7 @@ async function exportSparkResult() {
   const executionMode = sparkExecutionMode.value
   try {
     await clearSparkLogs()
+    if (batchCancelled) return
     startSparkLogPolling()
     const { jobId } = await submitSparkExportJob(db.value, sql, 7200000, executionMode)
     currentSparkJob.value = { jobId, executionMode }
@@ -390,7 +391,7 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
     return
   }
   const src = datasources.value.find((d) => d.name === payload.db)
-  const isOracle = src?.type === 'oracle'
+  const isOracle = !isSpark && src?.type === 'oracle'
   const isImpala = src?.type === 'impala'
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL/Impala 用 LIMIT)
   engine.value = isSpark ? 'sparksql' : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
