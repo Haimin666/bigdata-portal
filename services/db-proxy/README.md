@@ -118,11 +118,11 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
 | POST | `/spark/query` | Spark SQL 执行;body `{db, sql, executionMode?}` |
-| GET | `/spark/schema/databases` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;按模式路由) |
-| GET | `/spark/schema/tables?db=` | Spark 库下表列表(SHOW TABLES IN;按模式路由) |
-| GET | `/spark/schema/fields?db=&table=` | Spark 表字段列表(DESC,含类型/注释;按模式路由) |
-| GET  | `/spark/status` `/spark/logs` | 所选模式的连接状态 / 执行日志 |
-| POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步;提交 body `{db, sql, executionMode?}` |
+| GET | `/spark/schema/databases?executionMode=` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;模式由 query 参数选择) |
+| GET | `/spark/schema/tables?db=&executionMode=` | Spark 库下表列表(SHOW TABLES IN;模式由 query 参数选择) |
+| GET | `/spark/schema/fields?db=&table=&executionMode=` | Spark 表字段列表(DESC,含类型/注释;模式由 query 参数选择) |
+| GET  | `/spark/status?executionMode=` `/spark/logs?executionMode=` | 指定模式的连接状态 / 执行日志 |
+| POST | `/spark/jobs` + `GET /spark/jobs/{id}?executionMode=` + `POST /spark/jobs/{id}/cancel?executionMode=` | Spark 异步;提交 body `{db, sql, executionMode?}` |
 | POST | `/flink/query` `/flink/async` (+`/{id}[/cancel]`) | Flink 交互式(批/流) |
 | GET  | `/flink/status` `/flink/connectors` `/flink/jobs` | 状态/连接器/流式任务 |
 | POST | `/flink/ddl/generate` | 按连接器模板生成建表 DDL |
@@ -130,7 +130,7 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 | GET  | `/flink/prejob/config` | PreJob 配置快照 |
 | GET/POST | `/scripts/*` | 已迁移平台的旧脚本接口,保留兼容 |
 
-Spark SQL 请求可在提交 body 中携带 `executionMode: "thrift" | "session"`;未提供时默认 `thrift`。查询、异步任务、状态/取消、日志/Stage、Schema 元数据与 HDFS 导出均按该值路由，响应结构与门户权限校验保持一致。失败不会自动重试另一模式。`session` 指历史 YARN client PySpark `SparkSession`，不是 `spark-sql` shell；SQL 工作台不执行 PySpark 代码。
+POST 查询、异步任务和导出请求在 JSON body 中携带 `executionMode: "thrift" | "session"`;未提供时默认 `thrift`。GET Schema、状态和日志请求在 query string 中携带 `?executionMode=session`。异步 job 的状态和取消请求也必须在 query string 中携带该 job 提交时的模式；客户端应按 job 记录的原始模式构造轮询和取消 URL，不要使用用户后来切换的工作台选择。例如：`GET /spark/jobs/abc123?executionMode=session` 和 `POST /spark/jobs/abc123/cancel?executionMode=session`。模式参数缺省时仍按 `thrift` 处理，因此省略它的 session job 控制请求会走默认通道。查询、异步任务、状态/取消、日志/Stage、Schema 元数据与 HDFS 导出均按该值路由，响应结构与门户权限校验保持一致。失败不会自动重试另一模式。`session` 指历史 YARN client PySpark `SparkSession`，不是 `spark-sql` shell；SQL 工作台不执行 PySpark 代码。
 
 ## Spark Thrift 查询
 
