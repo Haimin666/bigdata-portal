@@ -55,7 +55,7 @@
     "typeCheck": { "enabled": true },
     "aiFix": { "enabled": false, "baseUrl": "https://.../v1", "apiKey": "...", "model": "...", "maxAttempts": 2 }
   },
-  "spark": { "enabled": false, "exportPath": "hdfs:///tmp/db-proxy-spark-exports" }, // Spark CSV 导出根目录
+  "spark": { "enabled": false, "master": "yarn", "queue": "default", "executorMemory": "2g", "executorCores": 2, "executorInstances": 0, "sparkConf": {}, "jdbcUrl": "jdbc:hive2://127.0.0.1:10001/default", "user": "root", "beelinePath": "", "exportPath": "hdfs:///tmp/db-proxy-spark-exports" }, // Spark 双模式配置:session 使用历史 YARN client 字段,Thrift 使用 JDBC/Beeline 字段
   "flink": { "enabled": false }                   // 见「Flink 引擎」
 }
 ```
@@ -72,7 +72,7 @@
 ## 启动
 
 ```bash
-python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark Thrift 需本机 SPARK_HOME/bin/beeline
+python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session 需 PySpark/YARN 客户端环境,Thrift 需 SPARK_HOME/bin/beeline
 ```
 
 ## 请求执行生命周期(MySQL/Doris/Oracle/Impala)
@@ -117,12 +117,12 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark Thrift 
 | GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
-| POST | `/spark/query` | Spark SQL 执行 |
-| GET | `/spark/schema/databases` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟) |
-| GET | `/spark/schema/tables?db=` | Spark 库下表列表(SHOW TABLES IN) |
-| GET | `/spark/schema/fields?db=&table=` | Spark 表字段列表(DESC,含类型/注释) |
-| GET  | `/spark/status` `/spark/logs` | Thrift 连接状态 / Beeline 执行日志 |
-| POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步 |
+| POST | `/spark/query` | Spark SQL 执行;body `{db, sql, executionMode?}` |
+| GET | `/spark/schema/databases` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;按模式路由) |
+| GET | `/spark/schema/tables?db=` | Spark 库下表列表(SHOW TABLES IN;按模式路由) |
+| GET | `/spark/schema/fields?db=&table=` | Spark 表字段列表(DESC,含类型/注释;按模式路由) |
+| GET  | `/spark/status` `/spark/logs` | 所选模式的连接状态 / 执行日志 |
+| POST | `/spark/jobs` + `GET/POST /spark/jobs/{id}[/cancel]` | Spark 异步;提交 body `{db, sql, executionMode?}` |
 | POST | `/flink/query` `/flink/async` (+`/{id}[/cancel]`) | Flink 交互式(批/流) |
 | GET  | `/flink/status` `/flink/connectors` `/flink/jobs` | 状态/连接器/流式任务 |
 | POST | `/flink/ddl/generate` | 按连接器模板生成建表 DDL |
@@ -130,9 +130,11 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark Thrift 
 | GET  | `/flink/prejob/config` | PreJob 配置快照 |
 | GET/POST | `/scripts/*` | 已迁移平台的旧脚本接口,保留兼容 |
 
+Spark SQL 请求可在提交 body 中携带 `executionMode: "thrift" | "session"`;未提供时默认 `thrift`。查询、异步任务、状态/取消、日志/Stage、Schema 元数据与 HDFS 导出均按该值路由，响应结构与门户权限校验保持一致。失败不会自动重试另一模式。`session` 指历史 YARN client PySpark `SparkSession`，不是 `spark-sql` shell；SQL 工作台不执行 PySpark 代码。
+
 ## Spark Thrift 查询
 
-db-proxy 不再在本地创建 SparkSession，而是在部署主机上启动 Beeline 子进程连接 Spark Thrift Server。默认配置对应的命令为：
+Thrift 模式在部署主机上启动 Beeline 子进程连接 Spark Thrift Server。默认配置对应的命令为：
 
 ```bash
 $SPARK_HOME/bin/beeline -u 'jdbc:hive2://127.0.0.1:10001/default' -n root -e 'SELECT ...'
@@ -153,9 +155,11 @@ $SPARK_HOME/bin/beeline -u 'jdbc:hive2://127.0.0.1:10001/default' -n root -e 'SE
 }
 ```
 
-`beelinePath` 留空时使用 `$SPARK_HOME/bin/beeline`；db-proxy 与 Spark Thrift Server 同机且共享网络命名空间时通过回环地址访问。若 db-proxy 在 Docker 容器中，容器内的 `127.0.0.1` 指向容器本身，需把 `jdbcUrl` 配成容器可达的宿主机地址。查询和元数据都通过 HiveServer2 执行；取消会终止当前 Beeline 子进程，日志显示 stderr 进度与诊断信息，结果 CSV 单独解析后返回。HDFS 导出使用 `INSERT OVERWRITE DIRECTORY ... USING CSV` 并仅返回目录路径。此改造不再支持 PySpark、Executor 数量控制或 SparkContext Stage 进度。更新配置后重启 db-proxy。
+Thrift 使用 `jdbcUrl`、`user`、`beelinePath` 等 JDBC/Beeline 字段。Session 模式使用同一 `spark` 段中的历史 YARN client 字段：`master`、`queue`、`executorMemory`、`executorCores`、`executorInstances`、`sparkConf` (以及可选 `appName`)；`master` 默认 `yarn`。两条通道并存，不会因一条通道失败自动切换到另一条。
 
-普通 `SELECT/WITH` 查询在 SQL 执行前补上默认 `LIMIT`，已有顶层 `LIMIT` 不超过 `maxLimit`；`SHOW`、`DESC`、`EXPLAIN` 不改写。通过 `/spark/query` 或 `/spark/jobs` 提交 PySpark payload 会返回 HTTP 400。
+`beelinePath` 留空时使用 `$SPARK_HOME/bin/beeline`；db-proxy 与 Spark Thrift Server 同机且共享网络命名空间时通过回环地址访问。若 db-proxy 在 Docker 容器中，容器内的 `127.0.0.1` 指向容器本身，需把 `jdbcUrl` 配成容器可达的宿主机地址。Thrift 查询和元数据通过 HiveServer2 执行；取消终止对应 Beeline 子进程，日志显示 stderr 进度与诊断信息，结果 CSV 单独解析后返回。HDFS 导出使用 `INSERT OVERWRITE DIRECTORY ... USING CSV` 并仅返回目录路径。Session 使用历史 YARN client PySpark `SparkSession` 通道。更新配置后重启 db-proxy；门户工作台选择器随前端发布，需要重建门户镜像。
+
+普通 `SELECT/WITH` 查询在 SQL 执行前补上默认 `LIMIT`，已有顶层 `LIMIT` 不超过 `maxLimit`；`SHOW`、`DESC`、`EXPLAIN` 不改写。通过 `/spark/query` 或 `/spark/jobs` 提交 PySpark 代码 payload 会返回 HTTP 400；PySpark 仅由 session 适配器内部执行工作台 SQL。
 
 ## Flink 引擎(双通道:交互式 + PreJob)
 

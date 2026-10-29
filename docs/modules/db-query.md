@@ -26,7 +26,7 @@
 | API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
 | 网关 | `server/routes/db.js` `/api/db*` 透传(不含 `/jobs`、`/query`、`/spark/*`、`/flink/*`,均走专用路由)、`server/routes/dbquery.js` `/api/dbquery/query`、`server/routes/spark.js` `/api/spark/*`、`server/routes/flink.js` `/api/flink/*`、`server/db-scripts.js` `/api/scripts` |
 | 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris/Impala)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发);`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN / Impala EXPLAIN)、写审计(audit/audit-db.log)** |
-| 服务 | `services/db-proxy/spark_thrift_engine.py` | 通过 Beeline / HiveServer2 Spark Thrift 执行 SQL，不在 db-proxy 内启动 SparkSession |
+| 服务 | `services/db-proxy/spark_thrift_engine.py` / `spark_engine.py` | Spark Thrift/Beeline 与历史 YARN client PySpark `SparkSession` 两种 SQL 执行适配器 |
 | 服务 | `services/db-proxy/flink_engine.py` / `flink_prejob.py` / `flink_connectors.py` | Flink 三通道 |
 
 ## 3. 引擎矩阵
@@ -35,7 +35,7 @@
 |---|---|---|---|---|
 | mysql/oracle/doris | db-proxy `/query`(同步)/ `/jobs`(异步任务) | **写权限密码验证已移除**:库访问权由数据权限矩阵管控,数据源 `readOnly` 与 db-proxy 资源护栏兑底;写操作(UPDATE/INSERT/DELETE/DDL)记审计日志 | db-proxy `queryTimeout`;异步默认 1h 可配 | 直连;异步任务提交由网关专用路由处理(非透传),EXEC_GATES 拦 viewer |
 | impala | db-proxy `/jobs`(异步任务),Impala HS2/21050 | 数据权限矩阵;数据源可设 `readOnly`;AI 修复仅对只读 SQL 启用 | 数据源 `queryTimeout`;异步默认 1h | impyla 直连;支持表/字段/DDL/schema/EXPLAIN 元数据、服务端 SQL 类型自动检查;可选服务端 AI 修复,每次尝试与诊断通过 job logs 回显,连接/认证/权限/超时错误不触发 AI |
-| sparksql | db-proxy `/spark/query`、`/spark/jobs` → 本机 Spark Thrift Server (`jdbc:hive2://127.0.0.1:10001/default`) | 写语句需网关写拦截(isSparkWriteSql);**已移除独立解锁弹窗**,权限由数据权限矩阵管控 | 前端/门户/db-proxy 超时配置 | Beeline 子进程经 HiveServer2 执行;取消终止对应子进程;执行输出作为查询日志;元数据通过 SHOW/DESC 访问同一 Thrift Server |
+| sparksql | db-proxy `/spark/*`;请求 `executionMode` 选择 `thrift` 或 `session`(缺省 `thrift`) | 写语句沿用网关写拦截(isSparkWriteSql);**已移除独立解锁弹窗**,权限由数据权限矩阵管控 | 前端/门户/db-proxy 超时配置 | `thrift`:Beeline/HiveServer2;`session`:历史 YARN client PySpark `SparkSession`,不是 `spark-sql` shell。元数据、异步状态/取消、日志、Stage 状态与 HDFS 导出均按同一模式路由;失败不自动切换 |
 | flinksql | db-proxy `/flink/query` | 同上(写权限同 spark 体系) | `queryTimeout`(默认 300s) | 流/批双模式;流查询 collect 到 limit 行返回 |
 | flink prejob | db-proxy `/flink/prejob/jobs`(yarn-per-job) | **已移除解锁要求**:直接提交,写凭证由网关自动携带(db-proxy 侧共享密钥校验防直连) | `submitTimeout`(默认 120s) | pyflink 脚本封装;作业列表/日志/停止走 PREJOB 管理 |
 
@@ -47,6 +47,7 @@
 - **无感行数上限**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行,硬上限统一为 500,000 行。db-proxy 只对无显式上限的 SELECT/WITH 在服务端追加引擎对应的行数限制，SHOW/DESC/EXPLAIN 等特殊命令保持原文并通过有界结果读取防止超量返回；超过硬上限的显式行数限制会被拒绝或压到硬上限。
 - **Spark 查询结果限制与导出**:普通 Spark SQL 无显式 `LIMIT` 时在提交给 Thrift 前补默认 `LIMIT 1000`；顶层整数 `LIMIT` 超过 `maxLimit`(默认 500,000)时压到上限，`LIMIT ALL` 替换为上限，其他常量表达式包装 `LEAST(expr, maxLimit)`；只有 `OFFSET` 时默认 `LIMIT` 插在 `OFFSET` 前。扫描跳过字符串、引号标识符及 `--`/嵌套 `/* */` 注释；多条 SQL 在 db-proxy 拒绝。提交给 Beeline `-e` 前确保 SQL 有终止分号(无分号时另起一行追加，避免尾部 `--` 注释吞掉分号)。Beeline 失败诊断保留错误开头与结尾，避免长堆栈遮住 Spark 的解析原因和 SQL 上下文。结果从 Beeline CSV 输出解析并设置 `truncated`。工具栏「导出到 HDFS」接受单条只读 `SELECT/WITH`，通过 `INSERT OVERWRITE DIRECTORY ... USING CSV OPTIONS (header 'true')` 在 Spark Thrift 上执行，不将完整结果传回门户；异步执行、可取消，完成后返回 HDFS 路径。
 - **Spark 网关提交**:`/api/spark/query` 与 `/api/spark/jobs` 均向 Spark 网关明确传递 `kind: 'sql'`;不能引用请求中未定义的局部类型变量，否则会在请求到达 db-proxy 前抛出 `ReferenceError`。
+- **Spark 执行模式接口**:工作台与 Spark API 使用 `executionMode: "thrift" | "session"`;省略时兼容默认 `thrift`。同一选择透传到查询、异步任务、状态/取消、日志/Stage、Schema 补全和 HDFS 导出请求；两模式保持相同门户访问/写权限检查和响应结构。失败后只返回所选通道诊断，不在另一通道重试。工作台只执行 SQL，不提供 PySpark 代码执行。
 
 - **权限边界**:数据库查询模块的用户/角色/库权限只在门户网关执行;前端仅按网关下发结果展示并处理 403,db-proxy 不承担门户用户权限判断
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
@@ -59,7 +60,7 @@
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);切换/更新结果项时页码重置为第 1 页，避免沿用旧结果页码造成有数据却显示空白;点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化**:el-table `@header-dragend` 按 库.表(或 SQL 前 40 字符)签名写入 localStorage,刷新保留。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
-- **Spark Thrift 日志与取消**:执行期间 3s 轮询 `/api/spark/logs` 展示 Beeline stderr 中的进度与诊断增量输出(结果行单独进入结果表);结束即停。停止操作只按当前 jobId 取消，提交尚未返回 jobId 时由执行轮询在拿到自己的 jobId 后取消；不得调用会终止共享引擎当前子进程的全局取消接口，以免误停其他用户任务。Stage 进度和 SparkSession/JVM 日志接口不再提供。
+- **Spark 日志与取消**:执行日志、Stage 状态与取消按 `executionMode` 路由；停止操作只按当前 jobId 取消。不得让一个模式的失败任务转到另一模式重试，以免重复提交写 SQL。
 - **解锁体系(已移除)**:写权限密码验证(`/api/spark/auth` + `X-Spark-Token`)已移除 —— 写 SQL 直接执行,权限由「数据权限矩阵」管控,数据源 `readOnly` 兑底;spark/flink 网关不再校验解锁 token(db-proxy 侧 `writeToken` 密钥与资源护栏保留)
 - **编辑器(Monaco)**:`SqlEditor.vue` 封装 —— 构造函数一次、model 池按 tab 切换(`editor.setModel`),撤销历史/光标按 tab 独立;主题 `portal-dark/portal-light`(defineTheme,仅画布,不污染全局)与字号由 props 驱动;Tab 缩进交给 Monaco 原生(浮层选词/多行缩进自动),Shift+Tab 反缩进、Cmd+/ 注释(逐行 `-- ` 切换)组件内实现。选中同一行的 1–64 字符时，在当前 SQL 文档中高亮最多 500 个完全相同的其他匹配项(大小写敏感，不限定 ASCII 标识符)。**SQL 专属折叠**:注册 folding provider,按跨行括号(CTE/子查询/INSERT SELECT)与块注释折叠(状态机跳过注释/字符串内的括号)。**超长行降级**:检测单行 >500 字符 → 自动 wordWrap off 防折行计算卡,恢复后回 on。**行内校验**:同样的词法扫描产出 markers —— 未闭合引号/括号 → 波浪线 + hover 提示(300ms 防抖;跳过 -- # /* */ 注释与字符串)。**卡死根治(2026-08)**:CM5 的"每键全文档扫描 + 上千候选一次性渲染 DOM"不复存在 —— 补全为异步 provider + **文中词行级增量索引**(每键只重建光标 1 行;Enter/粘贴/删除等行数变化低频场景才整表重建)+ 候选上限截断 + Monaco 虚拟滚动渲染;`${var}` 参数行同步在 change 事件中与快照**共用一次 getValue**(不再每键两次全量)
 - **脚本树**:`data/scripts` 本地存储,文件 = 脚本(不入库);**按用户分桶**(2026-08)——`tree.json` 按用户名分桶(`users.<username>.my` 私有桶 + `users.__shared__` 公共桶);前端固定双根:「我的文件夹」(私有,仅本人可见可写)+「共享文件夹」(**所有人可读可写**,全员协作,右键含完整菜单 + 「复制到我的文件夹」,可拖入拖出);旧版顶层 `{my:[]}` 格式首次加载自动迁移进公共桶
@@ -73,7 +74,7 @@
 - **SQL 传参(内联参数行)**:自动识别画布 SQL 中全部 `${var}`(字母/下划线开头,有序去重),在分割条下方「SQL 参数」行内联填值(el-input,无变量时不占位;编辑器内容/tab 切换实时同步,同名变量会话内记忆上次取值自动预填);**只替换本次执行段内已填值的变量,未填值的保持 `${var}` 原样交由引擎报错,不阻断其他 SQL 执行**(2026-08 修复:此前按画布全集校验导致缺参卡住所有查询)。原 `${T}/${T-N}` 内置日期变量、`${T-1} 传参` 下拉与 ElMessageBox 弹窗传参已移除;快捷键提示行移至底部状态栏主题项旁
 - **历史与收藏**:QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history:<用户名>`(**按用户隔离**,同一浏览器多账号互不可见;认证关闭落到 `default`;**上限 20 条循环缓存**:新在前、同 sql 去重、超出删最旧);侧栏「历史」tab 星标收藏写入 `db-query-favorites:<用户名>`(上限 50);**点击历史/收藏条目只回填编辑器不自动执行**(历史是缓存,用户按 Cmd+Enter 自行运行);**结果快照随历史缓存**(2026-08)——执行成功时把该 SQL 的列+前 100 行快照写入条目(序列化 >200KB 不缓存),点击带快照的条目除回填编辑器外直接开一个「缓存」标记的结果 tab 免重查展示,历史/收藏列表以「结果」小徽标标识
 - **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd/Ctrl+F 画布内查找、Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档(Monaco model 池,2026-08)**:每个 tab 一个 ITextModel(SqlEditor 内部 `modelId→ITextModel` 池,`editor.setModel` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;切 tab 不触发 change 事件,参数行由 showTabInEditor 重建,内容快照由 change 事件回调写回(`t.content = editor.getValue()`),自动保存只读活跃 tab 实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
-- **Spark Thrift 配置**:`datasources.json` 的 `spark` 段使用 `enabled`, `jdbcUrl`(默认 `jdbc:hive2://127.0.0.1:10001/default`),`user`(默认 `root`),`beelinePath`(默认 `$SPARK_HOME/bin/beeline`)、`defaultLimit`、`maxLimit`、`maxSqlLen`、`exportPath`;db-proxy 主机通过本机回环地址连接 Spark Thrift Server。若 db-proxy 在容器内，需将回环地址改为容器可访问的宿主机地址。修改后重启 db-proxy。SparkSQL 不再使用 PySpark、Executor 数量设置或本地 Spark Stage API。
+- **Spark 双模式配置**:`datasources.json` 顶层 `spark` 段中，Thrift 使用 `enabled`、`jdbcUrl`(默认 `jdbc:hive2://127.0.0.1:10001/default`)、`user`(默认 `root`)、`beelinePath`(默认 `$SPARK_HOME/bin/beeline`)、`defaultLimit`、`maxLimit`、`maxSqlLen`、`exportPath`;`session` 使用历史字段 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances`、`sparkConf` 等 YARN client 配置。`session` 使用 PySpark 常驻 `SparkSession`,不是 `spark-sql` shell。更改数据源配置后重启 db-proxy；发布工作台执行模式选择需重建门户镜像。
 - **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。Impala 表名列表和表字段结构缓存到 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用;类型检查、`/tables`、`/fields`、`/schema` 共用缓存,缓存缺表/缺结构时按需 DESCRIBE 并持久化。查询返回字段/表引用无法识别错误时强制刷新 SQL 涉及表的结构,更新持久化缓存后再进入 AI 修复流程。缓存按数据源连接指纹与库隔离,不包含密码;数据源结构变化后通过下一次相关错误触发刷新。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数,密钥不下发浏览器。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
 
 ## 5. 数据源
@@ -83,13 +84,13 @@
 - 库别名:oracle 连接串可配置别名,未配置显示库名
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句
 
-### Spark Thrift / Beeline 环境
+### Spark 双模式环境
 
 - db-proxy 所在主机需安装 Spark 客户端并可通过 `$SPARK_HOME/bin/beeline` 连接 HiveServer2 Spark Thrift Server；默认 JDBC URL 为 `jdbc:hive2://127.0.0.1:10001/default`、用户为 `root`。如 db-proxy 位于容器，容器内的 `127.0.0.1` 指向容器本身，需将 `jdbcUrl` 改成容器可达的宿主机地址。
-- `datasources.json` 的 `spark` 段配置 `enabled`、`jdbcUrl`、`user`、可选 `beelinePath`、`defaultLimit`、`maxLimit`、`maxSqlLen` 和 `exportPath`。未设置 `beelinePath` 时使用 `$SPARK_HOME/bin/beeline`。本次沿用无密码的 Beeline 调用。
-- 查询、SHOW/DESC 元数据与 HDFS CSV 导出都经同一 Thrift Server 执行；不在 db-proxy 进程中启动 SparkSession。写入权限仍由门户网关数据权限矩阵控制。
-- 子进程退出状态决定执行成功/失败；日志回显 Beeline 的实际输出。停止和超时会终止当前 Beeline 进程；不会伪造 Spark Stage 百分比。
-- Spark Thrift 模式不支持 PySpark 代码、Spark executor 数量设置、SparkContext stage 进度、跨请求临时视图；各请求按 JDBC URL 默认库或 SQL 中显式库名执行。更新配置后重启 db-proxy。
+- Thrift 使用 `datasources.json` 的 `spark` 段 `enabled`、`jdbcUrl`、`user`、可选 `beelinePath`、`defaultLimit`、`maxLimit`、`maxSqlLen` 和 `exportPath` 字段。未设置 `beelinePath` 时使用 `$SPARK_HOME/bin/beeline`；查询、SHOW/DESC 元数据与 HDFS CSV 导出经 Thrift Server 执行。
+- Session 使用同一 `spark` 段的历史 YARN client 配置字段，包括 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances` 与 `sparkConf`；它在 db-proxy 进程中使用常驻 PySpark `SparkSession`。写入权限仍由门户网关数据权限矩阵控制。
+- Thrift 子进程与 SparkSession 各自报告所选通道的执行状态和诊断；停止和超时只作用于所选通道的 job。Stage 状态仅由提供该信息的 session 通道返回。
+- Thrift 请求使用 JDBC URL 默认库或 SQL 中显式库名；session 请求使用常驻 SparkSession 的既有会话语义。两个模式都只接受 SQL 工作台请求，不执行用户提交的 PySpark 代码。更新配置后重启 db-proxy；发布门户工作台选择器需重建门户镜像。
 
 ## 6. 外部 API Token（网关侧）
 

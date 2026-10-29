@@ -33,6 +33,13 @@
   },
   "spark": {
     "enabled": false,
+    "master": "yarn",
+    "appName": "db-proxy-spark",
+    "queue": "default",
+    "executorMemory": "2g",
+    "executorCores": 2,
+    "executorInstances": 0,
+    "sparkConf": {},
     "jdbcUrl": "jdbc:hive2://127.0.0.1:10001/default",
     "user": "root",
     "beelinePath": "",

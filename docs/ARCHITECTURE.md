@@ -20,7 +20,7 @@
 
 - **前端**:Vue3 SPA(编译产物 `dist/`,由网关 serve,`docker` 多阶段构建)
 - **网关**:Node Express,聚合三类能力 —— ① 本平台 API(auth/theme/users/db/scripts/ds-deps/spark/flink)② 反向代理(子应用 iframe、YARN 页面重写代理)③ 静态托管(dist)
-- **数据服务 db-proxy**:Python FastAPI,部署在能直连数据库的客户机(`hadoop-task-3`),Spark SQL 通过同机 Beeline/HiveServer2 Spark Thrift 执行,Flink 保留内嵌引擎;门户不直接连库
+- **数据服务 db-proxy**:Python FastAPI,部署在能直连数据库的客户机(`hadoop-task-3`),Spark SQL 支持 Beeline/HiveServer2 Spark Thrift 与历史 YARN client PySpark `SparkSession` 两种通道,Flink 保留内嵌引擎;门户不直接连库
 
 ## 2. 前端架构
 
@@ -122,7 +122,8 @@ src/
 |---|---|
 | `main.py` | FastAPI 入口:数据源加载、路由、鉴权、护栏(限流/并发信号量) |
 | `impala_engine.py` | Impala SQL 类型检查/修复;元数据读取通过本地 JSON 缓存复用,类型检查与表目录共用 |
-| `spark_thrift_engine.py` | Spark SQL 通过本机 Beeline / HiveServer2 Spark Thrift 执行;进程级任务管理、输出日志增量回显、取消、有限结果解析及 Thrift SQL HDFS CSV 导出;db-proxy 不创建 SparkSession |
+| `spark_thrift_engine.py` | Spark SQL Thrift 通道:通过 Beeline / HiveServer2 执行;进程级任务管理、输出日志增量回显、取消、有限结果解析及 Thrift SQL HDFS CSV 导出 |
+| `spark_engine.py` | Spark SQL session 通道:复用 `datasources.json` 的历史 YARN client 配置创建常驻 PySpark `SparkSession`;不是 `spark-sql` shell |
 | `flink_engine.py` | Flink SQL 引擎:流/批双模式,支持 connector jar(paimon/mysql-cdc/kafka/hbase) |
 | `flink_prejob.py` | Flink PreJob 通道:pyflink 脚本生成 + `yarn-per-job` 提交 + YARN 状态/日志/cancel |
 | `flink_connectors.py` | Flink 连接器元数据:批量建表/DDL 生成/表探测 |
@@ -130,10 +131,11 @@ src/
 
 - **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
 - **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
-- **Spark Thrift 查询结果限制**:Spark SQL 默认返回 1,000 行,硬上限 500,000 行;db-proxy 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出,达到上限时标记 truncated。完整结果导出使用 Spark Thrift `INSERT OVERWRITE DIRECTORY ... USING CSV`。
-- **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;没有嵌入 SparkSession、PySpark、executor 管理或 Stage statusTracker。
-- **Spark Thrift 取消与日志**:每个任务跟踪自己的 Beeline 子进程;取消/超时终止子进程,stdout/stderr 增量写入 Spark 日志接口,仅展示真实 CLI 输出。
-- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 通过 Beeline 连接本机 Spark Thrift Server (`127.0.0.1:10001`)
+- **Spark 查询结果限制**:两种 Spark 模式保持相同结果结构与行数上限。Thrift 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出;SparkSession 通过相同限行规则有界收集;达到上限时标记 truncated。HDFS 导出按所选模式执行。
+- **Spark 双模式选择**:Spark 查询请求可携带 `executionMode: "thrift" | "session"`;缺省为 `thrift` 以兼容既有调用。`session` 是历史 YARN client PySpark `SparkSession`,不是 `spark-sql` 命令行。Thrift 使用 `spark` 配置段的 JDBC/Beeline 字段;session 使用同段已有的 `master`、YARN `queue`、executor 与 `sparkConf` 等字段。
+- **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;每个请求模式路由到对应适配器，不因失败切换或重试另一模式。
+- **Spark 取消与日志**:任务状态、取消、日志/Stage 状态、Schema 补全及 HDFS 导出均按请求的 `executionMode` 路由;两种模式共享门户权限检查与响应结构。失败请求不会重试另一模式。
+- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 按 `executionMode` 走 Spark Thrift 或 SparkSession 适配器
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 
@@ -145,10 +147,12 @@ QueryView.vue
        └─ GET/POST /api/db/*、/api/spark/*、/api/flink/*(网关)
             ├─ 写检测(isSparkWriteSql + 数据权限矩阵)
             └─ spark-gateway / flink-gateway
-                 └─ db-proxy /query | /spark/query | /flink/query
+                 └─ db-proxy /query | /spark/* | /flink/query
                       └─ 引擎执行→ {columns, rows, costMs, truncated}
                            └─ 超过有效行数限制:只收集限制值 + 1 行并标记 truncated
 ```
+
+Spark 的 `/api/spark/*` 与 db-proxy `/spark/*` 查询、异步任务、状态/取消、日志、Schema 和导出请求透传同一 `executionMode`;未提供时使用 `thrift`。两种模式沿用相同门户模块/数据权限与写 SQL 校验。部署 session 通道需重启 db-proxy；工作台选择器随门户前端发布，需重建门户镜像。
 
 ## 6. 配置体系
 
