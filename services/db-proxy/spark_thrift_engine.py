@@ -455,8 +455,11 @@ class SparkThriftEngine:
         safe_job_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id))[:100]
         path = "%s/spark_export_%s_%s" % (root, safe_job_id, uuid.uuid4().hex)
         quoted_path = path.replace("\\", "\\\\").replace("'", "\\'")
+        export_query = _strip_comments(sql).strip()
+        if export_query.endswith(";"):
+            export_query = export_query[:-1].rstrip()
         statement = "INSERT OVERWRITE DIRECTORY '%s' USING CSV OPTIONS (header 'true') %s" % (
-            quoted_path, sql[:len(masked)].strip())
+            quoted_path, export_query)
         result = self._execute(statement, timeout_ms, 0, owner_id, on_start)
         return {"hdfsPath": path, "costMs": result["costMs"]}
 
