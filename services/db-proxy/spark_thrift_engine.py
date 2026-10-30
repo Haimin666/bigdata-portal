@@ -6,6 +6,7 @@ import os
 import re
 import select
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -130,6 +131,54 @@ def _mask_sql(sql: str) -> str:
     return "".join(chars)
 
 
+def _strip_comments(sql: str) -> str:
+    """Remove SQL comments while preserving quoted text and line boundaries."""
+    out = list(sql)
+    i = 0
+    while i < len(sql):
+        if sql[i] in ("'", '"', "`"):
+            quote = sql[i]
+            i += 1
+            while i < len(sql):
+                if sql[i] == "\\":
+                    i += 2
+                elif sql[i] == quote:
+                    i += 1
+                    if i < len(sql) and sql[i] == quote:
+                        i += 1
+                    else:
+                        break
+                else:
+                    i += 1
+        elif sql.startswith("--", i):
+            start = i
+            end = sql.find("\n", i)
+            i = len(sql) if end < 0 else end
+            for pos in range(start, i):
+                out[pos] = " "
+        elif sql.startswith("/*", i):
+            start = i
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                raise ValueError("unterminated SQL comment")
+            for pos in range(start, i):
+                if out[pos] not in "\r\n":
+                    out[pos] = " "
+        else:
+            i += 1
+    return "".join(out)
+
+
 def _apply_row_limit(sql: str, default_limit: int, max_limit: int):
     """Add/cap the top-level SELECT limit without touching comments or literals."""
     masked = _mask_sql(sql)
@@ -245,6 +294,44 @@ class SparkThriftEngine:
         text = re.sub(r"://[^/@\r\n]+:[^/@\r\n]+@", "://[REDACTED]@", text)
         return _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
 
+    def _ensure_thrift_server(self) -> None:
+        command = self.cfg.get("autoStartCommand")
+        if not command:
+            return
+        jdbc = str(self.cfg.get("jdbcUrl", "jdbc:hive2://127.0.0.1:10001/default"))
+        parsed = urlsplit(jdbc.removeprefix("jdbc:"))
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 10001
+        timeout = max(1, float(self.cfg.get("autoStartTimeout", 120)))
+
+        def is_open():
+            try:
+                with socket.create_connection((host, port), timeout=1):
+                    return True
+            except OSError:
+                return False
+
+        if is_open():
+            return
+        if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
+            raise ValueError("spark.autoStartCommand must be a non-empty string array")
+        self._log("audit", "Thrift 服务未就绪，正在执行自动启动命令。\n")
+        try:
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("Spark Thrift 自动启动失败: %s" % error)
+        if result.stdout:
+            self._log("jvm", result.stdout[-LOG_READ_BYTES:])
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if is_open():
+                self._log("audit", "Thrift 服务已就绪。\n")
+                return
+            time.sleep(1)
+        raise RuntimeError("Spark Thrift 启动命令已结束(code=%s)，但 JDBC 端口 %s:%s 未就绪" %
+                           (result.returncode, host, port))
+
     def _log(self, name: str, text: str) -> None:
         data = self._redact(text).encode("utf-8")
         with self._log_lock:
@@ -337,7 +424,8 @@ class SparkThriftEngine:
                     on_start=None) -> Dict[str, Any]:
         default_limit = int(self.cfg.get("defaultLimit", 1000))
         max_limit = int(self.cfg.get("maxLimit", 500000))
-        bounded_sql, limit, may_be_truncated = _apply_row_limit(sql, default_limit, max_limit)
+        executable_sql = _strip_comments(sql)
+        bounded_sql, limit, may_be_truncated = _apply_row_limit(executable_sql, default_limit, max_limit)
         result = self._execute(bounded_sql, timeout_ms, limit, owner_id, on_start)
         if may_be_truncated and len(result["rows"]) >= limit:
             result["truncated"] = True
@@ -468,6 +556,7 @@ class SparkThriftEngine:
                     pass
 
             try:
+                self._ensure_thrift_server()
                 if on_start:
                     on_start()
                 if self._cancel_flag.is_set():

@@ -94,6 +94,7 @@
 
 - db-proxy 所在主机需安装 Spark 客户端并可通过 `$SPARK_HOME/bin/beeline` 连接 HiveServer2 Spark Thrift Server；默认 JDBC URL 为 `jdbc:hive2://127.0.0.1:10001/default`、用户为 `root`。如 db-proxy 位于容器，容器内的 `127.0.0.1` 指向容器本身，需将 `jdbcUrl` 改成容器可达的宿主机地址。
 - SparkSQL 使用 `datasources.json` 的 `spark` 段 `enabled`、`jdbcUrl`、`user`、可选 `beelinePath`、`defaultLimit`、`maxLimit`、`maxSqlLen` 和 `exportPath` 字段。未设置 `beelinePath` 时使用 `$SPARK_HOME/bin/beeline`；查询、SHOW/DESC 元数据与 HDFS CSV 导出经 Thrift Server 执行。
+- Spark Thrift 可通过可选 `autoStartCommand` 配置本机启动命令；连接端口不可用时执行该命令并等待 JDBC 端口就绪，再提交原 SQL 一次。该命令应使用参数数组，例如 `["/root/bin/spark-thrift.sh","start"]`，避免 shell 拼接。默认不自动启动。Thrift 执行前会移除 SQL 注释并保留字符串字面量和换行，再应用限行规则，避免 Beeline 对行注释的解析影响 SQL。
 - SparkSession 使用同一 `spark` 段的历史 YARN client 配置字段，包括 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances` 与 `sparkConf`；它在 db-proxy 进程中使用常驻 PySpark `SparkSession`。写入权限仍由门户网关数据权限矩阵控制。
 - Thrift 子进程与 SparkSession 各自报告所选通道的执行状态和诊断；停止和超时只作用于所选通道的 job。Stage 状态仅由提供该信息的 session 通道返回。
 - `/api/spark/stages?executionMode=` 与 db-proxy `/spark/stages?executionMode=` 按所选模式读取 Stage 快照；Thrift 暂无 Stage 数据时返回空状态，session 返回最近一次 SQL 的 Stage 信息。
