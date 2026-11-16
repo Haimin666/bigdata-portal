@@ -5,6 +5,9 @@ import { isSparkWriteSql, isSparkExportSql } from '../utils/sql-write-detect.js'
 import { isSparkApiSqlShapeAllowed } from '../utils/db-query-api-policy.js'
 import { dbQueryApiJobs } from '../db-query-api-jobs.js'
 import { checkSparkAccess } from '../db-permissions.js'
+import { clampTimeoutMs } from '../utils/timeout.js'
+import { sendUpstreamError } from '../utils/upstream-error.js'
+import { jobOwnership } from '../utils/job-ownership.js'
 import {
   query as sparkQuery, readLogs as sparkReadLogs, status as sparkStatus,
   cancel as sparkCancel, submitJob as sparkSubmitJob,
@@ -99,7 +102,7 @@ export function setupSpark(app) {
         checkSparkAccess(req, isWrite, req.body?.db)
         // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
-        const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
+        const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 120000, 1000, 600000)
         const result = await sparkQuery(String(sql), { kind: 'sql', writeUnlocked, timeoutMs, executionMode: req.body?.executionMode })
         res.json({ code: 0, data: result })
       } catch (e) {
@@ -108,7 +111,7 @@ export function setupSpark(app) {
         }
         const msg = e instanceof Error ? e.message : String(e)
         console.error('[spark/query]', msg)
-        res.status(502).json({ code: 502, msg: `spark 查询失败: ${msg.slice(0, 300)}` })
+        sendUpstreamError(res, e, { prefix: 'spark 查询失败' })
       }
     })
 
@@ -117,19 +120,17 @@ export function setupSpark(app) {
       (fn) =>
       async (req, res) => {
         try {
-          if (req.dbQueryApiPrincipal) checkSparkAccess(req, false)
+          // 元数据也是数据可见面:统一走 Spark 读权限(admin 放行;无规则用户不受影响)
+          checkSparkAccess(req, false)
           const data = await fn(req)
           res.json({ code: 0, data })
         } catch (e) {
           if (e?.statusCode === 403) {
             return res.status(403).json({ code: 403, msg: e.message })
           }
-          if (e?.statusCode === 503) {
-            return res.status(503).json({ code: 503, msg: e.message })
-          }
           const msg = e instanceof Error ? e.message : String(e)
           console.error('[spark/schema]', msg)
-          res.status(502).json({ code: 502, msg: `spark 元数据获取失败: ${msg.slice(0, 300)}` })
+          sendUpstreamError(res, e, { prefix: 'spark 元数据获取失败' })
         }
       }
     app.get('/api/spark/schema/databases', sparkSchemaHandler((req) => sparkSchemaDatabases(req.query.executionMode)))
@@ -154,9 +155,12 @@ export function setupSpark(app) {
         checkSparkAccess(req, isWrite, req.body?.db)
         // 写操作由门户数据权限矩阵放行;db-proxy 本身不做 SQL 写权限判断。
         const writeUnlocked = isWrite
-        const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 600000, 7200000)
+        const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 600000, 1000, 7200000)
         const data = await sparkSubmitJob(body, { kind: 'sql', writeUnlocked, timeoutMs, executionMode: req.body?.executionMode })
-        if (req.dbQueryApiPrincipal && data?.jobId) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
+        if (data?.jobId) {
+          jobOwnership.register(req, 'spark', data.jobId, { database: String(req.body?.db || '') })
+          if (req.dbQueryApiPrincipal) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
+        }
         res.json({ code: 0, data })
       } catch (e) {
         if (e?.statusCode === 403) {
@@ -164,7 +168,7 @@ export function setupSpark(app) {
         }
         const msg = e instanceof Error ? e.message : String(e)
         console.error('[spark/jobs]', msg)
-        res.status(502).json({ code: 502, msg: `spark 提交失败: ${msg.slice(0, 300)}` })
+        sendUpstreamError(res, e, { prefix: 'spark 提交失败' })
       }
     })
 
@@ -178,9 +182,12 @@ export function setupSpark(app) {
           return res.status(403).json({ code: 403, msg: 'API Token 无权导出该 Spark SQL' })
         }
         checkSparkAccess(req, false, req.body?.db)
-        const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 7200000, 7200000)
+        const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 7200000, 1000, 7200000)
         const data = await sparkSubmitJob(sql, { kind: 'export', timeoutMs, executionMode: req.body?.executionMode })
-        if (req.dbQueryApiPrincipal && data?.jobId) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
+        if (data?.jobId) {
+          jobOwnership.register(req, 'spark', data.jobId, { database: String(req.body?.db || '') })
+          if (req.dbQueryApiPrincipal) dbQueryApiJobs.register('spark', data.jobId, req.body?.db || '')
+        }
         res.json({ code: 0, data })
       } catch (e) {
         if (e?.statusCode === 403) {
@@ -188,67 +195,80 @@ export function setupSpark(app) {
         }
         const msg = e instanceof Error ? e.message : String(e)
         console.error('[spark/export]', msg)
-        res.status(502).json({ code: 502, msg: `Spark HDFS 导出提交失败: ${msg.slice(0, 300)}` })
+        sendUpstreamError(res, e, { prefix: 'Spark HDFS 导出提交失败' })
       }
     })
 
     app.get('/api/spark/jobs/:jobId', async (req, res) => {
       try {
-        if (req.dbQueryApiPrincipal && !dbQueryApiJobs.has('spark', req.params.jobId)) {
-          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Spark 任务' })
+        // 归属校验:仅提交者本人(或 admin)可查询;未知 job 一律 fail-closed
+        if (!jobOwnership.allows(req, 'spark', req.params.jobId)) {
+          return res.status(403).json({ code: 403, msg: '无权访问该 Spark 任务(非提交者或已过期)' })
         }
         const data = await sparkJobStatus(String(req.params.jobId), 30000, req.query.executionMode)
         res.json({ code: 0, data })
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        res.status(404).json({ code: 404, msg: `job not found: ${msg.slice(0, 200)}` })
+        console.error('[spark/jobs/:id]', e instanceof Error ? e.message : e)
+        sendUpstreamError(res, e, { prefix: 'Spark 任务状态获取失败' })
       }
     })
 
     app.post('/api/spark/jobs/:jobId/cancel', async (req, res) => {
       try {
-        if (req.dbQueryApiPrincipal && !dbQueryApiJobs.has('spark', req.params.jobId)) {
-          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此 Spark 任务' })
+        if (!jobOwnership.allows(req, 'spark', req.params.jobId)) {
+          return res.status(403).json({ code: 403, msg: '无权访问该 Spark 任务(非提交者或已过期)' })
         }
         const data = await sparkCancelJob(String(req.params.jobId), 30000, req.body?.executionMode)
         res.json({ code: 0, data })
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        res.status(404).json({ code: 404, msg: `取消失败: ${msg.slice(0, 200)}` })
+        console.error('[spark/jobs/cancel]', e instanceof Error ? e.message : e)
+        sendUpstreamError(res, e, { prefix: 'Spark 任务取消失败' })
       }
     })
 
     // Spark driver 日志透传(增量),供前端查询页日志面板展示
     app.get('/api/spark/logs', async (req, res) => {
       try {
+        checkSparkAccess(req, false)
         // 前端按 jvm/audit 两个文件各传增量 offset;必须原样透传,
         // 否则固定从 0 读整个文件 → 日志面板每次都显示全部历史(叠加)
         const data = await sparkReadLogs({ jvm: Number(req.query.jvm) || 0, audit: Number(req.query.audit) || 0 }, req.query.executionMode)
         res.json({ code: 0, data })
       } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
         console.error('[spark/logs]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark 日志读取失败' })
+        sendUpstreamError(res, e, { prefix: 'spark 日志读取失败' })
       }
     })
 
     // Spark 引擎状态(会话/appId/配置快照)
     app.get('/api/spark/status', async (req, res) => {
       try {
+        checkSparkAccess(req, false)
         const data = await sparkStatus(req.query.executionMode)
         res.json({ code: 0, data })
       } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
         console.error('[spark/status]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark 状态获取失败' })
+        sendUpstreamError(res, e, { prefix: 'spark 状态获取失败' })
       }
     })
 
     app.get('/api/spark/stages', async (req, res) => {
       try {
+        checkSparkAccess(req, false)
         const data = await sparkStages(req.query.executionMode)
         res.json({ code: 0, data })
       } catch (e) {
+        if (e?.statusCode === 403) {
+          return res.status(403).json({ code: 403, msg: e.message })
+        }
         console.error('[spark/stages]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark Stage 状态获取失败' })
+        sendUpstreamError(res, e, { prefix: 'spark Stage 状态获取失败' })
       }
     })
 
@@ -259,7 +279,7 @@ export function setupSpark(app) {
         res.json({ code: 0, data })
       } catch (e) {
         console.error('[spark/cancel]', e instanceof Error ? e.message : e)
-        res.status(502).json({ code: 502, msg: 'spark 停止失败,请查看服务端日志' })
+        sendUpstreamError(res, e, { prefix: 'spark 停止失败' })
       }
     })
     // 周期清理过期 spark token 与解锁失败计数,防止内存无限增长(G2)

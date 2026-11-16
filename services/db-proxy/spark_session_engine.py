@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlsplit
 
 from spark_engine import SparkEngine, collect_limited_rows, _format_spark_error
 from spark_thrift_engine import _apply_row_limit, _mask_sql
+from sql_limits import DEFAULT_ROWS, MAX_ROWS, effective_limits
 
 
 class SparkSessionEngine:
@@ -126,8 +127,9 @@ class SparkSessionEngine:
     def execute_sql(self, sql, write_unlocked=False, timeout_ms=600000,
                     owner_id=None, on_start=None):
         code = self._validate_sql(sql)
-        code, limit, limited = _apply_row_limit(
-            code, self.cfg.get('defaultLimit', 1000), self.cfg.get('maxLimit', 500000))
+        default_limit, max_limit = effective_limits(
+            self.cfg.get('defaultLimit', DEFAULT_ROWS), self.cfg.get('maxLimit', MAX_ROWS))
+        code, limit, limited = _apply_row_limit(code, default_limit, max_limit)
         pushdown = bool(re.match(r'^\s*(SELECT|WITH)\b', _mask_sql(code), re.I))
         start = time.time()
         self._engine._audit('sql db=spark sql=%s' % code[:300])

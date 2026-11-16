@@ -8,6 +8,8 @@ import select
 import signal
 import subprocess
 import threading
+
+from sql_limits import DEFAULT_ROWS, MAX_ROWS, effective_limits
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -335,8 +337,10 @@ class SparkThriftEngine:
     def execute_sql(self, sql: str, write_unlocked: bool = False,
                     timeout_ms: int = 600000, owner_id: Optional[str] = None,
                     on_start=None) -> Dict[str, Any]:
-        default_limit = int(self.cfg.get("defaultLimit", 1000))
-        max_limit = int(self.cfg.get("maxLimit", 500000))
+        # 产品契约:默认 1000 行,显式上限硬顶 500000(配置只能收紧)
+        default_limit, max_limit = effective_limits(
+            self.cfg.get("defaultLimit", DEFAULT_ROWS), self.cfg.get("maxLimit", MAX_ROWS)
+        )
         bounded_sql, limit, may_be_truncated = _apply_row_limit(sql, default_limit, max_limit)
         result = self._execute(bounded_sql, timeout_ms, limit, owner_id, on_start)
         if may_be_truncated and len(result["rows"]) >= limit:

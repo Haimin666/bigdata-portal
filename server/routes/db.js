@@ -6,23 +6,75 @@ import config from '../config.js'
 import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
 import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
 import { dbQueryApiJobs } from '../db-query-api-jobs.js'
-import { dbEngine, refreshEngineMap } from '../engine-map.js'
-import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsDatabase } from '../db-permissions.js'
+import { dbEngine, refreshEngineMap, ensureEngineMap } from '../engine-map.js'
+import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsDatabase, isAdmin } from '../db-permissions.js'
+import { clampTimeoutMs } from '../utils/timeout.js'
+import { createUpstreamError, sendUpstreamError } from '../utils/upstream-error.js'
+import { jobOwnership } from '../utils/job-ownership.js'
+
+// /api/db 透传白名单(显式放行,其余一律 403)。每项含 HTTP 方法与归一化后的路径。
+const DB_PROXY_WHITELIST = [
+  { method: 'GET', re: /^\/(acl|health|dbs|tables|fields|ddl|schema|search\/tables)$/ },
+  { method: 'POST', re: /^\/explain$/ },
+  { method: 'GET', re: /^\/jobs\/[a-z0-9_-]+$/ },
+  { method: 'POST', re: /^\/jobs\/[a-z0-9_-]+\/cancel$/ }
+]
+
+/**
+ * 归一化请求路径(所有基于路径的鉴权判断必须走这里):
+ * decodeURIComponent 反复解码直到稳定(最多 3 次,防双重编码)→ 反斜杠归一为 / → 小写。
+ * 解码失败返回 null(调用方按 400 拒绝,避免 URIError 落到 500)。
+ * 动机:Express 不解码 req.path,而下游 uvicorn 会 unquote,`/api/db/%73park/query`
+ * 曾可绕过 Spark/Flink/元数据/jobs 的鉴权。
+ */
+export function normalizedPath(req) {
+  let pathname = String(req?.path ?? '')
+  for (let round = 0; round < 3; round += 1) {
+    let next
+    try {
+      next = decodeURIComponent(pathname)
+    } catch {
+      return null
+    }
+    if (next === pathname) break
+    pathname = next
+  }
+  return pathname.replace(/\\/g, '/').toLowerCase()
+}
+
+function isWhitelistedDbProxyRequest(pathname, method) {
+  const verb = String(method || '').toUpperCase()
+  return DB_PROXY_WHITELIST.some((entry) => entry.method === verb && entry.re.test(pathname))
+}
 
 export function setupDb(app, auth) {
   // ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
-  // 仅拦截 GET + query.db 且路径命中上述元数据接口,其余(POST explain/jobs 提交、
-  // GET dbs/acl/jobs/query/health 等)一律 next() 放行。
-  // 注意:app.use('/api/db', ...) 内 req.path 已去掉 /api/db 前缀(与下方透传层一致)。
-  app.use('/api/db', (req, res, next) => {
-    if (req.method !== 'GET' || !req.query.db) return next()
-    if (!/^\/(tables|fields|ddl|schema)(\/|$)/i.test(req.path)) return next()
+  // 路径判断统一用 normalizedPath(百分号编码/反斜杠/大小写变体一律归一)。
+  // 配置了表级白名单的规则:整库枚举接口(tables/schema)直接拒绝;
+  // fields/ddl 带 table 时按该表校验,无 table 时按整库(无表白名单不受影响)。
+  app.use('/api/db', async (req, res, next) => {
+    if (req.method !== 'GET') return next()
+    const pathname = normalizedPath(req)
+    if (pathname == null) return res.status(400).json({ code: 400, msg: '非法请求路径' })
+    const meta = pathname.match(/^\/(tables|fields|ddl|schema)$/)
+    if (!meta || !req.query.db) return next()
     try {
       const dbName = String(req.query.db)
-      checkDbAccess(req, dbName, {
-        engine: dbEngine(dbName),
-        requireWholeDatabase: !!req.dbQueryApiPrincipal
-      })
+      let engine = dbEngine(dbName)
+      if (engine == null) {
+        await ensureEngineMap()
+        engine = dbEngine(dbName)
+      }
+      const kind = meta[1]
+      const tableName = req.query.table == null ? '' : String(req.query.table)
+      // API Token 的元数据接口一律要求整库读取(保持既有语义)
+      const opts = { engine, requireWholeDatabase: !!req.dbQueryApiPrincipal }
+      if (kind === 'tables' || kind === 'schema') {
+        opts.requireWholeDatabase = true
+      } else if (!opts.requireWholeDatabase && tableName) {
+        opts.tables = [tableName]
+      }
+      checkDbAccess(req, dbName, opts)
       next()
     } catch (e) {
       if (e?.statusCode === 403) {
@@ -44,7 +96,7 @@ export function setupDb(app, auth) {
         signal: AbortSignal.timeout(8000)
       })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      if (!r.ok) throw createUpstreamError(r.status, body, '/acl')
       const data = body.data || {}
       const datasources = Array.isArray(data.datasources) ? data.datasources : []
       // 刷新库→引擎映射(引擎级规则校验用)
@@ -58,7 +110,7 @@ export function setupDb(app, auth) {
         return res.json({ code: 0, data })
       }
       const user = req?.user || {}
-      if (user.role !== 'admin') {
+      if (!isAdmin(req)) {
         const perms = loadPerms()
         const username = user.username ?? user.user ?? user.name ?? ''
         const roles = Array.isArray(user.roles) ? user.roles : user.role ? [user.role] : []
@@ -72,7 +124,42 @@ export function setupDb(app, auth) {
       res.json({ code: 0, data })
     } catch (e) {
       console.error('[db/acl]', e instanceof Error ? e.message : e)
-      res.status(502).json({ code: 502, msg: `数据源列表获取失败: ${e instanceof Error ? e.message : String(e)}` })
+      sendUpstreamError(res, e, { prefix: '数据源列表获取失败' })
+    }
+  })
+
+  // 数据源名列表(/dbs)在网关侧代理并按权限过滤,避免绕过 /acl 的全量数据源名泄露。
+  // db-proxy 只返回名字,过滤依赖权限矩阵:普通用户按 allowedDbsFor,API Token 按库+引擎规则。
+  app.get('/api/db/dbs', async (req, res) => {
+    if (!config.dbProxyUrl) {
+      return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
+    }
+    try {
+      const r = await fetch(config.dbProxyUrl + '/dbs', {
+        headers: { 'X-DB-Token': config.dbProxyToken || '' },
+        signal: AbortSignal.timeout(8000)
+      })
+      const body = await r.json().catch(() => ({}))
+      if (!r.ok) throw createUpstreamError(r.status, body, '/dbs')
+      let names = Array.isArray(body.data) ? body.data.map((name) => String(name)) : []
+      if (req.dbQueryApiPrincipal) {
+        await ensureEngineMap()
+        const perms = loadPerms()
+        names = names.filter((name) => apiTokenAllowsDatabase(perms, dbEngine(name) || '', name))
+      } else if (!isAdmin(req)) {
+        const perms = loadPerms()
+        const username = req.user?.username ?? req.user?.user ?? req.user?.name ?? ''
+        const roles = Array.isArray(req.user?.roles) ? req.user.roles : req.user?.role ? [req.user.role] : []
+        const dbs = allowedDbsFor(perms, username, roles)
+        if (dbs != null && !dbs.includes('*')) {
+          const allowed = new Set(dbs)
+          names = names.filter((name) => allowed.has(name))
+        }
+      }
+      res.json({ code: 0, data: names })
+    } catch (e) {
+      console.error('[db/dbs]', e instanceof Error ? e.message : e)
+      sendUpstreamError(res, e, { prefix: '数据源列表获取失败' })
     }
   })
 
@@ -91,7 +178,7 @@ export function setupDb(app, auth) {
         signal: AbortSignal.timeout(15000)
       })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
+      if (!r.ok) throw createUpstreamError(r.status, body, '/search/tables')
       let hits = Array.isArray(body.data) ? body.data : []
       if (req.user?.role !== 'admin') {
         const perms = loadPerms()
@@ -106,7 +193,7 @@ export function setupDb(app, auth) {
       res.json({ code: 0, data: hits })
     } catch (e) {
       console.error('[db/search/tables]', e instanceof Error ? e.message : e)
-      res.status(502).json({ code: 502, msg: `表搜索失败: ${e instanceof Error ? e.message : String(e)}` })
+      sendUpstreamError(res, e, { prefix: '表搜索失败' })
     }
   })
 
@@ -156,7 +243,11 @@ export function setupDb(app, auth) {
     if (!dbName) {
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
     }
-    const engine = dbEngine(dbName)
+    let engine = dbEngine(dbName)
+    if (engine == null) {
+      await ensureEngineMap()
+      engine = dbEngine(dbName)
+    }
     if (req.dbQueryApiPrincipal && (!['impala', 'mysql', 'oracle'].includes(engine) || !isDbQueryApiReadSql(sql))) {
       return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala、MySQL、Oracle 单条只读 SQL' })
     }
@@ -171,13 +262,11 @@ export function setupDb(app, auth) {
       if (e?.statusCode === 403) {
         return res.status(403).json({ code: 403, msg: e.message })
       }
-      throw e
-    }
-    if (isSparkWriteSql(sql)) {
-      // 写权限密码验证已移除(与 /api/dbquery/query 一致):库权限矩阵管控 + 数据源 readOnly 兑底
+      console.error('[db/jobs] 权限校验异常', e instanceof Error ? e.message : e)
+      return res.status(500).json({ code: 500, msg: '数据权限校验失败' })
     }
     // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
-    const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 3600000, 7200000)
+    const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 3600000, 1000, 7200000)
     try {
       const r = await fetch(config.dbProxyUrl + '/jobs', {
         method: 'POST',
@@ -186,19 +275,16 @@ export function setupDb(app, auth) {
         signal: AbortSignal.timeout(30000)
       })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) {
-        const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-        err.status = r.status
-        throw err
-      }
-      if (req.dbQueryApiPrincipal && body.data?.jobId) {
-        dbQueryApiJobs.register(engine, body.data.jobId, dbName)
+      if (!r.ok) throw createUpstreamError(r.status, body, '/jobs')
+      if (body.data?.jobId) {
+        // 统一任务归属表:普通用户与 API Token 都登记 owner,供后续按 id 查询/取消时校验
+        jobOwnership.register(req, 'db', body.data.jobId, { database: dbName })
+        if (req.dbQueryApiPrincipal) dbQueryApiJobs.register(engine, body.data.jobId, dbName)
       }
       res.json({ code: 0, data: body.data })
     } catch (e) {
       console.error('[db/jobs]', e instanceof Error ? e.message : e)
-      const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
-      res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+      sendUpstreamError(res, e, { prefix: '数据库任务提交失败' })
     }
   })
 
@@ -214,22 +300,28 @@ export function setupDb(app, auth) {
     if (!dbName) {
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
     }
-    if (req.dbQueryApiPrincipal && (dbEngine(dbName) !== 'impala' || !isDbQueryApiReadSql(sql))) {
+    let engine = dbEngine(dbName)
+    if (engine == null) {
+      await ensureEngineMap()
+      engine = dbEngine(dbName)
+    }
+    if (req.dbQueryApiPrincipal && (engine !== 'impala' || !isDbQueryApiReadSql(sql))) {
       return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 Impala 只读 SQL' })
     }
-    // 数据权限矩阵:按用户/角色校验库访问权(explain 为只读计划,仍需库级授权)
+    // 数据权限矩阵:按用户/角色校验库访问权(explain 为只读计划,仍需库级授权 + 表级规则)
     try {
       checkDbAccess(req, dbName, {
-        engine: dbEngine(dbName),
-        tables: req.dbQueryApiPrincipal ? extractTables(sql) : null
+        engine,
+        tables: extractTables(sql)
       })
     } catch (e) {
       if (e?.statusCode === 403) {
         return res.status(403).json({ code: 403, msg: e.message })
       }
-      throw e
+      console.error('[db/explain] 权限校验异常', e instanceof Error ? e.message : e)
+      return res.status(500).json({ code: 500, msg: '数据权限校验失败' })
     }
-    const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 30000, 60000)
+    const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 30000, 1000, 60000)
     try {
       const r = await fetch(config.dbProxyUrl + '/explain', {
         method: 'POST',
@@ -238,16 +330,11 @@ export function setupDb(app, auth) {
         signal: AbortSignal.timeout(timeoutMs)
       })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) {
-        const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-        err.status = r.status
-        throw err
-      }
+      if (!r.ok) throw createUpstreamError(r.status, body, '/explain')
       res.json({ code: 0, data: body.data })
     } catch (e) {
       console.error('[db/explain]', e instanceof Error ? e.message : e)
-      const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
-      res.status(status).json({ code: status, msg: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
+      sendUpstreamError(res, e, { prefix: '执行计划获取失败' })
     }
   })
 
@@ -265,20 +352,24 @@ export function setupDb(app, auth) {
       }
     })
     app.use('/api/db', (req, res, next) => {
-      if (req.dbQueryApiPrincipal) {
-        const jobMatch = req.path.match(/^\/jobs\/([a-z0-9_-]+)(?:\/cancel)?$/i)
-        if (jobMatch && !['impala', 'mysql', 'oracle'].some((engine) => dbQueryApiJobs.has(engine, jobMatch[1]))) {
-          return res.status(403).json({ code: 403, msg: '该 API Token 无权访问此数据库任务' })
-        }
+      const pathname = normalizedPath(req)
+      if (pathname == null) {
+        return res.status(400).json({ code: 400, msg: '非法请求路径' })
       }
-      // 敏感路径不走透传:
-      //  - /spark/* 由 /api/spark/* 统一鉴权(写权限矩阵),防绕过
-      //  - /flink/* 由 /api/flink/* 统一鉴权(写解锁 + prejob 提交),防绕过
-      //  - /jobs 异步任务提交由上方专用路由鉴权(写检测 + token);此处兜底拦非 POST 变体
-      //  - /scripts/* 是 db-proxy 遗留端点,前端脚本树走门户本地 /api/scripts
-      //  - /acl 保持透传:前端数据源列表加载依赖它,且为只读接口
-      if (/^\/spark\//i.test(req.path) || /^\/flink\//i.test(req.path) || /^\/query\/?$/i.test(req.path) || /^\/scripts\//i.test(req.path) || /^\/jobs\/?$/i.test(req.path)) {
+      // 透传层只接受「未编码」的显式白名单路径:百分号编码/反斜杠变体一律拒绝,
+      // 否则 `/api/db/%73park/query`、`/%74ables` 等会绕过网关鉴权直达 uvicorn(unquote 后生效)。
+      // 大小写归一后再比较,保留 Express 默认大小写不敏感的行为。
+      const rawNormalized = String(req.path || '').replace(/\\/g, '/').toLowerCase()
+      if (rawNormalized !== pathname) {
+        return res.status(403).json({ code: 403, msg: '非法请求路径' })
+      }
+      if (!isWhitelistedDbProxyRequest(pathname, req.method)) {
         return res.status(403).json({ code: 403, msg: '请通过门户专用接口访问该资源' })
+      }
+      // 异步任务(GET /jobs/:id、POST /jobs/:id/cancel)必须校验归属,防跨用户读结果/取消
+      const jobMatch = pathname.match(/^\/jobs\/([a-z0-9_-]+)(?:\/cancel)?$/)
+      if (jobMatch && !jobOwnership.allows(req, 'db', jobMatch[1])) {
+        return res.status(403).json({ code: 403, msg: '无权访问该数据库任务(非提交者或已过期)' })
       }
       dbProxy(req, res, next)
     })

@@ -1,6 +1,8 @@
 // Spark SQL 执行模块:经 db-proxy 的 /spark/* 端点连接 Spark Thrift 或 SparkSession。
 // 写权限由门户网关检查;db-proxy 的访问认证仍由 X-DB-Token 控制。
 import config from './config.js'
+import { clampTimeoutMs } from './utils/timeout.js'
+import { createUpstreamError } from './utils/upstream-error.js'
 
 const BASE = config.dbProxyUrl
 const TOKEN = config.dbProxyToken
@@ -14,12 +16,11 @@ async function proxy(path, opts = {}) {
       'X-DB-Token': TOKEN,
       ...(opts.headers || {})
     },
-    signal: AbortSignal.timeout(opts.timeoutMs || 300000)
+    signal: AbortSignal.timeout(clampTimeoutMs(opts.timeoutMs, 300000, 1000, 7200000))
   })
   const body = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    throw new Error(body.detail || body.msg || `db-proxy HTTP ${res.status} ${path}`)
-  }
+  // 保留上游 HTTP 状态 + errorType/errorCode/logs,由路由层原样透传(只有拿不到状态才回退 502)
+  if (!res.ok) throw createUpstreamError(res.status, body, path)
   return body
 }
 

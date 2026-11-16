@@ -11,8 +11,9 @@
 
 设计目标:
   - 网关管控读写权限;Impala 数据源可额外启用只读保护
-  - 库级 + 表级白名单,防越权访问
-  - 强制行数上限,防大结果集拖垮(MySQL LIMIT / Oracle 12c+ FETCH / 11g ROWNUM)
+  - 鉴权 + 资源护栏(多语句/行数/长度/超时/限流);库级/表级白名单由门户网关执行,
+    本服务只回显配置,不再做拦截
+  - 强制行数上限(默认 1000 行,硬上限 500000 行;MySQL LIMIT / Oracle 12c+ FETCH / 11g ROWNUM)
   - 连接信息只存在于客户机,平台永远不接触数据库密码
   - AUTH_TOKEN 鉴权,防内网随意调用
   - 执行审计日志
@@ -38,11 +39,20 @@ import collections
 import datetime
 import threading
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+# 行数限制的唯一实现点(默认 1000 行 / 硬上限 500000 行,作用域与注释感知)
+from sql_limits import (
+    DEFAULT_ROWS,
+    MAX_ROWS,
+    effective_limits,
+    mask_sql,
+    plan_row_limit,
+)
 
 # ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
 CONFIG_FILE = "datasources.json"
@@ -67,8 +77,11 @@ CONFIG = _read_config()
 AUTH_TOKEN = str(CONFIG.get("authToken", ""))
 LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
 LISTEN_PORT = int(CONFIG.get("listenPort", 8756))
-DEFAULT_LIMIT = int(CONFIG.get("defaultLimit", 1000))
-MAX_LIMIT = int(CONFIG.get("maxLimit", 500000))
+# 行数契约(产品固定):默认返回 1000 行,显式上限硬顶 500000 行。
+# 配置项只能在 [1, MAX_ROWS] 内收紧,不能突破硬上限。
+DEFAULT_LIMIT, MAX_LIMIT = effective_limits(
+    CONFIG.get("defaultLimit"), CONFIG.get("maxLimit")
+)
 # SQL 长度上限(字节),防超大 SQL 拖垮客户机/数据库;默认 32KB
 MAX_SQL_LEN = int(CONFIG.get("maxSqlLen", 32768))
 QUERY_TIMEOUT = int(CONFIG.get("queryTimeout", 60))
@@ -143,7 +156,9 @@ if FLINK_PREJOB.enabled:
 # 仅在 datasources.json 声明 type=impala 的数据源时实际连接。
 IMPALA_CFG = CONFIG.get("impala") or {}
 IMPALA_SCHEMA_CACHE = ImpalaSchemaCache(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "impala-schema-cache.json")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "impala-schema-cache.json"),
+    # 默认 24h 过期:DDL 变更后不必等到报错才刷新(仍保留"错误驱动强制刷新"路径)
+    ttl_seconds=IMPALA_CFG.get("schemaCacheTtlSeconds", 86400),
 )
 IMPALA_ENGINE = ImpalaEngine(IMPALA_CFG, IMPALA_SCHEMA_CACHE)
 if any(str(x.get("type", "")).lower() == "impala" for x in CONFIG.get("datasources", [])):
@@ -176,16 +191,52 @@ except ImportError:  # pragma: no cover
     _HAS_ORACLE = False
 
 
-# 行数上限检测(MySQL/Oracle 通用):LIMIT n 或 FETCH FIRST n ROWS
-LIMIT_RE = re.compile(
-    r"\b(?:LIMIT\s+(\d+)|FETCH\s+FIRST\s+(\d+)\s+ROWS|ROWNUM\s*(?:<=|<)\s*(\d+))",
-    re.IGNORECASE,
-)
+# 行数上限由 sql_limits.plan_row_limit 统一处理(作用域/注释感知),
+# 不再用整条 SQL 正则判断,避免字符串字面量或子查询里的 LIMIT 被误判。
 
 app = FastAPI(title="db-proxy", version="2.1.0")
 
 
 # ── 数据源注册表 ──────────────────────────────────────────────
+def _cancel_log(message: str) -> None:
+    """取消/中止相关的诊断只记 warning 以下级别,避免刷爆日志。"""
+    log.info("cancel: %s", message)
+
+
+def _query_thread_id(conn) -> Optional[int]:
+    """MySQL/Doris 连接线程号(供 KILL QUERY 使用)。"""
+    fn = getattr(conn, "thread_id", None)
+    if callable(fn):
+        try:
+            return int(fn())
+        except Exception:
+            return None
+    return None
+
+
+def _oracle_session_ids(conn) -> Tuple[Optional[int], Optional[int]]:
+    """读取当前 Oracle 会话的 sid/serial#(供 KILL SESSION 使用);无权限时返回 (None, None)。"""
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT sid, serial# FROM v$session "
+            "WHERE sid = SYS_CONTEXT('USERENV','SID')"
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None and row[1] is not None:
+            return int(row[0]), int(row[1])
+    except Exception:
+        pass
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    return None, None
+
+
 class DataSource:
     """单个数据源配置:name 是请求 db 参数,type 是 mysql/oracle。"""
 
@@ -282,9 +333,129 @@ class DataSource:
         }
         # oracledb 1.x 不支持 connect_timeout(2.x 才有),按版本自适应
         try:
-            return oracledb.connect(**kwargs, connect_timeout=connect_timeout)
+            conn = oracledb.connect(**kwargs, connect_timeout=connect_timeout)
         except TypeError:
-            return oracledb.connect(**kwargs)
+            conn = oracledb.connect(**kwargs)
+        # 客户端读超时:oracledb 2.x 的 call_timeout(毫秒);1.x 无此属性则跳过
+        try:
+            conn.call_timeout = max(1, int(query_timeout)) * 1000
+        except Exception:
+            pass
+        return conn
+
+    # ── 真实取消:终止数据库侧正在执行的语句(不是只关本地连接)──────────
+    def _helper_mysql(self):
+        return pymysql.connect(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            database=self.service,
+            charset=self.charset,
+            connect_timeout=max(1, DB_CONNECT_TIMEOUT),
+            read_timeout=max(5, DB_CONNECT_TIMEOUT * 2),
+            write_timeout=max(5, DB_CONNECT_TIMEOUT * 2),
+            autocommit=True,
+        )
+
+    def _cancel_mysql(self, thread_id: Optional[int]) -> str:
+        """MySQL/Doris:用同账号短连接发 KILL QUERY,真正打断服务端语句。"""
+        if thread_id is None or not _HAS_MYSQL:
+            return "close"
+        helper = None
+        try:
+            helper = self._helper_mysql()
+            cur = helper.cursor()
+            try:
+                cur.execute("KILL QUERY %d" % int(thread_id))
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            return "mysql:KILL QUERY %d" % int(thread_id)
+        except Exception as exc:
+            _cancel_log("mysql KILL QUERY failed (thread=%s): %s" % (thread_id, exc))
+            return "close"
+        finally:
+            if helper is not None:
+                try:
+                    helper.close()
+                except Exception:
+                    pass
+
+    def _cancel_oracle(self, conn, session_ids) -> str:
+        """Oracle:优先 OCI break(Connection.cancel),否则 KILL SESSION,最后关连接。"""
+        cancel = getattr(conn, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+                return "oracle:Connection.cancel"
+            except Exception as exc:
+                _cancel_log("oracle Connection.cancel failed: %s" % exc)
+        sid, serial = session_ids or (None, None)
+        if sid and serial and _HAS_ORACLE:
+            helper = None
+            try:
+                helper = oracledb.connect(
+                    user=self.user, password=self.password,
+                    dsn=f"{self.host}:{self.port}/{self.service}",
+                )
+                cur = helper.cursor()
+                try:
+                    cur.execute(
+                        "ALTER SYSTEM KILL SESSION '%d,%d' IMMEDIATE" % (int(sid), int(serial))
+                    )
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                return "oracle:KILL SESSION %d,%d" % (int(sid), int(serial))
+            except Exception as exc:
+                # 普通账号无 ALTER SYSTEM 权限时属预期降级,仅记 debug 级日志
+                _cancel_log(
+                    "oracle KILL SESSION unavailable (sid=%s, needs ALTER SYSTEM): %s" % (sid, exc)
+                )
+            finally:
+                if helper is not None:
+                    try:
+                        helper.close()
+                    except Exception:
+                        pass
+        return "close"
+
+    def _cancel_impala(self, cursor) -> str:
+        """Impala:优先 HS2 CancelOperation,退化为关闭 operation,最后关会话。"""
+        if cursor is not None:
+            for name in ("cancel_operation", "cancel"):
+                fn = getattr(cursor, name, None)
+                if callable(fn):
+                    try:
+                        fn()
+                        return "impala:%s" % name
+                    except Exception as exc:
+                        _cancel_log("impala %s failed: %s" % (name, exc))
+            close_op = getattr(cursor, "close_operation", None)
+            if callable(close_op):
+                try:
+                    close_op()
+                    return "impala:close_operation"
+                except Exception as exc:
+                    _cancel_log("impala close_operation failed: %s" % exc)
+        # 返回 close:由调用方关闭连接(HiveServer2 CloseSession 会取消会话内查询)
+        return "close"
+
+    def cancel_query(self, conn, cursor=None, thread_id=None, session_ids=None) -> str:
+        """终止该数据源上正在执行的语句,返回实际使用的方式(供 job 日志回显)。"""
+        if self.type == "mysql":
+            return self._cancel_mysql(thread_id)
+        if self.type == "oracle":
+            return self._cancel_oracle(conn, session_ids)
+        if self.type == "impala":
+            return self._cancel_impala(cursor)
+        return "unsupported"
+
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -326,8 +497,12 @@ def _impala_cache_namespace(ds: DataSource) -> str:
 
 # ── 安全工具 ──────────────────────────────────────────────────
 def require_auth(x_db_token: Optional[str]) -> None:
-    """鉴权:配置了 authToken 则必须匹配。"""
-    if AUTH_TOKEN and x_db_token != AUTH_TOKEN:
+    """鉴权:配置了 authToken 则必须匹配(常量时间比较,避免时序侧信道)。"""
+    if not AUTH_TOKEN:
+        return
+    provided = x_db_token or ""
+    # compare_digest 要求同类型;str 参数按 UTF-8 比较,长度不同也不会提前返回
+    if not secrets.compare_digest(provided, AUTH_TOKEN):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -346,25 +521,11 @@ ORACLE_PLSQL_START_RE = re.compile(
 )
 
 
-def check_read_only_sql(sql: str) -> bool:
-    """是否为查询类 SQL(SELECT/SHOW/DESC/EXPLAIN/WITH),用于区分查询/写执行路径。"""
-    return bool(READ_ONLY_SQL_RE.match(sql))
-
-
 # ── 写操作审计(MySQL/Oracle/Doris 写 SQL 执行审计,JSON Lines)────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIT_DIR = os.path.join(BASE_DIR, "audit")
 AUDIT_LOG_FILE = os.path.join(AUDIT_DIR, "audit-db.log")
 _audit_lock = threading.Lock()
-
-
-def _is_write_sql(sql: str) -> bool:
-    """写语句判定:非 SELECT/EXPLAIN/SHOW/DESC/DESCRIBE 开头即视为写
-    (INSERT/UPDATE/DELETE/REPLACE/CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/COMMENT/SET 等)。
-    与 READ_ONLY_SQL_RE 对齐:注释前缀先剥,末尾分号不影响判定。"""
-    if not sql or not sql.strip():
-        return False
-    return not bool(READ_ONLY_SQL_RE.match(sql))
 
 
 def _write_audit(
@@ -404,26 +565,11 @@ def _write_audit(
         log.warning("audit write failed: %s", e)
 
 
-def enforce_limit(sql: str) -> int:
-    """提取行数上限:MySQL LIMIT / Oracle FETCH FIRST / Oracle ROWNUM(11g)。"""
-    m = LIMIT_RE.search(sql)
-    if m:
-        limit = int(next(g for g in (m.group(1), m.group(2), m.group(3)) if g is not None))
-        if limit > MAX_LIMIT:
-            raise HTTPException(
-                status_code=400, detail=f"row limit exceeds MAX_LIMIT({MAX_LIMIT})"
-            )
-        return limit
-    return DEFAULT_LIMIT
-
-
-def append_row_limit(sql: str, limit: int, row_limit: str) -> str:
-    """仅在服务端为 SELECT/WITH 添加行数限制,不改动前端画布内容。"""
-    if row_limit == "rownum":
-        return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {limit}"
-    if row_limit == "fetch":
-        return f"{sql} FETCH FIRST {limit} ROWS ONLY"
-    return f"{sql} LIMIT {limit}"
+def _bounded_timeout_seconds(timeout_ms: Optional[int]) -> int:
+    """把毫秒超时转成连接/读取超时秒数,保证 >= 1(0 在驱动里等于"永不超时")。"""
+    if not timeout_ms:
+        return QUERY_TIMEOUT
+    return max(1, int(timeout_ms / 1000))
 
 
 # ── 数据访问 ──────────────────────────────────────────────────
@@ -519,7 +665,7 @@ def _extract_sql_error(e: Exception, engine: str) -> DbError:
 
 
 def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync"):
-    """解析/校验 SQL,返回 (ds, clean_sql, is_select, limit, q_timeout, start)。
+    """解析/校验 SQL,返回 (ds, clean_sql, is_select, q_timeout, start)。
     供 fetch(同步)与 DbJobManager(异步,需持有连接才能取消)共用。"""
     ds = get_datasource(db)
     clean_sql = sql.strip()
@@ -544,9 +690,9 @@ def _prepare_query(sql: str, db: str, timeout_ms: Optional[int] = None, source: 
         ):
             is_select = False
     # 读写限制已全部收口到门户网关侧(db-proxy 不做库表白名单/只读/多语句拦截)
-    limit = enforce_limit(clean_sql)
-    q_timeout = int(timeout_ms / 1000) if timeout_ms else QUERY_TIMEOUT
-    return ds, clean_sql, is_select, limit, q_timeout, time.time()
+    # 行数限制不在此处计算:需要连接才能确定 Oracle 11g/12c 的限行语法(见 _execute_query)
+    q_timeout = _bounded_timeout_seconds(timeout_ms)
+    return ds, clean_sql, is_select, q_timeout, time.time()
 
 
 def _execute_query(
@@ -554,57 +700,95 @@ def _execute_query(
     conn: Any,
     clean_sql: str,
     is_select: bool,
-    limit: int,
     start: float,
     job_logs: Optional[List[str]] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """在已建立的连接上执行(连接由调用方管理,以便异步 job 取消时 close 中断)。"""
+    """在已建立的连接上执行(连接由调用方管理,便于异步 job 真实取消)。
+
+    state 为异步 job 的运行态字典:执行期间登记 cursor / 线程号 / Oracle 会话号,
+    取消时据此在数据库侧终止语句(而不是只关本地连接)。
+    """
     if is_select:
-        # 画布 SQL 不变;仅 SELECT/WITH 在服务端隐式限行。特殊查询命令保持原文,
-        # 结果读取仍有上限,避免将特殊语法拼接成非法 LIMIT。
+        # 画布 SQL 不变;仅 SELECT/WITH 在服务端隐式限行(默认 1000,硬上限 500000)。
+        # SHOW/DESC/EXPLAIN 等特殊命令保持原文,结果读取仍受 limit 约束。
         row_mode = ds.effective_row_limit(conn)
-        if SELECT_ONLY_RE.match(clean_sql) and not LIMIT_RE.search(clean_sql):
-            clean_sql = append_row_limit(clean_sql, limit, row_mode)
+        plan = plan_row_limit(clean_sql, mode=row_mode,
+                              default_limit=DEFAULT_LIMIT, max_limit=MAX_LIMIT)
+        clean_sql = plan.sql
+        limit = plan.limit
         cur = conn.cursor()
-        if ds.type == "impala" and job_logs is not None:
-            job_logs.append("【Impala 进度】已提交 SQL，正在等待 Impala 执行完成。")
-        cur.execute(clean_sql)
-        if ds.type == "impala" and job_logs is not None:
-            job_logs.append("【Impala 进度】SQL 执行完成，正在读取查询结果。")
-        if ds.type == "mysql":
-            rows = cur.fetchmany(limit + 1)  # DictCursor → list[dict]
-            truncated = len(rows) > limit
-            rows = rows[:limit]
-            columns = list(rows[0].keys()) if rows else []
-        else:
+        _publish_cursor(ds, conn, cur, state)
+        try:
+            if ds.type == "impala" and job_logs is not None:
+                job_logs.append("【Impala 进度】已提交 SQL，正在等待 Impala 执行完成。")
+            cur.execute(clean_sql)
+            if ds.type == "impala" and job_logs is not None:
+                job_logs.append("【Impala 进度】SQL 执行完成，正在读取查询结果。")
             fetched = cur.fetchmany(limit + 1)
-            truncated = len(fetched) > limit
+            truncated = len(fetched) > limit or (plan.clamped and len(fetched) >= limit)
             description = list(cur.description or [])
-            columns = [str(d[0]).lower() for d in description]
-            rows = _rows_to_dicts(fetched[:limit], description)
+            if ds.type == "mysql":
+                # DictCursor → list[dict];列名从 description 取,空结果集也能保留表头
+                columns = [str(d[0]).lower() for d in description]
+                rows = [dict(row) for row in fetched[:limit]]
+            else:
+                columns = [str(d[0]).lower() for d in description]
+                rows = _rows_to_dicts(fetched[:limit], description)
             if ds.type == "impala" and job_logs is not None:
                 job_logs.append("【Impala 进度】结果读取完成：%d 行、%d 列。" % (len(rows), len(columns)))
-        cur.close()
+        finally:
+            _publish_cursor(ds, conn, None, state)
+            try:
+                cur.close()
+            except Exception:
+                pass
         return {
             "columns": columns,
             "rows": rows,
             "costMs": int((time.time() - start) * 1000),
             "truncated": truncated,
+            "limit": limit,
+            "limited": plan.rewritten,
         }
     # 写语句(INSERT/UPDATE/DELETE):执行并返回受影响行数
     # 注意:pymysql 的 execute() 返回受影响行数,但 python-oracledb 返回 None,
     # 统一用 cursor.rowcount(commit 前有效,此处顺序正确),修复 Oracle 审计 affected 恒 null。
     cur = conn.cursor()
-    cur.execute(clean_sql)
-    affected = cur.rowcount
-    conn.commit()
-    cur.close()
+    _publish_cursor(ds, conn, cur, state)
+    try:
+        cur.execute(clean_sql)
+        affected = cur.rowcount
+        conn.commit()
+    finally:
+        _publish_cursor(ds, conn, None, state)
+        try:
+            cur.close()
+        except Exception:
+            pass
     return {
         "columns": ["affected_rows"],
         "rows": [{"affected_rows": affected}],
         "costMs": int((time.time() - start) * 1000),
         "truncated": False,
     }
+
+
+def _publish_cursor(ds: Any, conn: Any, cursor, state: Optional[Dict[str, Any]]) -> None:
+    """把执行中的 cursor 与取消所需的会话标识登记到异步 job 状态里。"""
+    if state is None:
+        return
+    if cursor is None:
+        state["cursor"] = None
+        return
+    state["cursor"] = cursor
+    try:
+        if ds.type == "mysql":
+            state["thread_id"] = _query_thread_id(conn)
+        elif ds.type == "oracle":
+            state["session_ids"] = _oracle_session_ids(conn)
+    except Exception:
+        pass
 
 
 def _impala_read_only(sql: str) -> bool:
@@ -624,10 +808,10 @@ def _execute_database(
     conn: Any,
     clean_sql: str,
     is_select: bool,
-    limit: int,
     start: float,
     job_logs: Optional[List[str]] = None,
     query_timeout: Optional[int] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """执行数据库语句,并为 Impala 增加类型检查、AI 修复与结构化日志。"""
     logs: List[str] = job_logs if job_logs is not None else []
@@ -663,7 +847,7 @@ def _execute_database(
         try:
             if ds.type == "impala":
                 logs.append("【Impala 进度】类型校验完成，准备提交 SQL。")
-            result = _execute_query(ds, conn, run_sql, is_select, limit, start, logs)
+            result = _execute_query(ds, conn, run_sql, is_select, start, logs, state)
             if ds.type == "impala":
                 logs.append("【执行成功】耗时 %s 毫秒。" % result.get("costMs", 0))
                 result["engine"] = "impala"
@@ -747,7 +931,7 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
     timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。
     写语句执行(成功/失败/连接失败)后追加一条审计日志(source='sync'|'async')。"""
-    ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(
+    ds, clean_sql, is_select, q_timeout, start = _prepare_query(
         sql, db, timeout_ms, source=source
     )
     try:
@@ -760,7 +944,7 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
             _write_audit(db, ds.type, clean_sql, None, (time.time() - start) * 1000, source)
         raise DbError(ds.type, de.error_type, de.error_code, f"connect failed: {de.message}", de.logs)
     try:
-        result = _execute_database(ds, conn, clean_sql, is_select, limit, start, query_timeout=q_timeout)
+        result = _execute_database(ds, conn, clean_sql, is_select, start, query_timeout=q_timeout)
         if not is_select:
             affected = (
                 result["rows"][0].get("affected_rows") if result.get("rows") else None
@@ -802,37 +986,41 @@ def dbs(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
 
 
 class DbJobManager:
-    """通用数据库异步任务(mysql/oracle):提交即返回 jobId,后台线程执行。
+    """通用数据库异步任务(mysql/oracle/impala):提交即返回 jobId,后台线程执行。
 
     动机:公司网关固定 60s 读超时,mysql/oracle 慢查询/大查询同步挂起
     会被掐断 504;异步化后提交/查状态/取消均为秒级往返。
-    前端体验保持不变:持续 loading,直到完成/失败/手动停止。
+    取消是**真实取消**:MySQL/Doris 用 KILL QUERY、Oracle 用 Connection.cancel 或
+    KILL SESSION、Impala 用 CancelOperation;都失败才退化为关闭连接。
     """
 
     def __init__(self, max_jobs: int = 200, ttl: int = 3600) -> None:
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
-        self._seq = 0
         self._max_jobs = max_jobs
         self._ttl = ttl
 
-    def submit(self, db: str, sql: str, timeout_ms: int = 3600000) -> str:
+    def submit(self, db: str, sql: str, timeout_ms: int = 3600000,
+               owner: Optional[str] = None) -> str:
+        # 数据源在提交阶段就解析:未知 db 立刻 404,而不是等后台线程失败
+        ds = get_datasource(db)
         # 与同步 /query 共享并发信号量 + QPS 限制,防止异步 job 无限并发打爆数据库连接
         if not _query_semaphore.acquire(blocking=False):
             raise HTTPException(
                 status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
             )
-        _check_qps()
         try:
+            _check_qps()
+            job_id = "dbj_%s" % uuid.uuid4().hex
             with self._lock:
-                self._seq += 1
-                job_id = "dbj_%d_%04d" % (int(time.time()), self._seq)
                 self._jobs[job_id] = {
                     "id": job_id, "state": "queued", "db": db, "sql": sql,
                     "timeout_ms": timeout_ms, "created_at": time.time(),
                     "started_at": None, "finished_at": None,
                     "result": None, "error": None, "logs": [], "executed_sql": None,
-                    "conn": None, "cancel_requested": False,
+                    "conn": None, "cursor": None, "thread_id": None,
+                    "session_ids": None, "ds": ds, "owner": owner,
+                    "cancel_requested": False, "cancel_method": None,
                 }
             threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
             return job_id
@@ -847,8 +1035,12 @@ class DbJobManager:
             # 无论成功/失败/取消,释放并发信号量(submit 已 acquire)
             _query_semaphore.release()
 
+    def _job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
     def _run_inner(self, job_id: str) -> None:
-        j = self._jobs.get(job_id)
+        j = self._job(job_id)
         if not j:
             return
         if j.get("cancel_requested"):  # 提交后未开始即被取消
@@ -858,23 +1050,27 @@ class DbJobManager:
         j["state"] = "running"
         j["started_at"] = time.time()
         conn = None
-        ds = None
+        ds = j.get("ds")
         clean_sql = ""
         is_select = False
         start = time.time()
         try:
             # 异步 job 用更长查询超时(默认 1 小时,可配置),不再受网关 60s 限制
-            ds, clean_sql, is_select, limit, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"], source="async")
+            ds, clean_sql, is_select, q_timeout, start = _prepare_query(j["sql"], j["db"], j["timeout_ms"], source="async")
+            j["ds"] = ds
             if ds.type == "impala":
                 j["logs"].append("【Impala 进度】任务已启动，正在连接数据源。")
             conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
-            j["conn"] = conn  # 持有连接:取消时 close 中断底层查询(真停止)
+            j["conn"] = conn  # 持有连接:取消时先杀语句再关连接
             if ds.type == "impala":
                 j["logs"].append("【Impala 进度】数据源连接成功，开始 SQL 类型校验。")
             try:
-                result = _execute_database(ds, conn, clean_sql, is_select, limit, start, j["logs"], q_timeout)
+                result = _execute_database(
+                    ds, conn, clean_sql, is_select, start, j["logs"], q_timeout, j
+                )
             finally:
                 j["conn"] = None
+                j["cursor"] = None
                 try:
                     conn.close()
                 except Exception:
@@ -886,13 +1082,15 @@ class DbJobManager:
                 )
                 _write_audit(j["db"], ds.type, clean_sql, affected, result["costMs"], "async")
             j["result"] = result
-            j["logs"] = result.get("logs", [])
+            j["logs"] = result.get("logs", []) or j["logs"]
             j["executed_sql"] = result.get("executedSql")
             j["state"] = "done"
         except Exception as e:
-            if j.get("cancel_requested") or (conn is not None and str(e).find("closed") >= 0):
-                # 取消导致连接关闭抛异常 → 视为用户主动停止
+            if j.get("cancel_requested"):
+                # 用户主动停止:数据库侧语句已被 KILL/取消,记为 cancelled 而非 failed
                 j["state"] = "cancelled"
+                if j.get("cancel_method"):
+                    j["logs"].append("【已停止】取消方式：%s。" % j["cancel_method"])
             else:
                 # 写语句执行失败也审计(仅当 _prepare_query 已通过,避免 readOnly 等前置拦截重复记录)
                 if not is_select and clean_sql and ds is not None:
@@ -905,32 +1103,55 @@ class DbJobManager:
             j["finished_at"] = time.time()
             self._gc()
 
-    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+    def get(self, job_id: str, owner: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._lock:
             j = self._jobs.get(job_id)
             if not j:
+                return None
+            if owner is not None and j.get("owner") not in (None, owner):
                 return None
             return {
                 "id": j["id"], "state": j["state"], "db": j["db"], "sql": j["sql"][:500],
                 "createdAt": j["created_at"], "startedAt": j["started_at"],
                 "finishedAt": j["finished_at"], "result": j["result"], "error": j["error"],
                 "logs": list(j.get("logs") or []), "executedSql": j.get("executed_sql"),
+                "cancelMethod": j.get("cancel_method"),
             }
 
-    def cancel(self, job_id: str) -> bool:
-        """取消 queued/running 的 job:标记 cancelled 并关闭底层连接中断查询(真停止)。
+    def cancel(self, job_id: str, owner: Optional[str] = None) -> bool:
+        """取消 queued/running 的 job:**在数据库侧终止语句**,再关连接兜底。
 
-        pymysql/oracledb 连接可在其他线程 close,执行线程的 read/execute 会抛异常,
-        _run 捕获后判定为 cancelled(用户主动停止),而非 failed。"""
+        顺序:标记 cancel_requested → ds.cancel_query(KILL QUERY / Connection.cancel /
+        KILL SESSION / CancelOperation)→ 关闭连接。执行线程的 execute/fetch 会立即抛错,
+        _run_inner 据此判定为 cancelled(用户主动停止),而非 failed。
+        """
         with self._lock:
             j = self._jobs.get(job_id)
             if not j or j["state"] not in ("queued", "running"):
                 return False
+            if owner is not None and j.get("owner") not in (None, owner):
+                return False
             j["cancel_requested"] = True
             conn = j.get("conn")
+            cursor = j.get("cursor")
+            thread_id = j.get("thread_id")
+            session_ids = j.get("session_ids")
+            ds = j.get("ds")
+        method = "close"
+        if ds is not None and conn is not None:
+            try:
+                method = ds.cancel_query(
+                    conn, cursor=cursor, thread_id=thread_id, session_ids=session_ids
+                )
+            except Exception as exc:
+                _cancel_log("cancel_query failed for %s: %s" % (job_id, exc))
+        with self._lock:
+            j["cancel_method"] = method
+            j["logs"].append("【停止中】已请求终止数据库侧语句（%s）。" % method)
+        # 语句已在数据库侧终止(或已降级),关闭连接释放会话资源
         if conn is not None:
             try:
-                conn.close()  # 中断正在执行的查询
+                conn.close()
             except Exception:
                 pass
         return True
@@ -1033,6 +1254,12 @@ def db_job_submit(
     require_auth(x_db_token)
     if not req.sql or not req.sql.strip():
         raise HTTPException(status_code=400, detail="sql is required")
+    # 与同步 /query 同一护栏:异步入口不能绕过 SQL 长度上限
+    if len(req.sql) > MAX_SQL_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
+        )
     timeout_ms = req.timeoutMs or 3600000
     job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms)
     log.info("db job submitted: %s db=%s", job_id, req.db)
@@ -1153,19 +1380,88 @@ def spark_logs(
     return {"code": 0, "data": engine.read_logs({"jvm": jvm, "audit": audit})}
 
 
+# ── 通用 TTL 缓存(线程安全 + 容量上限 + 同 key 只加载一次,防惊群)──────────
+class TtlCache:
+    """小型 TTL 缓存:进程内 dict,按 key 去重加载,过期惰性淘汰,超上限删最旧。"""
+
+    def __init__(self, ttl: float, max_entries: int = 256, name: str = "cache") -> None:
+        self._ttl = float(ttl)
+        self._max = max(1, int(max_entries))
+        self._name = name
+        self._data: Dict[str, Tuple[float, Any]] = {}
+        self._pending: Dict[str, threading.Event] = {}
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+    def _fresh(self, key: str) -> Tuple[bool, Any]:
+        hit = self._data.get(key)
+        if hit and time.time() - hit[0] < self._ttl:
+            return True, hit[1]
+        return False, None
+
+    def get(self, key: str) -> Any:
+        with self._lock:
+            fresh, value = self._fresh(key)
+        return value if fresh else None
+
+    def put(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._data[key] = (time.time(), value)
+            self._prune_locked()
+
+    def _prune_locked(self) -> None:
+        if len(self._data) <= self._max:
+            return
+        now = time.time()
+        for key in [k for k, v in self._data.items() if now - v[0] >= self._ttl]:
+            self._data.pop(key, None)
+        if len(self._data) <= self._max:
+            return
+        overflow = len(self._data) - self._max
+        for key, _ in sorted(self._data.items(), key=lambda kv: kv[1][0])[:overflow]:
+            self._data.pop(key, None)
+
+    def get_or_load(self, key: str, loader):
+        """返回缓存值;未命中时加载。同 key 并发请求只会打一次下游。"""
+        with self._lock:
+            fresh, value = self._fresh(key)
+            if fresh:
+                return value
+            waiter = self._pending.get(key)
+            owner = waiter is None
+            if owner:
+                waiter = threading.Event()
+                self._pending[key] = waiter
+        if not owner:
+            waiter.wait(timeout=120)
+            with self._lock:
+                fresh, value = self._fresh(key)
+            if fresh:
+                return value
+            # 前一个加载失败/超时:自行加载(不重复登记 pending)
+            return loader()
+        try:
+            value = loader()
+        finally:
+            with self._lock:
+                self._pending.pop(key, None)
+            waiter.set()
+        with self._lock:
+            self._data[key] = (time.time(), value)
+            self._prune_locked()
+        return value
+
+
 # ── Spark 元数据(表结构树/补全:库→表→字段;只读 SHOW/DESC,TTL 缓存防重复打集群)──
-_SPARK_SCHEMA_CACHE: Dict[str, Tuple[float, list]] = {}
 _SPARK_SCHEMA_TTL = 300.0  # 5 分钟
+_SPARK_SCHEMA_CACHE = TtlCache(_SPARK_SCHEMA_TTL, max_entries=256, name="spark-schema")
 
 
 def _spark_schema_cached(key: str, loader) -> list:
-    now = time.time()
-    hit = _SPARK_SCHEMA_CACHE.get(key)
-    if hit and now - hit[0] < _SPARK_SCHEMA_TTL:
-        return hit[1]
-    val = loader()
-    _SPARK_SCHEMA_CACHE[key] = (now, val)
-    return val
+    return _SPARK_SCHEMA_CACHE.get_or_load(key, loader)
 
 
 def _spark_meta_one_col(sql: str, engine) -> list:
@@ -1246,8 +1542,8 @@ def spark_schema_fields(
 
 # ── 跨库表搜索(库表搜索:mysql 走 information_schema、oracle 走 all_tables;按 (type,host,port) 去重,
 #    每实例一条查询;结果 TTL 30s 缓存;Spark 表不做跨库搜索(逐库 SHOW TABLES 集群负载重,展开树即可) ──
-_SEARCH_CACHE: Dict[str, Tuple[float, list]] = {}
 _SEARCH_TTL = 30.0
+_SEARCH_CACHE = TtlCache(_SEARCH_TTL, max_entries=128, name="table-search")
 _SEARCH_LIMIT = 200  # 每实例返回上限
 _SEARCH_TOTAL = 300  # 整体截断
 
@@ -1261,10 +1557,11 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
     if len(kw) > 64:
         raise HTTPException(status_code=400, detail="keyword too long")
     key = f"st:{kw}"
-    hit = _SEARCH_CACHE.get(key)
-    if hit and time.time() - hit[0] < _SEARCH_TTL:
-        return {"code": 0, "data": hit[1]}
+    cached = _SEARCH_CACHE.get(key)
+    if cached is not None:
+        return {"code": 0, "data": cached}
     out: list = []
+    success_count = 0
     seen: set = set()
     for ds in DATASOURCES.values():
         ent = (ds.type, ds.host, ds.port, ds.service if ds.type == "impala" else "")
@@ -1303,11 +1600,14 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
                                 break
             finally:
                 conn.close()
+            success_count += 1
         except Exception:
             # 单实例失败(连接失败/无 information_schema 权限等)静默,不影响其他实例
             log.warning("search tables failed for %s(%s:%s)", ds.type, ds.host, ds.port)
     out = out[:_SEARCH_TOTAL]
-    _SEARCH_CACHE[key] = (time.time(), out)
+    # 全部实例都失败时不写缓存,避免把"连不上"当成"没有表"固化 30s
+    if out or success_count:
+        _SEARCH_CACHE.put(key, out)
     return {"code": 0, "data": out}
 
 
@@ -1865,9 +2165,12 @@ def scripts_new(
     name = _validate_name(req.name)
     tree = _load_tree()
     my = tree["my"]
-    parent = _find_node(my, req.parentId)[0] if req.parentId else None
-    if req.parentId and (not parent or parent.get("type") != "dir"):
-        raise HTTPException(status_code=404, detail="父目录不存在")
+    parent = None
+    if req.parentId:
+        found = _find_node(my, req.parentId)
+        if not found or found[0].get("type") != "dir":
+            raise HTTPException(status_code=404, detail="父目录不存在")
+        parent = found[0]
     node = {"id": uuid.uuid4().hex[:12], "name": name, "type": req.kind}
     if req.kind == "dir":
         node["children"] = []
@@ -1986,7 +2289,7 @@ def tables(
         if cached_tables is not None:
             items = [{"name": name, "comment": ""} for name in cached_tables]
             return {"code": 0, "data": items if detail else [item["name"] for item in items]}
-    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
+    q_timeout = _bounded_timeout_seconds(timeoutMs)
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -2047,7 +2350,7 @@ def fields(
                 for name, typ in cached_columns.items()
             ]
             return {"code": 0, "data": cols}
-    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
+    q_timeout = _bounded_timeout_seconds(timeoutMs)
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -2133,7 +2436,7 @@ def ddl(
     if not _TABLE_NAME_RE.match(table or ""):
         raise HTTPException(status_code=400, detail="非法表名")
     ds = get_datasource(db)
-    q_timeout = int(timeoutMs / 1000) if timeoutMs else QUERY_TIMEOUT
+    q_timeout = _bounded_timeout_seconds(timeoutMs)
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -2212,7 +2515,7 @@ def schema(
                     "code": 0,
                     "data": {"tables": tables, "truncated": len(IMPALA_SCHEMA_CACHE.get_tables(cache_namespace, ds.service) or []) > SCHEMA_MAX_TABLES, "engine": ds.type},
                 }
-    q_timeout = max(1, int(timeoutMs / 1000)) if timeoutMs else QUERY_TIMEOUT
+    q_timeout = _bounded_timeout_seconds(timeoutMs)
     try:
         conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
     except Exception as e:
@@ -2513,7 +2816,7 @@ def explain(
     # _prepare_query 仅保留资源护栏(行数/长度/超时),不做读写限制拦截(已收口网关侧);
     # EXPLAIN 只读,非 SELECT 一律 400
     # (MySQL 5.x 的 EXPLAIN 对 DML 会实际执行,必须在此挡住)。
-    ds, clean, is_select, _limit, q_timeout, _start = _prepare_query(raw, req.db)
+    ds, clean, is_select, q_timeout, _start = _prepare_query(raw, req.db)
     if not is_select:
         raise HTTPException(status_code=400, detail="explain only supports read-only SQL")
     try:
@@ -2527,10 +2830,10 @@ def explain(
                 # EXPLAIN FORMAT=JSON:老版本 MySQL 不支持会语法报错 → 回退普通 EXPLAIN
                 cur.execute("EXPLAIN FORMAT=JSON " + clean)
                 row = cur.fetchone()
-                raw = None
+                payload = None
                 if row:
-                    raw = next(iter(row.values())) if hasattr(row, "items") else row[0]
-                data = json.loads(raw) if isinstance(raw, str) else raw
+                    payload = next(iter(row.values())) if hasattr(row, "items") else row[0]
+                data = json.loads(payload) if isinstance(payload, str) else payload
                 if not isinstance(data, dict):
                     raise ValueError("unexpected explain json shape")
                 root = _build_explain_tree(data)

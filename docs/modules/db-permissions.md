@@ -16,7 +16,7 @@
 
 ## 存储
 
-`server/data/db-permissions.json`（不存在时视为无规则，**不拦截**）：```json
+`server/data/db-permissions.json`（**仅文件不存在(ENOENT)**时视为无规则、不拦截；其他读取失败按损坏处理 fail-closed）：```json
 {
   "version": 2,
   "userRules": [ { "user": "alice", "engineRules": [ { "engine": "*", "db": "*", "tables": null, "read": true, "write": false } ], "spark": { "read": true, "write": true }, "flink": { "enabled": true } } ],
@@ -29,7 +29,13 @@
 - 匹配规则：**先查 userRules（精确用户名），命中即用（覆盖角色规则，不再回退）**；未命中再用 roleRules（该用户的角色）。**匹配规则后**，若请求的 db 不在其 dbs/engineRules → 403。
 - **defaultDeny 开关**（2026-08）：规则文件 `"defaultDeny": true` 时，**未配置任何规则的用户/角色一律拒绝**（DB/Spark/Flink 403、ACL 下拉为空）；false/缺省则无规则放行（仅受全局白名单兜底）。管理页头部可切换（开启有确认弹窗）。
 - 未配置任何规则 / 用户与角色均无规则 → 按 defaultDeny 决定放行或拒绝；admin 一律放行。
-- **规则文件损坏（JSON 解析失败）→ fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。
+- **规则文件损坏（JSON 解析失败 / 非 ENOENT 的读取失败）/ 结构非法 → fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。2026-11 前 EACCES/EISDIR 等读取异常会被当成"无规则"而放行所有人。
+- **表级白名单 fail-closed（2026-11）**：规则的 `tables` 为数组时，SQL 表引用提取失败（`extractTables` 返回 `null`，如 `FROM (--c ...)` 这类无法可靠识别）→ 403，不再像以前那样把 `[]` 当"没有表引用"跳过校验。
+- **引擎未知 fail-closed（2026-11）**：`dbEngine()` 未命中数据源映射时返回 `null`；命中规则但引擎未知 → 403（此前退化为"任意引擎规则都匹配"）。网关会先惰性拉 `/api/db/acl` 建映射，仍失败则拒绝受限用户（admin 不受影响）。
+- **元数据接口与表级规则（2026-11）**：配置 `tables` 白名单的用户调用 `/api/db/tables`、`/api/db/schema`（整库枚举）直接 403；`/fields`、`/ddl` 带 `table` 时按该表校验，缺 `table` 时 fail-closed；`/explain` 对所有用户做表级校验。
+- **`/api/db/dbs`（2026-11）**：改为网关侧代理并按权限过滤（普通用户 `allowedDbsFor`、API Token 按 `apiTokenAllowsDatabase`、admin 全量），不再透传 db-proxy 的全量数据源名。
+- **Flink 读写分离（2026-11）**：`flink` 规则支持显式 `read`/`write`；写 SQL（多语句脚本中任一条写也算）需 `write` 权限，`writeUnlocked`/`X-Spark-Write` 只在判定为写时置位。旧规则仅 `{enabled:true}` 视为读写均开放（兼容）。
+- **异步任务归属（2026-11）**：`/api/db/jobs/:id`、`/api/spark/jobs/:id`、`/api/flink/async/:id`、`/api/flink/prejob/jobs/:id` 的查询/取消/日志要求提交者是当前用户（admin 放行），API Token 只能访问自己提交的任务（见 `server/utils/job-ownership.js`，TTL 2h）。
 - **admin 角色一律放行**（管理特权，规则只约束 dev/viewer）。
 
 ## 校验点（网关 `server/middleware/exec-gate.js` + 各 `server/routes/*.js` / `db-permissions.js`）
@@ -42,7 +48,10 @@
 | `POST /api/db/jobs`（提交） | body | 路由内显式调用（GET 状态查询放行） |
 | `POST /api/db/explain` | body | 路由内显式调用 |
 | `GET /api/db/tables`、`/fields`、`/ddl`、`/schema` | query | `app.use('/api/db', ...)` 前置中间件（仅处理 GET+query.db，其余 next） |
-| `GET /api/db/search/tables` | query.keyword | 返回结果按当前用户允许的数据库过滤 |
+| `GET /api/db/search/tables` | query.keyword | 返回结果按当前用户允许的数据库过滤（表级白名单下的表名泄露仍属已知限制） |
+| `GET /api/db/dbs` | — | 网关代理 + 按 `allowedDbsFor`/Token 规则过滤 |
+| `GET /api/spark/schema/*`、`/api/spark/{logs,status,stages}` | — | 统一 `checkSparkAccess` 读校验（2026-11 前部分接口无校验） |
+| `/api/flink/{status,connectors,jobs,prejob/*}` | — | 统一 `checkFlinkAccess` 读校验 |
 
 Spark/Flink 常规权限继续使用各自规则；Spark 可选 `writeDbs: string[]` 限制写入目标库。字段缺省保持旧规则行为（有写权限即不限制库），显式空数组表示禁止 Spark 写库。
 

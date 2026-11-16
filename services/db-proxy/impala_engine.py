@@ -13,6 +13,7 @@ import logging
 import os
 import random
 import re
+import time
 import tempfile
 import threading
 import urllib.request
@@ -84,29 +85,48 @@ class AiConfig:
 
 
 class ImpalaSchemaCache:
-    """Small persistent cache for Impala table names and column types."""
+    """Small persistent cache for Impala table names and column types.
 
-    VERSION = 1
+    Entries carry their own timestamp: ``ttl_seconds`` > 0 makes them expire, and
+    refreshing a database's table list prunes columns of tables that disappeared.
+    """
 
-    def __init__(self, path: str) -> None:
+    VERSION = 2
+
+    def __init__(self, path: str, ttl_seconds: float = 0) -> None:
         self.path = path
+        self._ttl = max(0.0, float(ttl_seconds or 0))
         self._lock = threading.RLock()
-        self._tables: Dict[str, List[str]] = {}
+        self._tables: Dict[str, Dict[str, str]] = {}
+        self._table_ts: Dict[str, float] = {}
         self._databases: Dict[str, List[str]] = {}
+        self._database_ts: Dict[str, float] = {}
         self._load()
 
     @staticmethod
     def _key(*parts: str) -> str:
         return json.dumps([str(x or "").strip().lower() for x in parts], ensure_ascii=False)
 
+    def _expired(self, ts: float) -> bool:
+        return bool(self._ttl) and (time.time() - float(ts or 0)) > self._ttl
+
     def _load(self) -> None:
+        now = time.time()
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if data.get("version") != self.VERSION:
+            version = data.get("version")
+            if version not in (1, self.VERSION):
                 return
-            self._tables = data.get("tables", {}) if isinstance(data.get("tables"), dict) else {}
-            self._databases = data.get("databases", {}) if isinstance(data.get("databases"), dict) else {}
+            tables = data.get("tables", {}) if isinstance(data.get("tables"), dict) else {}
+            databases = data.get("databases", {}) if isinstance(data.get("databases"), dict) else {}
+            table_ts = data.get("tableTimestamps", {}) if isinstance(data.get("tableTimestamps"), dict) else {}
+            database_ts = data.get("databaseTimestamps", {}) if isinstance(data.get("databaseTimestamps"), dict) else {}
+            self._tables = {k: v for k, v in tables.items() if isinstance(v, dict)}
+            self._databases = {k: v for k, v in databases.items() if isinstance(v, list)}
+            # v1 缓存没有时间戳:按"刚加载"处理,避免升级后立刻全量冷启动
+            self._table_ts = {k: float(table_ts.get(k, now)) for k in self._tables}
+            self._database_ts = {k: float(database_ts.get(k, now)) for k in self._databases}
         except FileNotFoundError:
             return
         except Exception as exc:
@@ -124,7 +144,13 @@ class ImpalaSchemaCache:
             ) as f:
                 temp_path = f.name
                 json.dump(
-                    {"version": self.VERSION, "tables": self._tables, "databases": self._databases},
+                    {
+                        "version": self.VERSION,
+                        "tables": self._tables,
+                        "databases": self._databases,
+                        "tableTimestamps": self._table_ts,
+                        "databaseTimestamps": self._database_ts,
+                    },
                     f,
                     ensure_ascii=False,
                     separators=(",", ":"),
@@ -140,7 +166,11 @@ class ImpalaSchemaCache:
         key = self._key(datasource, db, table)
         with self._lock:
             value = self._tables.get(key)
-            return dict(value) if isinstance(value, dict) else None
+            if not isinstance(value, dict):
+                return None
+            if self._expired(self._table_ts.get(key, 0)):
+                return None
+            return dict(value)
 
     def put_table(self, datasource: str, db: str, table: str, columns: Dict[str, str]) -> None:
         key = self._key(datasource, db, table)
@@ -149,27 +179,65 @@ class ImpalaSchemaCache:
             return
         with self._lock:
             self._tables[key] = normalized
+            self._table_ts[key] = time.time()
             self._save()
 
     def put_schema(self, datasource: str, db: str, schema: Dict[str, Dict[str, str]]) -> None:
+        now = time.time()
         with self._lock:
             for table, columns in schema.items():
                 normalized = {str(name): str(typ) for name, typ in columns.items() if name and typ}
                 if normalized:
-                    self._tables[self._key(datasource, db, table)] = normalized
+                    key = self._key(datasource, db, table)
+                    self._tables[key] = normalized
+                    self._table_ts[key] = now
             self._save()
 
     def get_tables(self, datasource: str, db: str) -> Optional[List[str]]:
         key = self._key(datasource, db)
         with self._lock:
             value = self._databases.get(key)
-            return list(value) if isinstance(value, list) else None
+            if not isinstance(value, list):
+                return None
+            if self._expired(self._database_ts.get(key, 0)):
+                return None
+            return list(value)
+
+    def _prune_tables_locked(self, datasource: str, db: str, keep: List[str]) -> int:
+        """Drop cached columns for tables that no longer exist in this database."""
+        keep_keys = {self._key(datasource, db, name) for name in keep}
+        dropped = 0
+        for key in list(self._tables):
+            try:
+                parts = json.loads(key)
+            except Exception:
+                continue
+            if (
+                isinstance(parts, list)
+                and len(parts) == 3
+                and parts[0] == str(datasource or "").strip().lower()
+                and parts[1] == str(db or "").strip().lower()
+                and key not in keep_keys
+            ):
+                self._tables.pop(key, None)
+                self._table_ts.pop(key, None)
+                dropped += 1
+        return dropped
 
     def put_tables(self, datasource: str, db: str, tables: List[str]) -> None:
         key = self._key(datasource, db)
+        normalized = list(dict.fromkeys(str(x) for x in tables if x))
         with self._lock:
-            self._databases[key] = list(dict.fromkeys(str(x) for x in tables if x))
+            self._databases[key] = normalized
+            self._database_ts[key] = time.time()
+            dropped = self._prune_tables_locked(datasource, db, normalized)
             self._save()
+        if dropped:
+            log.info(
+                "impala schema cache: pruned %d stale table(s) for %s/%s",
+                dropped, datasource[:8], db,
+            )
+
 
 def _bool(value: Any, default: bool = False) -> bool:
     if value is None:

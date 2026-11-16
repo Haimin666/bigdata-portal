@@ -25,15 +25,26 @@ function ensureScripts() {
   fs.mkdirSync(FILES_DIR, { recursive: true })
 }
 
-/** 读原始 tree.json,自动迁移旧格式({my:[]} → 按用户分桶) */
+/** tree.json 损坏时抛错(不得用空树覆盖):否则一次读取失败就会把所有人的目录清空。 */
+function corruptedTreeError(reason) {
+  const err = new Error(`脚本目录数据损坏(tree.json 无法解析),已拒绝写入以免覆盖: ${reason}`)
+  err.status = 500
+  return err
+}
+
+/** 读原始 tree.json,自动迁移旧格式({my:[]} → 按用户分桶)。 */
 function loadRawTree() {
   ensureScripts()
   if (!fs.existsSync(TREE_FILE)) return { users: {} }
   let raw
   try {
     raw = JSON.parse(fs.readFileSync(TREE_FILE, 'utf-8'))
-  } catch {
-    return { users: {} }
+  } catch (e) {
+    throw corruptedTreeError(e instanceof Error ? e.message : String(e))
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw corruptedTreeError('顶层不是对象')
+  if (raw.users != null && (typeof raw.users !== 'object' || Array.isArray(raw.users))) {
+    throw corruptedTreeError('users 字段不是对象')
   }
   if (raw.users) return raw
   // 旧格式迁移:整棵树归给首个管理员(admin);无管理员信息时放 shared 由 admin 认领
@@ -45,16 +56,29 @@ function loadRawTree() {
   return migrated
 }
 
+/** 原子写:.tmp + renameSync,避免进程中断留下半截 JSON(下次解析失败会触发只读保护)。 */
 function saveTree(tree) {
   ensureScripts()
-  fs.writeFileSync(TREE_FILE, JSON.stringify(tree, null, 2), 'utf-8')
+  const tmp = `${TREE_FILE}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(tree, null, 2), 'utf-8')
+    fs.renameSync(tmp, TREE_FILE)
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      /* 忽略清理失败 */
+    }
+    throw e
+  }
 }
 
 /**
  * 解析当前请求可见的树视图。
- * 返回 { ownerKey, nodes, canWriteShared }:nodes 固定为双根——
- * 「我的文件夹」(用户自己桶)+「共享文件夹」(__shared__ 公共桶);
- * 共享桶所有人可读可写(2026-08 起:共享内容全员协作,不再限 admin)。
+ * 返回 { tree, ownerKey, nodes }:nodes 固定为双根——
+ * 「我的文件夹」(用户自己桶)+「共享文件夹」(__shared__ 公共桶)。
+ * 共享桶按产品语义「所有人可读可写」(2026-08),因此不再有 canWriteShared
+ * 之类的只读校验(历史上恒为 true 的死代码已删除)。
  */
 function resolveView(req) {
   const user = req.user || {}
@@ -74,39 +98,23 @@ function resolveView(req) {
       children: tree.users[SHARED_KEY].my
     }
   ]
-  return { tree, ownerKey: username, nodes, canWriteShared: true }
+  return { tree, ownerKey: username, nodes }
 }
 
 /**
- * 把前端传来的 parentId 解析为真实写入的目标容器列表。
- * - null            → 当前用户自己桶的根(admin 也落自己名下,不污染共享空间)
- * - '__shared_root' → 共享空间桶根(仅 admin 视角存在)
- * - 普通目录 id     → [该目录节点, 其 children];他人只读目录/节点抛 403
- */
-/**
- * 把前端传来的 parentId 解析为真实写入的目标容器列表(仅新建/拖拽用,需可写)。
+ * 把前端传来的 parentId 解析为真实写入的目标容器列表(新建/拖拽用)。
  * - '__my_root' 或 null → 当前用户自己桶的根
- * - '__shared_root'    → 共享桶根(仅 admin 可写,否则 403)
- * - 普通目录 id        → [该目录节点, 其 children];落在只读范围(非 admin 的共享桶)抛 403
+ * - '__shared_root'    → 共享桶根(共享文件夹所有人可读可写)
+ * - 普通目录 id        → [该目录节点, 其 children]
  */
 function resolveTarget(view, parentId) {
   if (!parentId || parentId === MY_ROOT_ID) {
     return [null, view.tree.users[view.ownerKey].my]
   }
   if (parentId === SHARED_ROOT_ID) {
-    if (!view.canWriteShared) {
-      const err = new Error('共享文件夹仅管理员可修改')
-      err.status = 403
-      throw err
-    }
     return [null, view.tree.users[SHARED_KEY].my]
   }
   const found = findNode(view.nodes, parentId)
-  if (found && found[0] && found[0].readonly) {
-    const err = new Error('共享文件夹内容只读')
-    err.status = 403
-    throw err
-  }
   return found || null
 }
 
@@ -123,26 +131,15 @@ function findNode(nodes, nid) {
   return null
 }
 
-/** 校验节点属于当前用户可见范围:自己桶 + 共享桶(读);写操作由调用方再验 readonly/canWriteShared */
+/** 校验节点属于当前用户可见范围:自己桶 + 共享桶(两者均可写,共享桶为全员协作空间) */
 function findOwnedNode(view, nid) {
   // 先查自己桶
   const own = findNode(view.tree.users[view.ownerKey].my, nid)
   if (own) return own
-  // 共享桶所有人可读(save/get/move 校验写权限用 canWriteShared)
+  // 共享桶所有人可读可写(全员协作空间)
   const shared = findNode(view.tree.users[SHARED_KEY].my, nid)
   if (shared) return shared
   return null
-}
-
-/** 判断节点 id 是否落在共享桶(含共享桶根);用于写操作只读校验 */
-function isSharedNode(view, nid) {
-  if (nid === SHARED_ROOT_ID) return true
-  return !!findNode(view.tree.users[SHARED_KEY].my, nid)
-}
-
-/** 判断移动目标容器是否为共享桶根 */
-function isSharedTarget(targetParentId) {
-  return targetParentId === SHARED_ROOT_ID || targetParentId === '__shared_root'
 }
 
 function validateName(name) {  const s = String(name || '').trim()
@@ -175,8 +172,12 @@ export function dbScriptsRouter() {
   const router = Router()
 
   router.get('/tree', (req, res) => {
-    const view = resolveView(req)
-    res.json({ code: 0, data: { my: view.nodes } })
+    try {
+      const view = resolveView(req)
+      res.json({ code: 0, data: { my: view.nodes } })
+    } catch (e) {
+      res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })
+    }
   })
 
   router.post('/new', (req, res) => {
@@ -191,7 +192,7 @@ export function dbScriptsRouter() {
       let parent = null
       let list
       if (!parentId || parentId === MY_ROOT_ID || parentId === SHARED_ROOT_ID) {
-        ;[, list] = resolveTarget(view, parentId) // resolveTarget 内部已做共享桶写权限校验
+        ;[, list] = resolveTarget(view, parentId)
       } else {
         const found = resolveTarget(view, parentId)
         if (!found) {
@@ -220,9 +221,6 @@ export function dbScriptsRouter() {
       const view = resolveView(req)
       const found = findOwnedNode(view, id)
       if (!found) return res.status(404).json({ code: 404, msg: '节点不存在' })
-      if (isSharedNode(view, id) && !view.canWriteShared) {
-        return res.status(403).json({ code: 403, msg: '共享文件夹仅管理员可修改' })
-      }
       if (found[0].type === 'file' && !clean.endsWith('.sql')) clean += '.sql'
       found[0].name = clean
       saveTree(view.tree)
@@ -238,9 +236,6 @@ export function dbScriptsRouter() {
       const view = resolveView(req)
       const found = findOwnedNode(view, id)
       if (!found) return res.status(404).json({ code: 404, msg: '节点不存在' })
-      if (isSharedNode(view, id) && !view.canWriteShared) {
-        return res.status(403).json({ code: 403, msg: '共享文件夹仅管理员可修改' })
-      }
       const [node, parent] = found
       const fileIds = []
       collectFileIds([node], fileIds)
@@ -262,17 +257,12 @@ export function dbScriptsRouter() {
       const view = resolveView(req)
       const found = findOwnedNode(view, id)
       if (!found) return res.status(404).json({ code: 404, msg: '节点不存在' })
-      // 被移动节点与目标容器都在只读范围时拒绝(admin 可整理共享桶,普通用户只能移出自己桶的节点)
-      if ((isSharedNode(view, id) || isSharedTarget(targetParentId)) && !view.canWriteShared) {
-        return res.status(403).json({ code: 403, msg: '共享文件夹仅管理员可修改' })
-      }
       const [node, parentList] = found
 
       let target = null
       let targetChildren = null
       if (targetParentId) {
         if (targetParentId === SHARED_ROOT_ID || targetParentId === '__shared_root') {
-          if (!view.canWriteShared) return res.status(403).json({ code: 403, msg: '共享文件夹仅管理员可修改' })
           targetChildren = view.tree.users[SHARED_KEY].my
         } else {
           const tf = findOwnedNode(view, targetParentId)
@@ -315,11 +305,21 @@ export function dbScriptsRouter() {
       if (!found || found[0].type !== 'file') {
         return res.status(404).json({ code: 404, msg: '文件不存在' })
       }
-      if (isSharedNode(view, id) && !view.canWriteShared) {
-        return res.status(403).json({ code: 403, msg: '共享文件夹仅管理员可修改' })
-      }
       ensureScripts()
-      fs.writeFileSync(path.join(FILES_DIR, `${id}.sql`), content, 'utf-8')
+      // 原子写:.tmp + rename,避免半截 SQL 覆盖原文件
+      const fp = path.join(FILES_DIR, `${id}.sql`)
+      const tmp = `${fp}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`
+      try {
+        fs.writeFileSync(tmp, content, 'utf-8')
+        fs.renameSync(tmp, fp)
+      } catch (e) {
+        try {
+          fs.unlinkSync(tmp)
+        } catch {
+          /* 忽略清理失败 */
+        }
+        throw e
+      }
       res.json({ code: 0, msg: 'saved' })
     } catch (e) {
       res.status(e.status || 500).json({ code: e.status || 500, msg: e.message })

@@ -9,6 +9,7 @@ import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
 import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, listSparkTables, listSparkFields, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme, THEME_EVENT, type ThemeMode } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
+import { addHistoryEntry, readJson, writeJson, TEMP_DRAFTS_KEY } from '@/utils/db-query-cache'
 import SqlTreePanel from './SqlTreePanel.vue'
 const treePanelRef = ref<InstanceType<typeof SqlTreePanel>>()
 import FlinkConnectorDialog from './FlinkConnectorDialog.vue'
@@ -138,10 +139,21 @@ interface EditorTab {
   // 文档对象由 SqlEditor 内部 model 池持有(每个 tab 一个 ITextModel:
   // 独立撤销历史 + 光标位置,语义等价旧 CodeMirror.Doc + swapDoc)
 }
-let tabSeq = 0
+
+/** 已发放的 tab id(仅当前会话;恢复的草稿用独立 draft- 命名空间) */
+const issuedTabIds = new Set<string>()
+/** 生成永不复用的 tab id:时间戳 + 随机串,关闭后不会再被复用 */
+function newTabId(prefix = 'tab'): string {
+  let id = ''
+  do {
+    id = `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  } while (issuedTabIds.has(id))
+  issuedTabIds.add(id)
+  return id
+}
 function newTab(name: string, content: string, id?: string): EditorTab {
   return {
-    id: id || `tab-${++tabSeq}`,
+    id: id || newTabId('tab'),
     file: null,
     name,
     content,
@@ -156,29 +168,32 @@ function showTabInEditor(t: EditorTab) {
 }
 
 // ── 临时 query 草稿(未命名 tab 也自动保存到 localStorage)──────
-const TEMP_KEY = 'db-query-temp-tabs'
+const TEMP_KEY = TEMP_DRAFTS_KEY
 interface TempDraft {
   id: string
   name: string
   content: string
   ts: number
 }
+/** 恢复的草稿使用 draft- 命名空间,与新建 tab / 文件 tab 的 id 永不重叠 */
+function draftTabId(id: string): string {
+  return id.startsWith('draft-') ? id : `draft-${id}`
+}
 function readTempDrafts(): TempDraft[] {
-  try {
-    const raw = localStorage.getItem(TEMP_KEY)
-    if (!raw) return []
-    const p = JSON.parse(raw)
-    return Array.isArray(p) ? p.filter((d) => d && typeof d.content === 'string') : []
-  } catch {
-    return []
-  }
+  const parsed = readJson<unknown>(TEMP_KEY, [])
+  if (!Array.isArray(parsed)) return []
+  return parsed
+    .filter((d): d is TempDraft => {
+      if (!d || typeof d !== 'object') return false
+      const draft = d as Partial<TempDraft>
+      return typeof draft.id === 'string' && !!draft.id && typeof draft.content === 'string'
+    })
+    // 旧版本草稿 id 可能是 tab-1 / file-x,读入时统一迁移到 draft- 命名空间
+    .map((d) => ({ ...d, id: draftTabId(d.id) }))
 }
 function writeTempDrafts(list: TempDraft[]) {
-  try {
-    localStorage.setItem(TEMP_KEY, JSON.stringify(list.slice(0, MAX_TABS)))
-  } catch {
-    /* localStorage 不可用(Safari 隐私模式等)时静默忽略 */
-  }
+  // 统一工具已含 try/catch 与配额告警;草稿最多保留 MAX_TABS 个
+  writeJson(TEMP_KEY, list.slice(0, MAX_TABS))
 }
 /** 保存/更新一个临时 tab 草稿(刷新页面后可恢复) */
 function saveTempDraft(tab: EditorTab) {
@@ -269,9 +284,11 @@ async function closeTab(id: string) {
     }
   }
   const idx = tabs.value.indexOf(tab)
+  const closedId = tab.id
   flushActiveContent()
   tabs.value.splice(idx, 1)
-  if (!tab.file) removeTempDraft(tab.id) // 临时 tab 关闭即丢弃草稿
+  // 临时 tab 关闭即丢弃草稿;文件 tab 也清理可能残留的旧草稿(按 id 幂等)
+  removeTempDraft(closedId)
   if (activeTabId.value === id) {
     if (tabs.value.length === 0) {
       const nt = newTab('未命名查询', '')
@@ -284,6 +301,9 @@ async function closeTab(id: string) {
       showTabInEditor(next)
     }
   }
+  // 切换完成后再释放该 tab 的 Monaco model(含词/字符串索引),避免重开文件读到旧内容;
+  // 非活跃 tab 直接释放,不影响当前编辑中的 model。
+  editorRef.value?.disposeModel(closedId)
   editorRef.value?.focus()
 }
 
@@ -359,6 +379,8 @@ function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record
   if (!s.trim()) return
   // silent:程序性回填不标记 dirty、不触发自动保存(否则 2s 后会把原文件覆盖成历史 SQL)
   c.setValue(s, { silent: true })
+  // 同步 tab.content:画布空态提示按快照判断,不同步会盖住刚回填的 SQL
+  if (activeTab.value) activeTab.value.content = s
   syncRunVarBar() // 抑制 change 事件,参数行需手动同步
   c.focus()
   if (result && Array.isArray(result.columns) && Array.isArray(result.rows)) {
@@ -369,7 +391,8 @@ function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record
       costMs: 0,
       truncated: false,
       running: false,
-      cached: true
+      cached: true,
+      snapshotRows: result.rows.length
     } as QueryResultItem)
     if (results.value.length > MAX_RESULTS) {
       results.value.splice(0, results.value.length - MAX_RESULTS)
@@ -422,6 +445,9 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   }
   // silent 覆盖预览 tab 内容(不标记 dirty;预览 tab 无文件,避免误触发草稿保存)
   editorRef.value?.setValue(sql, { silent: true })
+  // 同步快照,避免复用预览 tab 时空态提示仍按旧内容判断
+  if (activeTab.value) activeTab.value.content = sql
+  syncRunVarBar()
   await runQuery()
   // 预览结果标记为可编辑(行内编辑),并异步取主键列;校验 SQL 匹配防误标旧结果(runQuery 可能因互斥被拒)
   const r = results.value[results.value.length - 1]
@@ -453,8 +479,11 @@ async function saveActive() {
   if (!tab) return
   if (tab.file) {
     try {
-      await saveScriptContent(tab.file.id, editorRef.value?.getValue() ?? '')
+      const content = editorRef.value?.getValue() ?? ''
+      await saveScriptContent(tab.file.id, content)
+      tab.content = content
       tab.dirty = false
+      removeTempDraft(tab.id) // 已绑定文件:清理可能残留的临时草稿
       ElMessage.success(`已保存 ${tab.name}`)
       treePanelRef.value?.reloadMy()
     } catch (e) {
@@ -470,11 +499,21 @@ async function saveActive() {
     })
     let name = (value || '').trim()
     if (!name.toLowerCase().endsWith('.sql')) name += '.sql'
+    const content = editorRef.value?.getValue() ?? ''
     const node = await createScriptNode(null, name, 'file')
-    await saveScriptContent(node.id, editorRef.value?.getValue() ?? '')
+    await saveScriptContent(node.id, content)
+    // 另存为成功后:删除临时草稿并把 tab 并到 file-<id> 命名空间,
+    // 这样后续 onOpenFile 能按 file.id 复用同一 tab,不会出现草稿 tab + 文件 tab 两份。
+    const oldId = tab.id
+    tab.content = content
     tab.file = node
     tab.name = name
+    tab.id = `file-${node.id}`
     tab.dirty = false
+    removeTempDraft(oldId)
+    activeTabId.value = tab.id
+    showTabInEditor(tab)
+    editorRef.value?.disposeModel(oldId)
     ElMessage.success(`已保存到根目录 ${name}`)
     treePanelRef.value?.reloadMy()
   } catch (e) {
@@ -532,11 +571,14 @@ const treeDbs = computed(() => datasources.value.filter((d) => d.type !== 'spark
 const canvasRef = ref<HTMLElement>()
 // 编辑器实例(SqlEditor 封装;model 池在组件内部,tab 切换仅换 modelId,撤销/光标各自独立)
 const editorRef = ref<InstanceType<typeof SqlEditor>>()
-// 补全元数据:关系库全量 schema;Spark 按所选模式加载指定库的表或指定表的字段
-const schemaLoader = async (db: string, table?: string, executionMode: SparkExecutionMode = sparkExecutionMode.value): Promise<DbSchema | null> => {
-  if (!isSparkEngine.value) return getSchema(db)
-  if (table) return { tables: [{ name: table, columns: await listSparkFields(db, table, executionMode) }] }
-  return { tables: (await listSparkTables(db, executionMode)).map((name) => ({ name, columns: [] })) }
+// 补全元数据:关系库全量 schema;Spark 按发起时快照的引擎/模式加载指定库的表或指定表的字段
+// (engine/executionMode 由 SqlEditor 显式传入,避免请求返回时已切引擎/模式导致串库)
+const schemaLoader = async (db: string, engine: string, executionMode: SparkExecutionMode, table?: string): Promise<DbSchema | null> => {
+  if (engine === 'sparksql' || engine === 'sparksession') {
+    if (table) return { tables: [{ name: table, columns: await listSparkFields(db, table, executionMode) }] }
+    return { tables: (await listSparkTables(db, executionMode)).map((name) => ({ name, columns: [] })) }
+  }
+  return getSchema(db)
 }
 
 // 默认 SQL:清空(用户自行编写);编辑器默认内容由 SqlEditor 的 :value/model 池提供
@@ -1275,8 +1317,21 @@ const VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_-]*)\}/g // 变量名:字母/下划线�
 const runVarNames = ref<string[]>([])
 /** 各变量当前输入值(参数行内联输入框 v-model) */
 const runVarValues = reactive<Record<string, string>>({})
-/** 会话内记忆:上次执行用过的取值,同名变量再现时自动预填 */
+/** 会话内记忆:按「引擎 + 数据源 + 变量名」隔离,换库不预填别库的值 */
 const varMemory = new Map<string, string>()
+
+/** 参数记忆作用域:引擎 + 当前数据源(Spark 的虚拟源名固定,用引擎区分 Thrift/Session) */
+function varScope(): string {
+  return `${engine.value || 'none'}:${db.value || ''}`
+}
+function varMemoryKey(name: string): string {
+  return `${varScope()}::${name}`
+}
+/** 数据源/引擎切换时清空参数输入,再按新作用域记忆回填 */
+function resetRunVarValuesForScope() {
+  for (const key of Object.keys(runVarValues)) delete runVarValues[key]
+  syncRunVarBar()
+}
 
 /** 编辑器内容变化/tab 切换后同步参数行:新增变量预填上次值,消失变量清输入 */
 function syncRunVarBar(sql?: string) {
@@ -1287,7 +1342,10 @@ function syncRunVarBar(sql?: string) {
   let m: RegExpExecArray | null
   while ((m = VAR_RE.exec(text))) if (!names.includes(m[1])) names.push(m[1])
   for (const n of names) {
-    if (!(n in runVarValues) && varMemory.has(n)) runVarValues[n] = varMemory.get(n)!
+    if (!(n in runVarValues)) {
+      const remembered = varMemory.get(varMemoryKey(n))
+      if (remembered !== undefined) runVarValues[n] = remembered
+    }
   }
   for (const k of Object.keys(runVarValues)) {
     if (!names.includes(k)) delete runVarValues[k]
@@ -1309,7 +1367,7 @@ function collectRunVars(rawSql: string): Map<string, string> {
     const v = (runVarValues[n] ?? '').trim()
     if (!v) continue // 未填:原样传给引擎
     values.set(n, v)
-    varMemory.set(n, v)
+    varMemory.set(varMemoryKey(n), v)
   }
   return values
 }
@@ -1333,52 +1391,23 @@ function getSegments(text: string): string[] {
 let batchCancelled = false
 let runSeq = 0
 
-/** 历史记录 key 与容量(SqlTreePanel 历史/收藏共用);key 按用户名隔离(与 SqlTreePanel 读取端一致) */
-const HISTORY_MAX = 20
+/** 历史/收藏统一走 src/utils/db-query-cache.ts(key 前缀、上限、读-改-写合并只有一份实现) */
 const authStore = useAuthStore()
-const histKey = () => `db-query-history:${authStore.username || 'default'}`
-
-/** 历史附带的结果快照:截断到前 100 行,序列化超 200KB 不缓存(防 localStorage 撑爆) */
-const HIST_RESULT_ROWS = 100
-const HIST_RESULT_MAX_BYTES = 200_000
+const historyUsername = () => authStore.username || 'default'
 
 /**
- * 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 20 循环缓存、仅 trim 非空且 ≤2000;
- * 附带结果快照(仅查询类结果,空 rows 不缓存)。
+ * 执行成功后写入历史:新在前、同 sql 去重(保留最新)、上限 50、仅 trim 非空且 ≤2000;
+ * 附带结果快照(仅查询类结果,空 rows 不缓存;序列化超 200KB 不缓存)。
+ * 写入后通知左侧历史 tab 刷新(同一 tab 内不会触发 storage 事件)。
  */
 function pushHistory(sql: string, result?: { columns?: string[]; rows?: Record<string, unknown>[] }) {
-  const s = String(sql ?? '').trim()
-  if (!s || s.length > 2000) return
-  try {
-    let list: Array<{ ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } }> = []
-    try {
-      const raw = localStorage.getItem(histKey())
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) list = parsed.filter((h) => h && typeof h.sql === 'string' && typeof h.ts === 'number')
-      }
-    } catch {
-      /* 历史数据损坏则忽略,重新开始 */
-    }
-    list = list.filter((h) => h.sql !== s)
-    const entry: { ts: number; sql: string; result?: { columns: string[]; rows: Record<string, unknown>[] } } = {
-      ts: Date.now(),
-      sql: s
-    }
-    if (result && Array.isArray(result.columns) && result.columns.length && Array.isArray(result.rows) && result.rows.length) {
-      try {
-        const snapshot = { columns: [...result.columns], rows: result.rows.slice(0, HIST_RESULT_ROWS) }
-        if (JSON.stringify(snapshot).length <= HIST_RESULT_MAX_BYTES) entry.result = snapshot
-      } catch {
-        /* 快照序列化失败(循环引用等)不影响历史本身 */
-      }
-    }
-    list.unshift(entry)
-    if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX)
-    localStorage.setItem(histKey(), JSON.stringify(list))
-  } catch {
-    /* localStorage 不可用(Safari 隐私模式等)或配额已满时静默忽略 */
+  const username = historyUsername()
+  if (result && Array.isArray(result.columns) && Array.isArray(result.rows)) {
+    addHistoryEntry(username, sql, { columns: result.columns, rows: result.rows })
+  } else {
+    addHistoryEntry(username, sql)
   }
+  treePanelRef.value?.refreshHistory()
 }
 
 /** 执行目标 SQL 段列表(逐条 FIFO 串行执行;每次执行结果追加为新 tab,整体最多保留 MAX_RESULTS 个) */
@@ -1550,6 +1579,9 @@ watch(engine, async (val) => {
   // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
 
+// 换引擎/数据源后清空 ${var} 输入,避免把上一个库的参数带到新库执行
+watch([engine, db], () => resetRunVarValuesForScope())
+
 </script>
 
 <template>
@@ -1703,6 +1735,7 @@ watch(engine, async (val) => {
       :active-pane="activePane"
       :db="db"
       :engine-label="engineLabel"
+      :engine="engine"
       :loading="loading"
       @select="selectPane"
       @close="closeResultTab"
@@ -1740,8 +1773,13 @@ watch(engine, async (val) => {
       <span class="sb-item"><span class="sb-label">库</span>{{ db || '—' }}</span>
       <template v-if="currentResult && !currentResult.error && !currentResult.jobId && !currentResult.hdfsPath">
         <span v-if="!(currentResult.running && !currentResult.columns.length && !currentResult.rows.length)" class="sb-item sb-stats">
-          {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · {{ currentResult.costMs }}ms
-          <span v-if="currentResult.truncated" class="sb-trunc">· 已截断</span>
+          <template v-if="currentResult.cached">
+            {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · 缓存快照 · 前 {{ currentResult.snapshotRows ?? currentResult.rows.length }} 行
+          </template>
+          <template v-else>
+            {{ currentResult.rows.length }} 行 · {{ currentResult.columns.length }} 列 · {{ currentResult.costMs }}ms
+            <span v-if="currentResult.truncated" class="sb-trunc">· 已截断</span>
+          </template>
         </span>
         <span v-if="currentResult.running" class="sb-item sb-running"><el-icon class="tab-spin"><Loading /></el-icon> 执行中…</span>
       </template>

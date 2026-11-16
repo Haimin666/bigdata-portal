@@ -10,6 +10,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { DocumentChecked, Loading, Close, Grid, CopyDocument, Download } from '@element-plus/icons-vue'
 import { queryDb } from '@/api/db'
 import { copyText } from '@/utils/clipboard'
+import { djb2Hash, readColumnWidths, writeColumnWidth } from '@/utils/db-query-cache'
 
 // ── 类型(原 QueryView;组件与父共用)─────────────────────────
 /** 单元格待提交修改(row 为结果行在 r.rows 中的索引,由 indexOf(row) 得到) */
@@ -31,6 +32,7 @@ export interface QueryResultItem {
   jobId?: string
   mode?: string
   cached?: boolean // 来自查询历史的结果快照(未重新执行)
+  snapshotRows?: number // 缓存快照包含的行数(历史快照最多前 100 行)
   // ── 行内编辑(仅表预览结果)────────────────────────
   editable?: boolean // 是否允许单元格双击编辑
   db?: string // 目标库(onOpenTable 设置)
@@ -49,8 +51,9 @@ const props = withDefaults(
     db: string
     engineLabel: string
     loading: boolean
+    engine?: string
   }>(),
-  { db: '', engineLabel: '—', loading: false }
+  { db: '', engineLabel: '—', loading: false, engine: '' }
 )
 const emit = defineEmits<{
   (e: 'select', pane: number): void
@@ -275,20 +278,33 @@ function copyHdfsPath() {
     else ElMessage.warning('复制失败,请手动选择路径')
   })
 }
-/** 列宽签名:表预览用 库.表,否则用 SQL 前 40 字符(列宽按表格签名持久化,对齐原实现) */
+/** 列宽签名:引擎 + 库 + (表名 | SQL 稳定哈希),避免不同查询/不同库之间碰撞 */
 function colSig(): string {
   const r = currentResult.value
   if (!r) return 'default'
-  const base = `${r.db || ''}.${r.table || ''}`
-  return base !== '.' ? base : (r.sql || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'adhoc'
+  const scope = `${r.engine || props.engine || ''}|${r.db || props.db || ''}`
+  if (r.table) return `${scope}|t:${r.table}`
+  const sql = (r.sql || '').replace(/\s+/g, ' ').trim()
+  return `${scope}|q:${djb2Hash(sql || 'adhoc')}`
 }
+/** 当前签名下的列宽(一次扫描 localStorage,避免在渲染路径里逐列 getItem) */
+const colWidthCache = ref<Map<string, number>>(new Map())
+const colSignature = computed(() => colSig())
+watch(
+  colSignature,
+  (signature) => {
+    colWidthCache.value = readColumnWidths(signature)
+  },
+  { immediate: true }
+)
 function colInitWidth(c: string): number {
-  const n = parseInt(localStorage.getItem(`db-query-colw.${colSig()}.${encodeURIComponent(c)}`) || '', 10)
-  return n > 60 ? n : 140
+  return colWidthCache.value.get(c) ?? 140
 }
 function onColResize(newWidth: number, column: { property?: string }) {
   if (!column.property) return
-  localStorage.setItem(`db-query-colw.${colSig()}.${encodeURIComponent(column.property)}`, String(Math.round(newWidth)))
+  const width = Math.round(newWidth)
+  writeColumnWidth(colSignature.value, column.property, width)
+  colWidthCache.value.set(column.property, width)
 }
 function isNumeric(val: unknown): boolean {
   return typeof val === 'number' || (typeof val === 'string' && val !== '' && !Number.isNaN(Number(val)))
@@ -356,7 +372,8 @@ function exportCsv(idx?: number) {
   a.href = URL.createObjectURL(blob)
   const realIdx = idx != null ? idx : props.activePane > 0 ? props.activePane - 1 : 0
   const suffix = props.results.length > 1 ? `_${realIdx + 1}` : ''
-  a.download = `${props.db || 'query'}${suffix}_${Date.now()}.csv`
+  const snapshotTag = r.cached ? '_snapshot' : ''
+  a.download = `${props.db || 'query'}${suffix}${snapshotTag}_${Date.now()}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
 }
@@ -495,6 +512,11 @@ async function showJson(v: unknown) {
                 <span class="footer-job">流式任务已提交</span>
                 <span class="footer-muted">· 任务在后台常驻运行,可在「流任务」面板停止</span>
               </template>
+              <template v-else-if="currentResult.cached">
+                <span class="stats-num">{{ currentResult.rows.length }} 行</span>
+                <span class="stats-num">{{ currentResult.columns.length }} 列</span>
+                <span class="footer-muted">· 缓存快照 · 前 {{ currentResult.snapshotRows ?? currentResult.rows.length }} 行</span>
+              </template>
               <template v-else>
                 <span class="stats-num">{{ currentResult.rows.length }} 行</span>
                 <span class="stats-num">{{ currentResult.columns.length }} 列</span>
@@ -518,8 +540,16 @@ async function showJson(v: unknown) {
               <el-tag v-if="currentResult.jobId" size="small" type="primary">{{ currentResult.jobId }}</el-tag>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyPageTsv"><el-icon><Grid /></el-icon>复制本页</el-button>
               <el-button :disabled="cellCopyDisabled" size="small" text type="primary" @click="copyAllTsv"><el-icon><CopyDocument /></el-icon>复制整表</el-button>
-              <el-tooltip v-if="currentResult && !currentResult.error && currentResult.columns.length" content="下载当前结果 (CSV)" placement="top">
-                <el-button size="small" text type="primary" @click="exportCsv()"><el-icon><Download /></el-icon>下载</el-button>
+              <el-tooltip
+                v-if="currentResult && !currentResult.error && currentResult.columns.length"
+                :content="currentResult.cached
+                  ? `导出缓存快照(仅前 ${currentResult.snapshotRows ?? currentResult.rows.length} 行,非完整结果)`
+                  : '下载当前结果 (CSV)'"
+                placement="top"
+              >
+                <el-button size="small" text type="primary" @click="exportCsv()">
+                  <el-icon><Download /></el-icon>{{ currentResult.cached ? '导出快照' : '下载' }}
+                </el-button>
               </el-tooltip>
             </span>
           </div>

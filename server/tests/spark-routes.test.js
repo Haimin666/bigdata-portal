@@ -111,7 +111,8 @@ test('authorized Session writes retain write header and token job ownership', as
 test('Session backend errors preserve diagnostics without another submission', async () => {
   failure = 'original session connection failed'
   const res = await invoke('POST', '/api/spark/query', { body: { sql: 'SELECT 1', executionMode: 'session' } })
-  assert.equal(res.statusCode, 502)
+  // 上游(替身返回 503)状态码原样透传,不再统一折成 502
+  assert.equal(res.statusCode, 503)
   assert.match(res.body.msg, /original session connection failed/)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].body.executionMode, 'session')
@@ -220,8 +221,8 @@ test('Spark table preview retains Spark engine and skips relational editing meta
   const context = {
     loading: { value: false }, sparkBatchActive: { value: false }, tabs: { value: [] }, MAX_TABS: 10,
     datasources: { value: [] }, engine: { value: 'mysql' }, db: { value: '' }, SPARK_SOURCE: { name: 'spark' },
-    activeTabId: { value: '' }, results: { value: [] },
-    flushActiveContent() {}, showTabInEditor() {},
+    activeTabId: { value: '' }, activeTab: { value: null }, results: { value: [] },
+    flushActiveContent() {}, showTabInEditor() {}, syncRunVarBar() {},
     editorRef: { value: { setValue(sql) { previewSql = sql } } },
     runQuery: async () => {
       assert.equal(context.engine.value, 'sparksql')
@@ -242,8 +243,8 @@ test('Spark preview uses LIMIT when its database name collides with an Oracle da
   const context = {
     loading: { value: false }, sparkBatchActive: { value: false }, tabs: { value: [] }, MAX_TABS: 10,
     datasources: { value: [{ name: 'analytics', type: 'oracle' }] }, engine: { value: 'mysql' }, db: { value: '' }, SPARK_SOURCE: { name: 'spark' },
-    activeTabId: { value: '' }, results: { value: [] },
-    flushActiveContent() {}, showTabInEditor() {},
+    activeTabId: { value: '' }, activeTab: { value: null }, results: { value: [] },
+    flushActiveContent() {}, showTabInEditor() {}, syncRunVarBar() {},
     editorRef: { value: { setValue(sql) { previewSql = sql } } },
     runQuery: async () => {
       assert.equal(context.engine.value, 'sparksql')
@@ -264,6 +265,7 @@ test('HDFS export cancellation retains submission mode after selection changes',
   const context = {
     loading: { value: false }, exportLoading: { value: false }, sparkBatchActive: { value: false },
     engine: { value: 'sparksql' }, db: { value: 'spark' }, error: { value: '' },
+    isSparkEngine: { value: true },
     sparkExecutionMode: { value: 'session' }, currentSparkJob: { value: null }, batchCancelled: false, Date,
     ensureDb: () => true, getSqlToRun: () => 'SELECT 1', collectRunVars: () => ({}), expandSqlVars: (sql) => sql,
     clearSparkLogs: async () => {}, startSparkLogPolling() {}, pollSparkLogs: async () => {}, stopSparkLogPolling() {},
@@ -290,6 +292,7 @@ test('Stop during the export log baseline prevents backend submission and pollin
   const context = {
     loading: { value: false }, exportLoading: { value: false }, sparkBatchActive: { value: false },
     engine: { value: 'sparksql' }, db: { value: 'spark' }, error: { value: '' },
+    isSparkEngine: { value: true },
     sparkExecutionMode: { value: 'session' }, currentSparkJob: { value: null }, batchCancelled: false, runSeq: 0, currentDbJobId: { value: '' }, Date,
     ensureDb: () => true, getSqlToRun: () => 'SELECT 1', collectRunVars: () => ({}), expandSqlVars: (sql) => sql,
     clearSparkLogs: () => new Promise((resolve) => { finishBaseline = resolve }),

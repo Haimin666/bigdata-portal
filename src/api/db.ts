@@ -43,8 +43,43 @@ interface ApiResponse<T> {
   ok?: boolean
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api/db${path}`, init)
+/** 元数据/普通接口默认超时:30s;getSchema 45s;表/字段/DDL 等元数据 20s */
+const REQUEST_TIMEOUT_MS = 30_000
+const SCHEMA_TIMEOUT_MS = 45_000
+const METADATA_TIMEOUT_MS = 20_000
+
+/** 可区分的超时错误:error.name === 'TimeoutError' 且 error.code === 'TIMEOUT' */
+function createTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`请求超时(${Math.round(timeoutMs / 1000)}s)`) as Error & { code?: string }
+  error.name = 'TimeoutError'
+  error.code = 'TIMEOUT'
+  return error
+}
+
+/** 带超时的 fetch:超时抛 TimeoutError;外部 AbortSignal 仍可取消 */
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit | undefined, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController()
+  const external = init?.signal
+  const onExternalAbort = () => controller.abort(external?.reason)
+  if (external) {
+    if (external.aborted) controller.abort(external.reason)
+    else external.addEventListener('abort', onExternalAbort, { once: true })
+  }
+  // 用全局 setTimeout(而非 window.*):Node 测试环境/Worker 下同样可用
+  const timer = setTimeout(() => controller.abort(createTimeoutError(timeoutMs)), timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted && !external?.aborted) throw createTimeoutError(timeoutMs)
+    throw error
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener('abort', onExternalAbort)
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const res = await fetchWithTimeout(`/api/db${path}`, init, timeoutMs)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -63,8 +98,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** 跨库表搜索(mysql information_schema / oracle all_tables / Impala SHOW TABLES;按实例去重 + 30s 缓存) */
-export async function searchTables(keyword: string): Promise<TableSearchHit[]> {
-  return request<TableSearchHit[]>(`/search/tables?keyword=${encodeURIComponent(keyword)}`)
+export async function searchTables(keyword: string, signal?: AbortSignal): Promise<TableSearchHit[]> {
+  return request<TableSearchHit[]>(`/search/tables?keyword=${encodeURIComponent(keyword)}`, { signal }, METADATA_TIMEOUT_MS)
 }
 
 export interface TableSearchHit {
@@ -669,7 +704,11 @@ export async function sparkStages(executionMode: SparkExecutionMode = 'thrift'):
 
 /** Spark 元数据(SHOW/DESC 只读;db-proxy 侧 TTL 缓存,不重复打集群) */
 async function sparkSchemaRequest<T>(path: string, executionMode: SparkExecutionMode): Promise<T> {
-  const res = await fetch(`/api/spark/schema/${path}${path.includes('?') ? '&' : '?'}executionMode=${executionMode}`)
+  const res = await fetchWithTimeout(
+    `/api/spark/schema/${path}${path.includes('?') ? '&' : '?'}executionMode=${executionMode}`,
+    undefined,
+    METADATA_TIMEOUT_MS
+  )
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -829,18 +868,18 @@ export interface TableDDL {
 /** 表列表;detail=true 时返回 [{name, comment}](含表注释),否则 string[] */
 export async function listTables(db: string, detail = false): Promise<string[] | TableMeta[]> {
   const q = `db=${encodeURIComponent(db)}${detail ? '&detail=1' : ''}`
-  return request<string[] | TableMeta[]>(`/tables?${q}`)
+  return request<string[] | TableMeta[]>(`/tables?${q}`, undefined, METADATA_TIMEOUT_MS)
 }
 
 /** 字段列表;detail=true 时返回完整元数据(注释/可空/键),否则 [{name, type}] */
 export async function listFields(db: string, table: string, detail = false): Promise<TableField[] | TableFieldDetail[]> {
   const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}${detail ? '&detail=1' : ''}`
-  return request<TableField[] | TableFieldDetail[]>(`/fields?${q}`)
+  return request<TableField[] | TableFieldDetail[]>(`/fields?${q}`, undefined, METADATA_TIMEOUT_MS)
 }
 
 /** 生成建表 DDL */
 export async function getTableDDL(db: string, table: string): Promise<TableDDL> {
-  return request<TableDDL>(`/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`)
+  return request<TableDDL>(`/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`, undefined, METADATA_TIMEOUT_MS)
 }
 
 // ── Schema 元数据补全 / EXPLAIN(经网关 /api/db/schema、/api/db/explain)────────
@@ -861,7 +900,7 @@ export interface DbSchema {
 
 /** 拉取数据源 schema(表+字段,供编辑器补全;GET /api/db/schema 经网关透传 db-proxy /schema) */
 export async function getSchema(db: string): Promise<DbSchema> {
-  return request<DbSchema>(`/schema?db=${encodeURIComponent(db)}`)
+  return request<DbSchema>(`/schema?db=${encodeURIComponent(db)}`, undefined, SCHEMA_TIMEOUT_MS)
 }
 
 /** EXPLAIN 树节点(root 展开;MySQL/Oracle 字段略有差异) */

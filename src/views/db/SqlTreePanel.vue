@@ -25,6 +25,16 @@ import {
 } from '@/api/db'
 import { copyText } from '@/utils/clipboard'
 import { useAuthStore } from '@/store/auth'
+import {
+  readHistory,
+  readFavorites,
+  removeHistoryEntry,
+  clearHistoryEntries,
+  toggleFavoriteEntry,
+  removeFavoriteEntry,
+  onDbQueryStorageChange,
+  type QueryHistoryEntry
+} from '@/utils/db-query-cache'
 
 defineOptions({ name: 'SqlTreePanel' })
 
@@ -55,11 +65,16 @@ watch(catSearch, (v) => {
   catTreeRef.value?.filter(v) // 树内已加载节点本地过滤
   // 跨库搜索:输入 ≥2 字符防抖 500ms 查询(mysql/oracle 信息 schema),<2 立即还原树
   if (searchTimer) clearTimeout(searchTimer)
+  // 任何输入变化都立即让在途请求失效并中止,避免旧关键词的迟到响应覆盖新输入
+  searchSeq++
+  searchAbort?.abort()
+  searchAbort = null
   if (v.trim().length < 2) {
     searchResults.value = []
     searching.value = false
     return
   }
+  searching.value = false
   searchTimer = window.setTimeout(() => void doTableSearch(), 500)
 })
 
@@ -68,17 +83,31 @@ const searchResults = ref<TableSearchHit[]>([])
 const searching = ref(false)
 const searchMode = computed(() => catSearch.value.trim().length >= 2 || searchResults.value.length > 0)
 let searchTimer: number | null = null
+/** 请求序号 + AbortController:后发覆盖先发,迟到的响应直接丢弃 */
+let searchSeq = 0
+let searchAbort: AbortController | null = null
 async function doTableSearch() {
   const kw = catSearch.value.trim()
   if (kw.length < 2) return
+  const seq = ++searchSeq
+  searchAbort?.abort()
+  const controller = new AbortController()
+  searchAbort = controller
   searching.value = true
   try {
-    searchResults.value = await searchTables(kw)
+    const hits = await searchTables(kw, controller.signal)
+    if (seq !== searchSeq) return // 已有更新的请求,丢弃迟到结果
+    searchResults.value = hits
   } catch (e) {
+    if (seq !== searchSeq) return
+    if (e instanceof DOMException && e.name === 'AbortError') return
     ElMessage.error(`表搜索失败:${e instanceof Error ? e.message : e}`)
     searchResults.value = []
   } finally {
-    searching.value = false
+    if (seq === searchSeq) {
+      searching.value = false
+      searchAbort = null
+    }
   }
 }
 /** 点击搜索命中:插入 库.表 到画布 */
@@ -122,7 +151,11 @@ async function reloadMy() {
   }
 }
 
-defineExpose({ reloadMy })
+/** 供父组件在 pushHistory 后刷新历史列表(同一页面不会触发 storage 事件) */
+function refreshHistory() {
+  loadHistory()
+}
+defineExpose({ reloadMy, refreshHistory })
 
 /** 节点点击:文件打开;目录展开/折叠由 el-tree 默认行为处理 */
 function onNodeClick(data: ScriptNode) {
@@ -203,6 +236,11 @@ watch(() => props.executionMode, async (executionMode) => {
 
 const ENGINE_LABEL: Record<string, string> = { mysql: 'MySQL', oracle: 'Oracle', impala: 'Impala', spark: 'Spark' }
 
+/** 节点 key 分段编码:库/表/字段都带上作用域,避免跨库同名表/字段在 el-tree 里冲突 */
+function nodeKey(...parts: string[]): string {
+  return parts.map((part) => encodeURIComponent(part)).join(':')
+}
+
 /** 树懒加载:引擎组 → 库 → 表 → 字段(mysql/oracle 走 db-proxy,spark 走 /spark/schema) */
 async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
   try {
@@ -239,13 +277,13 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
       // 库 → 表
       if (data.engine === 'spark') {
         const tables = await listSparkTables(data.db || '', props.executionMode)
-        resolve(tables.map((t) => ({ id: `spark-t:${t}`, name: t, kind: 'table', isLeaf: false, db: data.db, table: t, engine: 'spark' })))
+        resolve(tables.map((t) => ({ id: `spark-t:${nodeKey(data.db || '', t)}`, name: t, kind: 'table', isLeaf: false, db: data.db, table: t, engine: 'spark' })))
         return
       }
       const tables = await listTables(data.db || '', true)
       resolve(
         (tables as TableMeta[]).map((t) => ({
-          id: `t:${t.name}`,
+          id: `t:${nodeKey(data.db || '', t.name)}`,
           name: t.name,
           kind: 'table',
           isLeaf: false,
@@ -263,7 +301,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
         const fields = await listSparkFields(data.db || '', data.table || data.name, props.executionMode)
         resolve(
           fields.map((f) => ({
-            id: `spark-f:${data.table}:${f.name}`,
+            id: `spark-f:${nodeKey(data.db || '', data.table || '', f.name)}`,
             name: f.name,
             kind: 'field',
             isLeaf: true,
@@ -278,7 +316,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
       const fields = (await listFields(data.db || '', data.table || data.name, true)) as TableFieldDetail[]
       resolve(
         fields.map((f) => ({
-          id: `f:${data.table}:${f.name}`,
+          id: `f:${nodeKey(data.db || '', data.table || '', f.name)}`,
           name: f.name,
           kind: 'field',
           isLeaf: true,
@@ -330,19 +368,12 @@ async function onCopyDDL(data: CatNode) {
   }
 }
 
-// ── 历史与收藏(localStorage 持久化,history 由父组件 QueryView 写入)──────
+// ── 历史与收藏(统一走 src/utils/db-query-cache.ts;history 由父组件 QueryView 写入)──────
 // key 按用户名隔离:同一浏览器多账号互不可见(认证关闭时落到 default)
 const authStore = useAuthStore()
-const histKey = () => `db-query-history:${authStore.username || 'default'}`
-const favKey = () => `db-query-favorites:${authStore.username || 'default'}`
-const HISTORY_MAX = 50
+const historyUsername = () => authStore.username || 'default'
 
-interface HistItem {
-  ts: number
-  sql: string
-  /** 查询结果快照(执行成功时由 QueryView 写入,截断到前 100 行) */
-  result?: HistResult
-}
+type HistItem = QueryHistoryEntry
 
 /** 结果快照形状(与 QueryView 写入端一致) */
 interface HistResult {
@@ -353,34 +384,10 @@ interface HistResult {
 const historyList = ref<HistItem[]>([])
 const favList = ref<HistItem[]>([])
 
-/** 容错读取 localStorage(损坏 JSON/非数组返回空,不抛错) */
-function readStore(key: string): HistItem[] {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (h): h is HistItem => !!h && typeof h === 'object' && typeof h.sql === 'string' && typeof h.ts === 'number'
-    )
-  } catch {
-    return []
-  }
-}
-
-/** 写回 localStorage(截断到上限;localStorage 不可用如 Safari 隐私模式时静默忽略) */
-function writeStore(key: string, list: HistItem[]) {
-  try {
-    localStorage.setItem(key, JSON.stringify(list.slice(0, HISTORY_MAX)))
-  } catch {
-    /* 忽略 */
-  }
-}
-
-/** 读取历史 + 收藏(挂载与激活历史 tab 时各刷新一次) */
+/** 读取历史 + 收藏(挂载、激活历史 tab、父组件 pushHistory 后、其它 tab storage 事件时刷新) */
 function loadHistory() {
-  historyList.value = readStore(histKey())
-  favList.value = readStore(favKey())
+  historyList.value = readHistory(historyUsername())
+  favList.value = readFavorites(historyUsername())
 }
 
 /** 时间格式:今天 HH:mm,跨天 MM-DD HH:mm */
@@ -399,27 +406,23 @@ function onRunItem(item: HistItem) {
   emit('runSql', item.sql, item.result)
 }
 
-/** 收藏:从历史移除该条,写入收藏(去重、新在前、上限 50) */
+/** 收藏:从最新历史移除该条,再按 sql 去重写入收藏 */
 function toggleFav(item: HistItem) {
-  const sql = String(item.sql || '').trim()
-  if (!sql) return
-  historyList.value = historyList.value.filter((h) => h !== item)
-  writeStore(histKey(), historyList.value)
-  favList.value = [{ ...item, sql }, ...favList.value.filter((f) => f.sql !== sql)].slice(0, HISTORY_MAX)
-  writeStore(favKey(), favList.value)
+  if (!String(item.sql || '').trim()) return
+  const result = toggleFavoriteEntry(historyUsername(), item)
+  historyList.value = result.history
+  favList.value = result.favorites
   ElMessage.success('已收藏')
 }
 
 /** 取消收藏:从收藏列表移除 */
 function removeFav(item: HistItem) {
-  favList.value = favList.value.filter((f) => f !== item)
-  writeStore(favKey(), favList.value)
+  favList.value = removeFavoriteEntry(historyUsername(), item)
 }
 
 /** 删除单条历史 */
 function removeHistory(item: HistItem) {
-  historyList.value = historyList.value.filter((h) => h !== item)
-  writeStore(histKey(), historyList.value)
+  historyList.value = removeHistoryEntry(historyUsername(), item)
 }
 
 /** 清空全部历史(确认后) */
@@ -430,8 +433,8 @@ async function clearHistory() {
   } catch {
     return // 取消/关闭
   }
+  clearHistoryEntries(historyUsername())
   historyList.value = []
-  writeStore(histKey(), historyList.value)
   ElMessage.success('历史已清空')
 }
 
@@ -542,16 +545,21 @@ async function onNodeDrop(draggingNode: any, dropNode: any, type: 'prev' | 'inne
   }
 }
 
+let offHistoryStorage: (() => void) | null = null
 onMounted(() => {
   void reloadMy()
   loadHistory()
   window.addEventListener('click', closeCtx)
   window.addEventListener('contextmenu', closeCtx)
+  // 其它浏览器 tab 写入历史/收藏时刷新(同一 tab 由父组件调用 refreshHistory)
+  offHistoryStorage = onDbQueryStorageChange(loadHistory)
 })
 
 onUnmounted(() => {
   window.removeEventListener('click', closeCtx)
   window.removeEventListener('contextmenu', closeCtx)
+  offHistoryStorage?.()
+  offHistoryStorage = null
 })
 </script>
 

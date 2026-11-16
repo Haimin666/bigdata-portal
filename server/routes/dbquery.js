@@ -3,9 +3,11 @@
 // 数据源 readOnly 与 db-proxy 资源护栏兜底(写审计保留)。
 import config from '../config.js'
 import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
-import { dbEngine } from '../engine-map.js'
+import { dbEngine, ensureEngineMap } from '../engine-map.js'
 import { checkDbAccess } from '../db-permissions.js'
 import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
+import { clampTimeoutMs } from '../utils/timeout.js'
+import { createUpstreamError, sendUpstreamError } from '../utils/upstream-error.js'
 
 export function setupDbQuery(app) {
   app.post('/api/dbquery/query', async (req, res) => {
@@ -18,13 +20,18 @@ export function setupDbQuery(app) {
       // 空 db 直接清晰报错,避免转发后得到 db-proxy 隐晦的 "database '' not in ALLOWED_DBS"
       return res.status(400).json({ code: 400, msg: '请先选择数据库(db is required)' })
     }
-    if (req.dbQueryApiPrincipal && (!['mysql', 'oracle'].includes(dbEngine(dbName)) || !isDbQueryApiReadSql(sql))) {
+    let engine = dbEngine(dbName)
+    if (engine == null) {
+      await ensureEngineMap()
+      engine = dbEngine(dbName)
+    }
+    if (req.dbQueryApiPrincipal && (!['mysql', 'oracle'].includes(engine) || !isDbQueryApiReadSql(sql))) {
       return res.status(403).json({ code: 403, msg: '数据库查询 API Token 仅允许配置数据源上的 MySQL、Oracle 单条只读 SQL' })
     }
     // 数据权限矩阵 v2:按 引擎+库+读写+表 校验(优先于写解锁,权限优先于操作放行)
     try {
       checkDbAccess(req, dbName, {
-        engine: dbEngine(dbName),
+        engine,
         write: isSparkWriteSql(sql),
         tables: extractTables(sql)
       })
@@ -32,10 +39,11 @@ export function setupDbQuery(app) {
       if (e?.statusCode === 403) {
         return res.status(403).json({ code: 403, msg: e.message })
       }
-      throw e
+      console.error('[dbquery/query] 权限校验异常', e instanceof Error ? e.message : e)
+      return res.status(500).json({ code: 500, msg: '数据权限校验失败' })
     }
     // 超时对齐:统一默认 120s,上限 10 分钟;转发体白名单化,丢弃未知字段(G5)
-    const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 120000, 600000)
+    const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 120000, 1000, 600000)
     try {
       const r = await fetch(config.dbProxyUrl + '/query', {
         method: 'POST',
@@ -44,24 +52,12 @@ export function setupDbQuery(app) {
         signal: AbortSignal.timeout(timeoutMs)
       })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) {
-        // 透传 db-proxy 的错误(状态码 + detail + 结构化 errorType/errorCode)
-        const err = new Error(body.detail || body.msg || `db-proxy HTTP ${r.status}`)
-        err.status = r.status
-        err.errorType = body.errorType
-        err.errorCode = body.errorCode
-        throw err
-      }
+      // 透传 db-proxy 的错误(状态码 + detail + 结构化 errorType/errorCode/logs)
+      if (!r.ok) throw createUpstreamError(r.status, body, '/query')
       res.json({ code: 0, data: body.data })
     } catch (e) {
       console.error('[dbquery/query]', e instanceof Error ? e.message : e)
-      const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502
-      res.status(status).json({
-        code: status,
-        msg: (e instanceof Error ? e.message : String(e)).slice(0, 300),
-        ...(e?.errorType ? { errorType: e.errorType } : {}),
-        ...(e?.errorCode !== undefined ? { errorCode: e.errorCode } : {})
-      })
+      sendUpstreamError(res, e, { prefix: '数据库查询失败' })
     }
   })
 }

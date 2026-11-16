@@ -3,6 +3,8 @@
 // 与 Spark 共用同一密码与 token 体系)在 server/index.js 完成;db-proxy 侧
 // flink.allowWrite 为第二道防线。prejob 提交会真实占用集群资源,同样要求 token。
 import config from './config.js'
+import { clampTimeoutMs } from './utils/timeout.js'
+import { createUpstreamError } from './utils/upstream-error.js'
 
 const BASE = config.dbProxyUrl
 const TOKEN = config.dbProxyToken
@@ -16,12 +18,11 @@ async function proxy(path, opts = {}) {
       'X-DB-Token': TOKEN,
       ...(opts.headers || {})
     },
-    signal: AbortSignal.timeout(opts.timeoutMs || 300000)
+    signal: AbortSignal.timeout(clampTimeoutMs(opts.timeoutMs, 300000, 1000, 7200000))
   })
   const body = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    throw new Error(body.detail || body.msg || `db-proxy HTTP ${res.status} ${path}`)
-  }
+  // 保留上游 HTTP 状态 + errorType/errorCode/logs,由路由层原样透传(只有拿不到状态才回退 502)
+  if (!res.ok) throw createUpstreamError(res.status, body, path)
   return body
 }
 
@@ -98,7 +99,9 @@ export async function jobStop(jobId) {
 // ── PreJob 提交(yarn-per-job 独立作业)────────────────────
 // ── 异步任务通道(流式 SELECT / 大结果,避免撞网关 60s 超时 504)────
 export async function asyncSubmit(sql, { mode = 'batch', writeUnlocked = false, timeoutMs = 600000 } = {}) {
-  const headers = { 'X-Spark-Write': config.dbProxyWriteToken }
+  // 写解锁凭证仅当网关判定为写 SQL 时附加(与 /flink/query 一致)
+  const headers = {}
+  if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
   const res = await proxy('/flink/async', {
     method: 'POST',
     body: JSON.stringify({ sql, mode, writeUnlocked, timeoutMs }),
@@ -116,13 +119,14 @@ export async function asyncCancel(jobId) {
   return res.data
 }
 
-export async function prejobSubmit(payload, timeoutMs = 180000) {
-  // prejob 提交一律为执行类:门户 /api/flink/prejob/jobs 已强制 X-Spark-Token 解锁,
-  // 这里带上写解锁凭证供 db-proxy 侧服务端校验(直连 8756 者无法伪造)
-  const headers = { 'X-Spark-Write': config.dbProxyWriteToken }
+export async function prejobSubmit(payload, { timeoutMs = 180000, writeUnlocked = false } = {}) {
+  // prejob 提交为执行类:仅当网关判定为写 SQL 时才带写解锁凭证(writeUnlocked),
+  // 供 db-proxy 侧服务端校验(直连 8756 者无法伪造)。
+  const headers = {}
+  if (writeUnlocked) headers['X-Spark-Write'] = config.dbProxyWriteToken
   const res = await proxy('/flink/prejob/jobs', {
     method: 'POST',
-    body: JSON.stringify({ ...payload, writeUnlocked: true }),
+    body: JSON.stringify({ ...payload, writeUnlocked }),
     headers,
     timeoutMs
   })

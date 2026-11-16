@@ -12,6 +12,7 @@
  */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SparkExecutionMode } from '@/api/db'
+import { listSparkDatabases } from '@/api/db'
 import { monaco, definePortalThemes, editorUri } from '@/utils/monaco-setup'
 import {
   filterSqlStringValues,
@@ -35,7 +36,7 @@ const props = withDefaults(
     currentDb?: string
     engine?: string
     executionMode?: SparkExecutionMode
-    schemaLoader?: (db: string, table?: string, executionMode?: SparkExecutionMode) => Promise<SchemaMeta | null>
+    schemaLoader?: (db: string, engine: string, executionMode: SparkExecutionMode, table?: string) => Promise<SchemaMeta | null>
   }>(),
   {
     value: '',
@@ -142,16 +143,30 @@ const containerRef = ref<HTMLElement>()
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 let modelChangeDisposable: monaco.IDisposable | null = null
 let autoSuggestTimer: number | null = null
-/** 程序性 setValue(silent)抑制 emit('change') —— 历史回填/表预览等程序写入不标记 dirty、不触发自动保存(等价旧 CM 的 change.origin==='setValue') */
-let suppressChangeEmit = false
+/** 程序性 setValue(silent)的一次性跳过令牌:仅跳过紧随其后的一次 change 事件,
+ *  setValue 返回后无论是否派发 change 都同步复位,确保用户下一次真实编辑不会被吞。 */
+let skipNextChangeEmit = false
 /** model 池:modelId → ITextModel(每个 tab 独立文档/撤销历史/光标),等价旧 CM swapDoc */
 const models = new Map<string, monaco.editor.ITextModel>()
 /** provider 注册句柄(卸载时释放;每次 mount 注册一组,防重复) */
 const providers: monaco.IDisposable[] = []
-/** schema 缓存:引擎/执行模式/库/表 → meta;Spark 只按需加载指定前缀。 */
-const schemaCache = new Map<string, SchemaMeta | null>()
+/** schema 缓存:引擎/执行模式/库/表 → { data, ts };Spark 只按需加载指定前缀。
+ *  成功条目 TTL 5 分钟(与 db-proxy Spark 元数据 TTL 对齐),失败条目短 TTL 10s 后允许重试,
+ *  避免一次网络失败让本会话补全永久失效。 */
+interface SchemaCacheEntry {
+  data: SchemaMeta | null
+  ts: number
+}
+const SCHEMA_TTL_MS = 5 * 60 * 1000
+const SCHEMA_NEGATIVE_TTL_MS = 10 * 1000
+const schemaCache = new Map<string, SchemaCacheEntry>()
 /** 拉取中的 schema(去重:快速输入时 provider 多次触发,避免并发重复请求) */
 const schemaInflight = new Map<string, Promise<SchemaMeta | null>>()
+/** Spark 库清单缓存(SHOW DATABASES),用于判断 `x.` 是 库.表 还是 表.列;失败不永久缓存 */
+let sparkDbSet = new Set<string>()
+let sparkDbTs = 0
+let sparkDbMode: SparkExecutionMode | null = null
+let sparkDbInflight: { mode: SparkExecutionMode; promise: Promise<Set<string>> } | null = null
 /** 文中词索引 —— 行级增量(见 docWords):
  *  byLineWords: modelId → 行号 → 该行词;wordCounts: modelId → 词 → 出现次数
  *  dirtyLines: 待重建行(打字只影响光标行,一次重建 1 行 = O(行内容));
@@ -396,33 +411,99 @@ function docStringValues(model: monaco.editor.ITextModel, prefix: string): strin
   return bucket ? filterSqlStringValues(bucket, prefix, 30) : []
 }
 
-// ── schema(带缓存 + in-flight 去重,失败静默)──────────────
-function schemaKey(dbName: string, table?: string): string {
-  return JSON.stringify([props.engine, props.executionMode, dbName, table ?? ''])
+// ── schema(带 TTL 缓存 + in-flight 去重,失败只做短 TTL)──────────
+function engineIsSpark(engine: string | undefined): boolean {
+  return engine === 'sparksql' || engine === 'sparksession'
 }
 
-function sparkSchemaContext(before: string): { db: string; table?: string; prefix: string } | null {
+function schemaKey(dbName: string, table: string | undefined, engine: string, executionMode: SparkExecutionMode): string {
+  return JSON.stringify([engine, executionMode, dbName, table ?? ''])
+}
+
+/** 命中判断:成功条目 5 分钟、失败条目 10 秒后过期(过期后允许重试) */
+function getFreshSchema(key: string): SchemaCacheEntry | null {
+  const entry = schemaCache.get(key)
+  if (!entry) return null
+  const ttl = entry.data ? SCHEMA_TTL_MS : SCHEMA_NEGATIVE_TTL_MS
+  if (Date.now() - entry.ts >= ttl) {
+    schemaCache.delete(key)
+    return null
+  }
+  return entry
+}
+
+/** 解析 `前缀.` / `库.表字段前缀`;只返回原始片段,是否按库/表由调用方结合库清单判断 */
+function sparkSchemaContext(before: string): { first: string; second?: string; prefix: string } | null {
   // Only explicit catalog. or catalog.table. contexts; never enumerate the metastore.
   const match = before.match(/(?:^|[^\w$.`])(`(?:[^`]|``)+`|[A-Za-z_][\w$]*)\.(?:(`(?:[^`]|``)+`|[A-Za-z_][\w$]*)\.)?([\w$]*)$/)
   if (!match) return null
   const unquote = (name: string): string => name.startsWith('`') ? name.slice(1, -1).replace(/``/g, '`') : name
-  return { db: unquote(match[1]), table: match[2] ? unquote(match[2]) : undefined, prefix: match[3] }
+  return { first: unquote(match[1]), second: match[2] ? unquote(match[2]) : undefined, prefix: match[3] }
+}
+
+/** Spark 默认库(虚拟数据源名 spark/flink 不是 catalog,回退 default) */
+function sparkBaseDb(): string {
+  const current = props.currentDb
+  return current && current !== 'spark' && current !== 'flink' ? current : 'default'
+}
+
+/** Spark 库清单(SHOW DATABASES):成功缓存 5 分钟、失败缓存 10 秒后重试 */
+async function ensureSparkDatabases(executionMode: SparkExecutionMode): Promise<Set<string>> {
+  const fresh = sparkDbMode === executionMode &&
+    Date.now() - sparkDbTs < (sparkDbSet.size ? SCHEMA_TTL_MS : SCHEMA_NEGATIVE_TTL_MS)
+  if (fresh) return sparkDbSet
+  if (sparkDbInflight) {
+    // 同一模式的请求直接复用;模式已变则等旧请求结束后按新模式重新拉取
+    if (sparkDbInflight.mode === executionMode) return sparkDbInflight.promise
+    await sparkDbInflight.promise
+    return ensureSparkDatabases(executionMode)
+  }
+  const p = listSparkDatabases(executionMode)
+    .then((list) => {
+      const set = new Set(list)
+      if (props.executionMode === executionMode) {
+        sparkDbSet = set
+        sparkDbTs = Date.now()
+        sparkDbMode = executionMode
+      }
+      return set
+    })
+    .catch(() => {
+      // 失败不写永久空集:短 TTL 后允许重新拉取
+      if (props.executionMode === executionMode) {
+        sparkDbSet = new Set()
+        sparkDbTs = Date.now()
+        sparkDbMode = executionMode
+      }
+      return new Set<string>()
+    })
+    .finally(() => {
+      if (sparkDbInflight?.promise === p) sparkDbInflight = null
+    })
+  sparkDbInflight = { mode: executionMode, promise: p }
+  return p
 }
 
 async function loadSchema(dbName: string, table?: string): Promise<SchemaMeta | null> {
   if (!dbName) return null
-  const key = schemaKey(dbName, table)
-  const executionMode = props.executionMode
-  if (schemaCache.has(key)) return schemaCache.get(key) ?? null
+  // 发起时快照:engine/executionMode 一起进 key,返回后若已切换则丢弃结果不写缓存
+  const engine = props.engine
+  const executionMode: SparkExecutionMode = props.executionMode
+  const key = schemaKey(dbName, table, engine, executionMode)
+  const cached = getFreshSchema(key)
+  if (cached) return cached.data
   const inflight = schemaInflight.get(key)
   if (inflight) return inflight
   const p = (async () => {
     try {
-      const meta = (await props.schemaLoader?.(dbName, table, executionMode)) ?? null
-      schemaCache.set(key, meta)
+      // loader 显式接收发起时的 engine/mode,key 也带同样的快照:
+      // 即使返回时用户已切走,这条结果仍然只属于原引擎/模式,可安全缓存(避免切回时重复拉取)
+      const meta = (await props.schemaLoader?.(dbName, engine, executionMode, table)) ?? null
+      schemaCache.set(key, { data: meta, ts: Date.now() })
       return meta
     } catch {
-      schemaCache.set(key, null)
+      // 失败只写短 TTL 负缓存,10s 后自动允许重试
+      schemaCache.set(key, { data: null, ts: Date.now() })
       return null
     } finally {
       schemaInflight.delete(key)
@@ -470,22 +551,78 @@ function registerProvider(language: 'sql' | 'python'): void {
 
         // Relational schema is prefetched; Spark only loads the explicit catalog/table prefix.
         // Never hold local suggestions behind a cold network request.
-        const sparkContext = props.engine === 'sparksql' ? sparkSchemaContext(before) : null
-        const schemaDb = props.engine === 'sparksql' ? sparkContext?.db ?? '' : props.currentDb
-        const table = sparkContext?.table
-        const key = schemaKey(schemaDb, table)
-        const schemaPending = !!schemaDb && !schemaCache.has(key)
-        if (schemaPending) {
-          void loadSchema(schemaDb, table).then(() => {
-            const cursor = editor?.getPosition()
-            if (editor?.getModel() === model && cursor?.lineNumber === position.lineNumber && cursor.column === position.column && key === schemaKey(schemaDb, table)) {
-              editor.trigger('schema-loaded', 'editor.action.triggerSuggest', {})
-            }
-          })
+        const schemaEngine = props.engine
+        const schemaMode: SparkExecutionMode = props.executionMode
+        const sparkCtx = engineIsSpark(schemaEngine) ? sparkSchemaContext(before) : null
+        let schemaDb = ''
+        let table: string | undefined
+        let sparkAmbiguous = false
+        let sparkAmbiguousName = ''
+        if (sparkCtx) {
+          if (sparkCtx.second) {
+            // 两个点号:`库.表.` 明确按 库.表 处理
+            schemaDb = sparkCtx.first
+            table = sparkCtx.second
+          } else if (sparkDbMode === schemaMode && sparkDbSet.has(sparkCtx.first)) {
+            // 一个点号且前缀是已加载库名:`库.` → 提示表
+            schemaDb = sparkCtx.first
+          } else if (sparkDbMode === schemaMode) {
+            // 库清单已知但不是库名:按 `表.列`(当前库/default)
+            schemaDb = sparkBaseDb()
+            table = sparkCtx.first
+            sparkAmbiguous = true
+            sparkAmbiguousName = sparkCtx.first
+          } else {
+            // 库清单未加载:先按最常见的 `库.` 猜测,同时后台拉库清单;
+            // 若前缀其实不是库名,再回退 `表.列`(避免先打一次注定失败的元数据)
+            schemaDb = sparkCtx.first
+            sparkAmbiguous = true
+            sparkAmbiguousName = sparkCtx.first
+          }
+        } else if (!engineIsSpark(schemaEngine)) {
+          const currentDb = props.currentDb
+          if (currentDb && currentDb !== 'spark' && currentDb !== 'flink') schemaDb = currentDb
         }
-        const meta = schemaDb ? schemaCache.get(key) ?? null : null
-        if (sparkContext && meta) {
-          const prefix = sparkContext.prefix.toLowerCase()
+        const key = schemaKey(schemaDb, table, schemaEngine, schemaMode)
+        const schemaPending = !!schemaDb && !getFreshSchema(key)
+        /** 结果回来后仅当仍是同一 model/光标/引擎/模式才重触发补全 */
+        const retriggerSuggest = () => {
+          const cursor = editor?.getPosition()
+          if (
+            editor?.getModel() === model &&
+            cursor?.lineNumber === position.lineNumber &&
+            cursor.column === position.column &&
+            props.engine === schemaEngine &&
+            props.executionMode === schemaMode
+          ) {
+            editor.trigger('schema-loaded', 'editor.action.triggerSuggest', {})
+          }
+        }
+        if (schemaPending) {
+          if (sparkAmbiguous && sparkAmbiguousName) {
+            const ambiguousName = sparkAmbiguousName
+            // 先按当前猜测立即加载(库清单未知时猜 `库.`,已知且不是库名时猜 `表.列`),
+            // 同时拉库清单做纠正:猜错才额外加载另一侧,不阻塞首次补全。
+            void loadSchema(schemaDb, table).then(retriggerSuggest)
+            void (async () => {
+              const databases = await ensureSparkDatabases(schemaMode)
+              if (props.executionMode !== schemaMode) return // 模式已切换,丢弃这次判定
+              if (databases.has(ambiguousName)) return // 猜测正确(按库解析),已加载
+              if (table === ambiguousName) return // 猜测正确(按表解析),已加载
+              const meta = await loadSchema(sparkBaseDb(), ambiguousName)
+              if (meta) retriggerSuggest()
+            })()
+          } else {
+            void loadSchema(schemaDb, table).then(retriggerSuggest)
+          }
+          // Spark 一个点号场景:后台拉库清单,拿到后按「库.表」重新判断并触发补全
+          if (sparkCtx && !sparkCtx.second) {
+            void ensureSparkDatabases(schemaMode).then(retriggerSuggest)
+          }
+        }
+        const meta = schemaDb ? getFreshSchema(key)?.data ?? null : null
+        if (sparkCtx && meta) {
+          const prefix = sparkCtx.prefix.toLowerCase()
           const candidates = table ? meta.tables[0]?.columns ?? [] : meta.tables
           for (const item of candidates) {
             if (!item.name.toLowerCase().startsWith(prefix)) continue
@@ -617,6 +754,27 @@ function ensureModel(id: string, initial = props.value): monaco.editor.ITextMode
   return model
 }
 
+/** 释放某个 tab 的 model(关闭 tab 时调用):同时清理该 model 的全部行级索引,
+ *  避免内存泄漏与「关闭后重开同名文件读到旧内容」。切换 tab 不会调用此方法。 */
+function disposeModel(id: string): void {
+  const model = models.get(id)
+  if (!model) return
+  if (editor?.getModel() === model) editor.setModel(null)
+  model.dispose()
+  models.delete(id)
+  byLineWords.delete(id)
+  wordCounts.delete(id)
+  wordPrefixBuckets.delete(id)
+  dirtyLines.delete(id)
+  needsRebuild.delete(id)
+  stringValuesByLine.delete(id)
+  stringValueCounts.delete(id)
+  stringPrefixBuckets.delete(id)
+  stringBlockStates.delete(id)
+  dirtyStringLines.delete(id)
+  stringNeedsRebuild.delete(id)
+}
+
 function scheduleAutoSuggest(model: monaco.editor.ITextModel, changes: monaco.editor.IModelContentChange[]): void {
   const e = editor
   if (!e || e.getModel() !== model || changes.length !== 1) return
@@ -655,11 +813,13 @@ function attachModel(id: string): void {
   modelChangeDisposable = model.onDidChangeContent((e) => {
     markIndexDirty(model, e.changes) // 索引增量失效(单行内编辑只标 1 行)
     scheduleCheck() // 超长行策略 + 行内校验(防抖)
-    if (!suppressChangeEmit && !e.isUndoing && !e.isRedoing) scheduleAutoSuggest(model, e.changes)
-    if (suppressChangeEmit) {
-      suppressChangeEmit = false
+    if (skipNextChangeEmit) {
+      // 一次性跳过令牌:只吞掉程序性 setValue 的这一次事件;立即复位,
+      // 即使 setValue 未派发 change,用户下一次真实输入也不会被吞。
+      skipNextChangeEmit = false
       return // 程序性写入:参数行由调用方自行 sync,不标记 dirty/不触发自动保存
     }
+    if (!e.isUndoing && !e.isRedoing) scheduleAutoSuggest(model, e.changes)
     emit('change')
   })
   scheduleCheck() // 打开文档即校验一次(wordWrap 策略与 markers 落位)
@@ -1029,11 +1189,19 @@ watch(
   () => props.fontSize,
   (size) => editor?.updateOptions({ fontSize: size })
 )
-// ── 关系库 schema 预取;Spark 只在显式库/表前缀下按需加载 ──
+// ── 关系库 schema 预取;Spark(SparkSQL/SparkSession)只在显式库/表前缀下按需加载 ──
 watch(
   () => [props.currentDb, props.engine, props.executionMode] as const,
-  ([db, engine]) => {
-    if (db && engine !== 'sparksql') void loadSchema(db)
+  ([db, engine, executionMode]) => {
+    if (!db) return
+    if (engineIsSpark(engine)) {
+      // 提前拉一次 Spark 库清单,用于区分 `emp.id` 是 表.列 还是 库.表;失败短 TTL 可重试
+      void ensureSparkDatabases(executionMode)
+      return
+    }
+    // 引擎/库切换的中间态可能短暂出现 spark/flink 虚拟源名,别拿它当关系库名请求 /schema
+    if (db === 'spark' || db === 'flink') return
+    void loadSchema(db)
   },
   { immediate: true }
 )
@@ -1049,8 +1217,13 @@ defineExpose({
     const m = modelOf()
     if (!m) return
     if (opts?.silent) {
-      suppressChangeEmit = true
-      m.setValue(v) // Monaco setValue 同步派发 onDidChangeContent(回调里复位标志)
+      skipNextChangeEmit = true
+      try {
+        m.setValue(v) // Monaco setValue 通常同步派发 onDidChangeContent
+      } finally {
+        // 无论是否同步派发 change 都复位,避免令牌残留吞掉用户下一次真实输入
+        skipNextChangeEmit = false
+      }
       return
     }
     m.setValue(v)
@@ -1097,6 +1270,8 @@ defineExpose({
   },
   /** 确保某 tab 的 model 已存在于池中(等价旧 CM 兼容路径 lazy 建 Doc) */
   ensureModel,
+  /** 关闭 tab 时释放 model 与索引(切换 tab 不要调用) */
+  disposeModel,
   /** 池中是否已有该 modelId */
   hasModel: (id: string): boolean => models.has(id)
 })

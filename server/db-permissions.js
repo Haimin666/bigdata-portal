@@ -46,8 +46,12 @@ export function loadPerms() {
   let raw
   try {
     raw = fs.readFileSync(PERMS_FILE, 'utf-8')
-  } catch {
-    return { userRules: [], roleRules: [], defaultDeny: false }
+  } catch (e) {
+    // 仅「文件不存在」= 无规则;EACCES/EISDIR/IO 等读取异常一律 fail-closed,
+    // 否则权限矩阵会被静默绕过(此前任何异常都被当成无规则放行)。
+    if (e?.code === 'ENOENT') return { userRules: [], roleRules: [], defaultDeny: false }
+    console.warn(`[db-permissions] 规则文件读取失败,按 fail-closed 处理: ${e?.code || ''} ${e instanceof Error ? e.message : e}`)
+    return { userRules: [], roleRules: [], broken: true }
   }
   try {
     const data = JSON.parse(raw) || {}
@@ -140,20 +144,27 @@ export function apiTokenAllowsImpalaDatabase(perms, dbName) {
 }
 
 export function checkDbRuleAccess(rule, dbName, opts = {}) {
-  const { engine = '', write = false, tables = null, requireWholeDatabase = false, subject = 'API Token' } = opts
+  const { engine = null, write = false, tables = null, requireWholeDatabase = false, subject = 'API Token' } = opts
   if (!rule) deny(`未配置 ${subject} 的数据库权限`)
+  // 未知引擎(acl 尚未加载/库名不在数据源列表)不能当通配处理:否则任意引擎规则都会命中。
+  if (engine == null) deny(`无法确定数据库 '${dbName}' 的引擎类型,已按 fail-closed 拒绝(${subject})`)
   const engineRules = Array.isArray(rule.engineRules) ? rule.engineRules : []
   const matched = engineRules.find(
     (entry) => entry && (entry.db === '*' || String(entry.db) === dbName) &&
-      (!engine || entry.engine === '*' || entry.engine === engine)
+      (entry.engine === '*' || entry.engine === engine)
   )
   if (!matched) deny(`数据库 '${dbName}' 未授权给 ${subject}`)
   if (write && matched.write !== true) deny(`数据库 '${dbName}' 未授予 ${subject} 写权限`)
   if (!write && matched.read !== true) deny(`数据库 '${dbName}' 未授予 ${subject} 读权限`)
-  if (requireWholeDatabase && Array.isArray(matched.tables)) {
-    deny(`${subject} 的 Impala 元数据接口要求配置整库读取权限`)
-  }
-  if (Array.isArray(tables) && tables.length && Array.isArray(matched.tables)) {
+  if (Array.isArray(matched.tables)) {
+    if (requireWholeDatabase) {
+      deny(`${subject} 的整库元数据接口要求配置整库读取权限`)
+    }
+    // 配置了表级白名单时必须能确认请求引用的表;提不出来(或调用方未提供)
+    // 说明无法证明请求合法 → fail-closed,避免 `tables.length` 判断被绕过。
+    if (!Array.isArray(tables)) {
+      deny(`数据库 '${dbName}' 已配置表级白名单,但无法确认请求引用的数据表,已拒绝`)
+    }
     const allowed = new Set(matched.tables.map((table) => String(table)))
     const denied = tables.filter((table) => !allowed.has(String(table)))
     if (denied.length) deny(`表未授权: ${denied.join(', ')}`)
@@ -241,8 +252,9 @@ export function checkSparkAccess(req, write = false, database = '') {
   return checkSparkRuleAccess(rule, write, database, { subject: `用户 '${username}'` })
 }
 
-/** Flink 使用校验:规则命中时需 flink.enabled === true;admin 放行;无规则按 defaultDeny 决定 */
-export function checkFlinkAccess(req) {
+/** Flink 使用校验:规则命中时需 flink.enabled === true;admin 放行;无规则按 defaultDeny 决定。
+ * 写权限:flink.write === false 时拒绝写(旧规则只有 enabled,缺省视为读写均开放,保持兼容)。 */
+export function checkFlinkAccess(req, write = false) {
   if (isAdmin(req)) return
   const perms = loadPerms()
   checkBroken(perms)
@@ -254,5 +266,8 @@ export function checkFlinkAccess(req) {
     if (perms.defaultDeny) deny(`用户 '${username}' 未配置数据访问规则`)
     return
   }
-  if (!rule.flink || rule.flink.enabled !== true) deny('未授权使用 Flink')
+  const flink = rule.flink
+  if (!flink || flink.enabled !== true) deny('未授权使用 Flink')
+  if (!write && flink.read === false) deny('Flink 未授予读权限')
+  if (write && flink.write === false) deny('Flink 未授予写权限')
 }

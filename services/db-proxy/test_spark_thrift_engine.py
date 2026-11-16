@@ -608,18 +608,25 @@ class SparkModeRoutingTests(unittest.TestCase):
             "require_auth": lambda token: None,
             "SPARK_ENGINE": self.thrift, "SPARK_ENGINES": {"thrift": self.thrift, "session": self.session},
             "SPARK_JOBS": self.manager,
+            # 元数据 TTL 缓存重构后,被抽出的 TtlCache 也需要注入依赖
+            "threading": threading,
         }
         with open(os.path.join(os.path.dirname(__file__), "main.py"), encoding="utf-8") as source:
             tree = ast.parse(source.read())
         tree.body = [node for node in tree.body if (
-            isinstance(node, (ast.FunctionDef, ast.ClassDef)) and
-            node.name.startswith(("spark_", "_spark_", "Spark"))
+            isinstance(node, (ast.FunctionDef, ast.ClassDef)) and (
+                node.name.startswith(("spark_", "_spark_", "Spark"))
+                or node.name == "TtlCache"
+            )
         ) or (
             isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and
             node.target.id == "_SPARK_SCHEMA_CACHE"
         ) or (
-            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and
-            target.id == "_SPARK_SCHEMA_TTL" for target in node.targets)
+            isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and
+                target.id in ("_SPARK_SCHEMA_TTL", "_SPARK_SCHEMA_CACHE")
+                for target in node.targets
+            )
         )]
         exec(compile(tree, "main.py", "exec"), self.ns)
 
