@@ -39,6 +39,7 @@ import collections
 import datetime
 import threading
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException
@@ -96,9 +97,17 @@ ALLOWED_TABLES = [
 ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
 
 # 服务端资源护栏:同时执行上限 + 请求限速(防批量请求刷爆数据库连接/拖垮库)
-MAX_CONCURRENT = int(CONFIG.get("maxConcurrent", 5))
-MAX_QPS = int(CONFIG.get("maxQps", 10))
-_query_semaphore = threading.Semaphore(MAX_CONCURRENT)
+MAX_CONCURRENT = max(1, int(CONFIG.get("maxConcurrent", 5)))
+MAX_QPS = max(1, int(CONFIG.get("maxQps", 10)))
+_query_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT)
+_SEARCH_WORKERS = min(MAX_CONCURRENT, 8)
+_SEARCH_MAX_REQUESTS = max(1, int(CONFIG.get("maxConcurrentSearches", 2)))
+try:
+    _SEARCH_DEADLINE_SECONDS = min(15.0, max(1.0, float(CONFIG.get("searchDeadlineSeconds", 5.0))))
+except (TypeError, ValueError):
+    _SEARCH_DEADLINE_SECONDS = 5.0
+_SEARCH_CONNECT_TIMEOUT = max(1, int(CONFIG.get("searchConnectTimeout", 2)))
+_search_request_semaphore = threading.BoundedSemaphore(_SEARCH_MAX_REQUESTS)
 _qps_lock = threading.Lock()
 _qps_window = collections.deque()
 
@@ -195,6 +204,33 @@ except ImportError:  # pragma: no cover
 # 不再用整条 SQL 正则判断,避免字符串字面量或子查询里的 LIMIT 被误判。
 
 app = FastAPI(title="db-proxy", version="2.1.0")
+
+# 对会新建数据库连接/执行计划的元数据端点施加共享并发护栏。
+# 跨库搜索有自己的请求闸门;其 worker 对每条物理连接单独申请 _query_semaphore。
+_METADATA_PATHS = frozenset({"/tables", "/fields", "/ddl", "/schema", "/explain"})
+_SEARCH_PATH = "/search/tables"
+
+
+@app.middleware("http")
+async def database_resource_guard(request, call_next):
+    path = request.url.path.rstrip("/").lower() or "/"
+    if request.method == "GET" and path == _SEARCH_PATH:
+        semaphore = _search_request_semaphore
+        name = "table searches"
+    elif path in _METADATA_PATHS:
+        semaphore = _query_semaphore
+        name = "database metadata/explain requests"
+    else:
+        return await call_next(request)
+    if not semaphore.acquire(blocking=False):
+        return JSONResponse(
+            status_code=429,
+            content={"code": 429, "detail": "too many concurrent %s" % name},
+        )
+    try:
+        return await call_next(request)
+    finally:
+        semaphore.release()
 
 
 # ── 数据源注册表 ──────────────────────────────────────────────
@@ -1546,6 +1582,124 @@ _SEARCH_TTL = 30.0
 _SEARCH_CACHE = TtlCache(_SEARCH_TTL, max_entries=128, name="table-search")
 _SEARCH_LIMIT = 200  # 每实例返回上限
 _SEARCH_TOTAL = 300  # 整体截断
+# Executor 是进程级且 worker 数固定;请求超时只取消排队任务,正在运行的 DB 调用
+# 由驱动 timeout 结束,其数量受 _query_semaphore 限制。
+_SEARCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_SEARCH_WORKERS, thread_name_prefix="db-table-search"
+)
+
+
+def _distinct_search_datasources(datasources):
+    """按实际连接实例去重,保持配置顺序以便结果稳定。"""
+    seen = set()
+    distinct = []
+    for ds in datasources:
+        ent = (ds.type, ds.host, ds.port, ds.service if ds.type == "impala" else "")
+        if ent in seen:
+            continue
+        seen.add(ent)
+        distinct.append(ds)
+    return distinct
+
+
+def _search_one_instance(ds: DataSource, keyword: str) -> List[Dict[str, Any]]:
+    """搜索单个实例;每个实际连接占用全局查询并发槽。"""
+    if not _query_semaphore.acquire(blocking=False):
+        raise RuntimeError("database concurrency limit reached")
+    conn = None
+    try:
+        conn = ds.connect(
+            connect_timeout=_SEARCH_CONNECT_TIMEOUT,
+            query_timeout=max(2, _SEARCH_CONNECT_TIMEOUT + 1),
+        )
+        cur = conn.cursor()
+        try:
+            out: List[Dict[str, Any]] = []
+            if ds.type == "mysql":
+                cur.execute(
+                    "SELECT table_schema, table_name FROM information_schema.tables "
+                    "WHERE table_name LIKE %s AND table_schema NOT IN "
+                    "('information_schema','mysql','performance_schema','sys') "
+                    "ORDER BY table_schema, table_name LIMIT %s",
+                    (f"%{keyword}%", _SEARCH_LIMIT),
+                )
+                for schema_name, table_name in cur.fetchall():
+                    out.append({"engine": "mysql", "db": schema_name, "table": table_name})
+            elif ds.type == "oracle":
+                cur.execute(
+                    "SELECT owner, table_name FROM all_tables "
+                    "WHERE LOWER(table_name) LIKE :1 AND ROWNUM <= :2 ORDER BY owner, table_name",
+                    (f"%{keyword.lower()}%", _SEARCH_LIMIT),
+                )
+                for owner, table_name in cur.fetchall():
+                    out.append({"engine": "oracle", "db": owner, "table": table_name})
+            else:  # impala
+                cur.execute("SHOW TABLES")
+                for row in cur.fetchall():
+                    table_name = str(row[0])
+                    if keyword.lower() in table_name.lower():
+                        out.append({"engine": "impala", "db": ds.name, "table": table_name})
+                        if len(out) >= _SEARCH_LIMIT:
+                            break
+            return out
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _query_semaphore.release()
+
+
+def _run_bounded_table_search(
+    keyword: str,
+    datasources=None,
+    deadline_seconds: Optional[float] = None,
+    executor=None,
+) -> Tuple[List[Dict[str, Any]], bool, int, int]:
+    """并行扫描不同实例,返回 (hits, complete, successful_count, instance_count)。
+
+    complete 只有所有实例都在 deadline 内成功返回时才为 True;任何失败或超时
+    都会阻止调用方把 partial hits 写入 TTL 缓存。等待中的 future 不会阻塞请求退出;
+    尚未启动的 future 会被 cancel,正在执行的连接受 driver timeout 和全局并发槽保护。
+    """
+    targets = _distinct_search_datasources(datasources if datasources is not None else DATASOURCES.values())
+    if not targets:
+        return [], True, 0, 0
+    pool = executor or _SEARCH_EXECUTOR
+    timeout = _SEARCH_DEADLINE_SECONDS if deadline_seconds is None else max(0.0, float(deadline_seconds))
+    future_by_index = {
+        pool.submit(_search_one_instance, ds, keyword): (index, ds)
+        for index, ds in enumerate(targets)
+    }
+    done, pending = wait(future_by_index, timeout=timeout)
+    for future in pending:
+        future.cancel()
+
+    rows_by_index: Dict[int, List[Dict[str, Any]]] = {}
+    success_count = 0
+    failed_count = 0
+    for future in done:
+        index, ds = future_by_index[future]
+        try:
+            rows_by_index[index] = future.result()
+            success_count += 1
+        except Exception as exc:
+            failed_count += 1
+            log.warning(
+                "search tables failed for %s(%s:%s): %s",
+                ds.type, ds.host, ds.port, str(exc)[:160],
+            )
+    hits: List[Dict[str, Any]] = []
+    for index in sorted(rows_by_index):
+        hits.extend(rows_by_index[index])
+    complete = len(done) == len(future_by_index) and failed_count == 0
+    return hits[:_SEARCH_TOTAL], complete, success_count, len(targets)
 
 
 @app.get("/search/tables")
@@ -1560,55 +1714,26 @@ def search_tables(keyword: str = "", x_db_token: Optional[str] = Header(default=
     cached = _SEARCH_CACHE.get(key)
     if cached is not None:
         return {"code": 0, "data": cached}
-    out: list = []
-    success_count = 0
-    seen: set = set()
-    for ds in DATASOURCES.values():
-        ent = (ds.type, ds.host, ds.port, ds.service if ds.type == "impala" else "")
-        if ent in seen:
-            continue
-        seen.add(ent)
-        try:
-            conn = ds.connect(connect_timeout=8, query_timeout=20)
-            try:
-                cur = conn.cursor()
-                if ds.type == "mysql":
-                    cur.execute(
-                        "SELECT table_schema, table_name FROM information_schema.tables "
-                        "WHERE table_name LIKE %s AND table_schema NOT IN "
-                        "('information_schema','mysql','performance_schema','sys') "
-                        "ORDER BY table_schema, table_name LIMIT %s",
-                        (f"%{kw}%", _SEARCH_LIMIT),
-                    )
-                    for schema, tbl in cur.fetchall():
-                        out.append({"engine": "mysql", "db": schema, "table": tbl})
-                elif ds.type == "oracle":
-                    cur.execute(
-                        "SELECT owner, table_name FROM all_tables "
-                        "WHERE LOWER(table_name) LIKE :1 AND ROWNUM <= :2 ORDER BY owner, table_name",
-                        (f"%{kw.lower()}%", _SEARCH_LIMIT),
-                    )
-                    for owner, tbl in cur.fetchall():
-                        out.append({"engine": "oracle", "db": owner, "table": tbl})
-                else:  # impala
-                    cur.execute("SHOW TABLES")
-                    for row in cur.fetchall():
-                        tbl = str(row[0])
-                        if kw.lower() in tbl.lower():
-                            out.append({"engine": "impala", "db": ds.name, "table": tbl})
-                            if len(out) >= _SEARCH_LIMIT:
-                                break
-            finally:
-                conn.close()
-            success_count += 1
-        except Exception:
-            # 单实例失败(连接失败/无 information_schema 权限等)静默,不影响其他实例
-            log.warning("search tables failed for %s(%s:%s)", ds.type, ds.host, ds.port)
-    out = out[:_SEARCH_TOTAL]
-    # 全部实例都失败时不写缓存,避免把"连不上"当成"没有表"固化 30s
-    if out or success_count:
-        _SEARCH_CACHE.put(key, out)
-    return {"code": 0, "data": out}
+
+    if not _search_request_semaphore.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="too many concurrent table searches")
+    try:
+        # 获取闸门后再查一次缓存,避免两个同词搜索同时 miss 后重复扇出。
+        cached = _SEARCH_CACHE.get(key)
+        if cached is not None:
+            return {"code": 0, "data": cached}
+        out, complete, success_count, instance_count = _run_bounded_table_search(kw)
+        if complete:
+            # 只有全实例成功的完整扫描(包括空结果)才能进入 30s 缓存。
+            _SEARCH_CACHE.put(key, out)
+        else:
+            log.warning(
+                "table search partial: keyword=%s completed=%d/%d deadline=%.1fs",
+                kw[:64], success_count, instance_count, _SEARCH_DEADLINE_SECONDS,
+            )
+        return {"code": 0, "data": out}
+    finally:
+        _search_request_semaphore.release()
 
 
 @app.get("/spark/status")

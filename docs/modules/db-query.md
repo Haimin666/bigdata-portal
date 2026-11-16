@@ -60,6 +60,10 @@
   - Impala:优先 HS2 `CancelOperation`(cursor `cancel_operation()`),否则关闭 operation,最后退化为关闭会话(HS2 CloseSession 会取消会话内查询)；
   - Spark:Thrift 杀掉 beeline 进程组(SIGTERM→SIGKILL),Session 用 `cancelJobGroup(interruptOnCancel=True)`。
   job 状态新增 `cancelMethod` 字段回显实际取消方式,并追加一条「已停止/停止中」日志；`cancel_requested` 置位后执行线程的异常统一归类为 `cancelled` 而非 `failed`。
+- **元数据资源护栏与跨库搜索(2026-11 修订)**:
+  - `/tables`、`/fields`、`/ddl`、`/schema`、`/explain` 共用 `_query_semaphore` 并发槽(`maxConcurrent`,默认 5),超额立即返回 HTTP 429,避免元数据/执行计划请求绕过查询连接上限；槽位在请求完整处理期间占用,包括查询、结果构造与连接释放。
+  - `/search/tables` 使用独立请求闸(`maxConcurrentSearches`,默认 2),每轮扫描最多 48 个去重后的关系库实例,通过最多 `min(maxConcurrent,8)` 个 worker 有界并行,每个实际数据库连接仍须取得共享 `_query_semaphore` 槽。
+  - 跨库搜索整体 deadline 默认 5 秒(`searchDeadlineSeconds`,允许 1–15 秒);单实例 connect timeout 默认 2 秒(`searchConnectTimeout`,至少 1 秒)。deadline 到达时取消尚未启动的 worker、汇总已完成的结果并记录 partial warning；有任何实例失败或超时的结果**不进入 30 秒缓存**。完整扫描成功(包含完整空结果)才缓存。API 成功响应仍保持 `{code:0,data:[...]}` 数组契约。
 - **缓存与失效(2026-11)**:db-proxy 内三处缓存统一走 `TtlCache`(线程安全 + 容量上限 + 同 key 单飞,防惊群):
   - Spark 元数据 `SHOW DATABASES/TABLES/DESC`:TTL 300s、上限 256 条,key 带 `executionMode`；
   - 跨库表搜索:TTL 30s、上限 128 条,key 为关键词；**全部实例都失败时不写缓存**,避免把"连不上"固化成"没有表"；
