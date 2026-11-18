@@ -64,7 +64,7 @@
 
 根级可选 `dataSync` 配置控制 `POST /sync/db2hive`。`enabled` 必须为 `true`；`hiveMetastore` 是查询 `lion_dw_ods` Hive 表结构的 MySQL 连接（`align_with_hive=true` 时必需）；`datax.mysqlPassword` 是输出到 MySQLReader JSON 的 DataX 密码，`datax.mysqlUsername` 可选覆盖源数据用户名，`datax.oracleUsername`/`oraclePassword` 用于 OracleReader；`datasourceOverrides` 可用数据源 `name` 覆盖单个源的相应 DataX 凭据或 Oracle JDBC URL。`defaultFs` 与 `hadoopConfig` 可覆盖 HDFS HA writer 设置。DataX 凭据与 Hive metastore 密码只放在运行机权限受限的 `datasources.json` 中。CSV 同步只替换 `datasources`，会保留这些根级配置。
 
-MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。其中 `datasource` 行定义连接，`credential_profile` 行定义共享账号或单数据源覆盖，`inventory` 行只记录 BI 主机和库名、不生成运行时连接。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备运行配置 `datasources.json`（首次部署时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置）。可先手动预演 CSV 与配置：
+MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。CSV 将库名和库 ID 分别放在 `数据库名称列表`、`数据库ID列表`；`datasource` 行定义显式连接，`inventory` 行的分号分隔库清单逐库生成连接项，并补齐尚未显式配置的库；同名时显式 datasource 优先。`credential_profile` 行定义共享账号或单数据源覆盖。连接串只使用库名，ID 不拼进库名；Oracle inventory 行使用 `Oracle服务名`，留空时按约定回退到 schema 名。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备运行配置 `datasources.json`（首次部署时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置）。可先手动预演 CSV 与配置：
 
 ```bash
 python3 services/db-proxy/sync_datasources.py \
