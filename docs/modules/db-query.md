@@ -129,6 +129,7 @@
 - `allowedDbs` 仅为 db-proxy `/acl` 的旧版回显字段，不在代理侧过滤，前端使用 `/acl` 返回的 `datasources` 列表；网关按 `db-permissions` 规则过滤列表并校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
 - 代码默认值可从配置省略；Oracle 连接可配置别名，未配置显示库名
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句
+- `manage.sh check-datasources` 先同步 CSV，再从 db-proxy 主机并发检查所有 MySQL/Doris/Impala/Oracle 数据源：MySQL/Doris/Impala 执行 `SELECT 1`，Oracle 执行 `SELECT 1 FROM dual`；默认并发 5、每个探测超时 5 秒，仅失败项输出脱敏错误详情，有失败时返回非零状态。通过 `DB_PROXY_CHECK_WORKERS` / `DB_PROXY_CHECK_TIMEOUT` 调整限制，`--verbose` 显示通过项。Doris 使用 MySQL 协议探测；同步器通过 `sourceType: "doris"` 元数据让报告区分 Doris 与 MySQL
 
 ### SparkSQL 与 SparkSession 环境
 

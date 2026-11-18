@@ -15,6 +15,9 @@ PORT="${DB_PROXY_PORT:-8756}"
 PROJECT_ROOT="$(cd -- "$APP_DIR/../.." && pwd -P)"
 CSV_FILE="${DB_PROXY_CSV:-$PROJECT_ROOT/bi_hosts_databases.csv}"
 SYNC_SCRIPT="${DB_PROXY_SYNC_SCRIPT:-$APP_DIR/sync_datasources.py}"
+CHECK_SCRIPT="$APP_DIR/check_datasources.py"
+CHECK_WORKERS="${DB_PROXY_CHECK_WORKERS:-5}"
+CHECK_TIMEOUT="${DB_PROXY_CHECK_TIMEOUT:-5}"
 START_TIMEOUT="${DB_PROXY_START_TIMEOUT:-45}"
 STOP_TIMEOUT="${DB_PROXY_STOP_TIMEOUT:-30}"
 LOG_LINES="${DB_PROXY_LOG_LINES:-100}"
@@ -31,12 +34,14 @@ Commands:
   stop               Stop the matching db-proxy process
   restart            Stop, then start db-proxy
   status             Show process and listening-port status
+  check-datasources  Test every configured MySQL/Doris/Impala/Oracle datasource
   logs [--follow]    Show recent log lines; follow continuously with --follow
   help               Show this help
 
 Environment overrides:
   DB_PROXY_DIR, DB_PROXY_CSV, DB_PROXY_SYNC_SCRIPT, DB_PROXY_PYTHON,
   DB_PROXY_SPARK_HOME, DB_PROXY_SPARK_CONF_DIR, DB_PROXY_HOST, DB_PROXY_PORT,
+  DB_PROXY_CHECK_WORKERS, DB_PROXY_CHECK_TIMEOUT,
   DB_PROXY_START_TIMEOUT, DB_PROXY_STOP_TIMEOUT, DB_PROXY_LOG_LINES
 USAGE
 }
@@ -87,9 +92,19 @@ sync_datasources() {
   [[ -f "$CSV_FILE" ]] || fail "找不到维护 CSV: $CSV_FILE (可用 DB_PROXY_CSV 指定路径)" || return 1
   printf '[db-proxy] 正在同步数据源: %s -> %s\n' "$CSV_FILE" "$CONFIG_FILE"
   if ! "$PYTHON" "$SYNC_SCRIPT" --csv "$CSV_FILE" --config "$CONFIG_FILE"; then
-    fail "CSV 同步失败，db-proxy 未启动"
+    fail "CSV 同步失败"
     return 1
   fi
+}
+
+check_datasources() {
+  [[ -x "$PYTHON" ]] || fail "Python 不存在或不可执行: $PYTHON" || return 1
+  [[ -f "$APP_DIR/main.py" ]] || fail "找不到 $APP_DIR/main.py" || return 1
+  [[ -f "$CHECK_SCRIPT" ]] || fail "找不到连通性检查脚本: $CHECK_SCRIPT" || return 1
+  [[ -f "$CONFIG_FILE" ]] || fail "找不到配置文件 $CONFIG_FILE" || return 1
+  cd "$APP_DIR"
+  sync_datasources || return 1
+  "$PYTHON" "$CHECK_SCRIPT" --workers "$CHECK_WORKERS" --timeout "$CHECK_TIMEOUT" "$@"
 }
 
 validate_settings() {
@@ -237,6 +252,7 @@ case "$cmd" in
   stop) [[ $# -eq 0 ]] || { fail 'stop 不接受参数'; exit 2; }; stop ;;
   restart) [[ $# -eq 0 ]] || { fail 'restart 不接受参数'; exit 2; }; stop && start ;;
   status) [[ $# -eq 0 ]] || { fail 'status 不接受参数'; exit 2; }; status ;;
+  check-datasources) check_datasources "$@" ;;
   logs|log) logs "$@" ;;
   help|-h|--help) usage ;;
   '') usage; exit 2 ;;

@@ -131,7 +131,7 @@ src/
 | `selfcheck_guards.py` | 护栏自检(12 例) |
 
 - **数据源**:`datasources.json` 启动时加载,改配置必须重启。MySQL/Oracle/Doris 以项目根目录 `bi_hosts_databases.csv` 为维护源,由 `services/db-proxy/sync_datasources.py` 生成运行时 `datasources.json` 的对应条目;同步保留 JSON 根级全局项及非 CSV 引擎。CSV 的凭据 profile 在生成时展开为每个数据源的一行 `connectionString`;CSV 中标为 `doris` 的行同步后使用运行时 `type: "mysql"`。`manage.sh start` 在每次启动新进程前自动同步,CSV 缺失或校验失败时拒绝启动;可用 `DB_PROXY_CSV` 指定 CSV 路径。旧式字段与 `connectionProfiles` 仍兼容。db-proxy 配置里的 `allowedDbs` 只供旧版 `/acl` 回显；网关按 `db-permissions` 规则过滤列表和校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
-- **db-proxy 运维**:Linux 部署通过 `services/db-proxy/manage.sh` 管理 start/stop/restart/status/logs；`restart` 经 `start` 自动同步 CSV；PID 与日志落在服务目录，Spark/Python 环境变量可通过 `DB_PROXY_*` 覆盖
+- **db-proxy 运维**:Linux 部署通过 `services/db-proxy/manage.sh` 管理 start/stop/restart/status/logs/check-datasources；`restart` 与全量数据源检查均先同步 CSV，连接检查使用只读探测 SQL，并在失败时返回逐库脱敏原因；PID 与日志落在服务目录，Spark/Python/检查并发与超时可通过 `DB_PROXY_*` 覆盖
 - **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、SparkSession、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。Impala 无顶层 `FROM` 的简单常量查询不改写 SQL 追加 `LIMIT`，由 `fetchmany` 限制结果读取。
 - **数据库查询资源隔离**:网关从已认证会话/API Token 提取主体，以 `dbProxyIdentitySecret`（未配置时兼容回退 `dbProxyToken`）签发短时 HMAC 身份头；db-proxy 验签后同时实施全局 `maxConcurrent`/`maxQps` 与主体级 `maxConcurrentPerSubject`（默认 2）/`maxQpsPerSubject`（默认 3）。用户隔离键为 `user:<username>`，外部 API Token 为 `token:<id>`；无有效签名的 MySQL/Oracle/Impala 查询拒绝执行。全局上限仍是总资源硬上限；配额计数在单个 db-proxy 进程内，不跨多实例共享。
 - **Spark 查询结果限制**:SparkSQL 与 SparkSession 保持相同结果结构与行数上限。SparkSQL/Thrift 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出;SparkSession 通过相同限行规则有界收集;达到上限时标记 truncated。HDFS 导出由对应引擎执行。

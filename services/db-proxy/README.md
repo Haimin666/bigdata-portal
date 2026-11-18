@@ -90,12 +90,15 @@ python3 services/db-proxy/sync_datasources.py \
 ```bash
 ./manage.sh start
 ./manage.sh status
+./manage.sh check-datasources   # 逐个探测 MySQL/Doris/Impala/Oracle
 ./manage.sh logs --follow
 ./manage.sh restart
 ./manage.sh stop
 ```
 
-默认使用 `/opt/spark4-orc/` 作为 `SPARK_HOME`、`/opt/spark/thrift-conf` 作为 `SPARK_CONF_DIR`，Python 使用 `/opt/spark/spark4/py312/bin/python3.12`，监听 `0.0.0.0:8756`。可通过 `DB_PROXY_DIR`、`DB_PROXY_CSV`、`DB_PROXY_SPARK_HOME`、`DB_PROXY_SPARK_CONF_DIR`、`DB_PROXY_PYTHON`、`DB_PROXY_HOST`、`DB_PROXY_PORT` 覆盖。PID 文件为 `db-proxy.pid`，日志为 `db-proxy.log`；启动后运行 `./manage.sh status` 查看状态。
+`check-datasources` 会先按 CSV 刷新运行配置，再从 db-proxy 主机直接对每个配置的数据源建立连接并执行只读 `SELECT 1`（Oracle 使用 `SELECT 1 FROM dual`）；默认最多 5 个并发连接，单个探测超时 5 秒。输出通过数、总耗时和每个失败项的类型、名称、耗时及脱敏错误原因；有失败时返回非零状态。可用 `DB_PROXY_CHECK_WORKERS`（1–32）和 `DB_PROXY_CHECK_TIMEOUT`（秒，1–60）调整并发和超时，`--verbose` 显示成功项。Doris 使用 MySQL 协议探测；同步器会在该类型条目上写入 `sourceType: "doris"` 元数据，方便检查报告区分 Doris 与 MySQL。旧配置没有该字段时检查器按运行时 `type` 报告。
+
+默认使用 `/opt/spark4-orc/` 作为 `SPARK_HOME`、`/opt/spark/thrift-conf` 作为 `SPARK_CONF_DIR`，Python 使用 `/opt/spark/spark4/py312/bin/python3.12`，监听 `0.0.0.0:8756`。可通过 `DB_PROXY_DIR`、`DB_PROXY_CSV`、`DB_PROXY_SPARK_HOME`、`DB_PROXY_SPARK_CONF_DIR`、`DB_PROXY_PYTHON`、`DB_PROXY_HOST`、`DB_PROXY_PORT`、`DB_PROXY_CHECK_WORKERS`、`DB_PROXY_CHECK_TIMEOUT` 覆盖。PID 文件为 `db-proxy.pid`，日志为 `db-proxy.log`；启动后运行 `./manage.sh status` 查看状态。
 
 本地开发仍可直接运行：
 

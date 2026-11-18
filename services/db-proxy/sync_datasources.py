@@ -163,6 +163,8 @@ def build_config(csv_path: Path, config_path: Path) -> Tuple[Dict[str, Any], Dic
                 runtime_type, host, port, database_or_service, profile, charset
             ),
         }
+        if kind == "doris":
+            datasource["sourceType"] = "doris"
         label = _value(row, "标签") or ("Doris" if kind == "doris" else "")
         if label:
             datasource["label"] = label
