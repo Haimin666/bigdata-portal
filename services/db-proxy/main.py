@@ -56,6 +56,7 @@ from sql_limits import (
     mask_sql,
     plan_row_limit,
 )
+from sync_generator import generate_db2hive
 
 # ── 配置:全部来自 datasources.json(唯一配置文件)────────────────
 CONFIG_FILE = "datasources.json"
@@ -216,7 +217,7 @@ app = FastAPI(title="db-proxy", version="2.1.0")
 
 # 对会新建数据库连接/执行计划的元数据端点施加共享并发护栏。
 # 跨库搜索有自己的请求闸门;其 worker 对每条物理连接单独申请 _query_semaphore。
-_METADATA_PATHS = frozenset({"/tables", "/fields", "/ddl", "/schema", "/explain"})
+_METADATA_PATHS = frozenset({"/tables", "/fields", "/ddl", "/schema", "/explain", "/sync/db2hive"})
 _SEARCH_PATH = "/search/tables"
 
 
@@ -351,6 +352,10 @@ class DataSource:
         # 显示别名:下拉/展示用,缺省回退到 name
         self.label: str = str(cfg.get("label", "")).strip() or self.name
         self.type: str = str(cfg.get("type", "mysql")).strip().lower()
+        # Preserve the maintained source kind: Doris is exposed as MySQL-compatible,
+        # but its metadata must not be used to generate a MySQL DataX sync job.
+        self.source_type: str = str(cfg.get("sourceType", self.type)).strip().lower()
+        self.datax_jdbc_url: str = str(cfg.get("dataxJdbcUrl", "")).strip()
         if self.type not in ("mysql", "oracle", "impala"):
             raise ValueError(f"datasource '{self.name}' type must be mysql/oracle/impala")
         cfg = _expand_connection_string(cfg)
@@ -1182,6 +1187,72 @@ class QueryReq(BaseModel):
     sql: str
     timeoutMs: int = 0  # 异步 job 用(毫秒,0=默认 1 小时);同步 /query 忽略
     aiFix: Optional[bool] = None  # 异步 Impala job 的 AI 修复选择;省略沿用服务端配置
+
+
+class Db2HiveReq(BaseModel):
+    db_name: str
+    table_name: str
+    align_with_hive: bool = True
+
+
+def _find_sync_datasource(db_name: str) -> DataSource:
+    query = db_name.strip().casefold()
+    eligible = [
+        ds for ds in DATASOURCES.values()
+        if ds.type in ("mysql", "oracle") and ds.source_type in ("mysql", "oracle")
+    ]
+    for attribute in ("name", "label", "service"):
+        matches = [ds for ds in eligible if str(getattr(ds, attribute, "")).casefold() == query]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="数据库名称匹配到多个数据源，请使用数据源 name")
+    matches = [
+        ds for ds in eligible
+        if query and (query in ds.name.casefold() or query in ds.label.casefold())
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail="数据库名称匹配到多个数据源，请使用完整数据源 name")
+    raise HTTPException(status_code=404, detail="未找到可用于数据同步的 MySQL/Oracle 数据源")
+
+
+@app.post("/sync/db2hive")
+def sync_db2hive(
+    req: Db2HiveReq, x_db_token: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    db_name = req.db_name.strip()
+    table_name = req.table_name.strip()
+    if not db_name or not table_name:
+        raise HTTPException(status_code=400, detail="db_name 和 table_name 不能为空")
+    if not re.fullmatch(r"[A-Za-z0-9_$#]+", table_name):
+        raise HTTPException(status_code=400, detail="table_name 只允许字母、数字、下划线、$ 和 #")
+    ds = _find_sync_datasource(db_name)
+    try:
+        data = generate_db2hive(
+            ds,
+            db_name,
+            table_name,
+            req.align_with_hive,
+            CONFIG.get("dataSync") or {},
+            DB_CONNECT_TIMEOUT,
+            QUERY_TIMEOUT,
+        )
+        return {"code": 0, "data": data}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if not (CONFIG.get("dataSync") or {}).get("enabled", False):
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        log.exception("db2hive generation failed datasource=%s table=%s", ds.name, table_name)
+        raise HTTPException(status_code=502, detail="同步代码生成失败，请检查 db-proxy 日志与 dataSync 配置") from exc
+    except Exception as exc:
+        log.exception("db2hive generation failed datasource=%s table=%s", ds.name, table_name)
+        raise HTTPException(status_code=502, detail="同步代码生成失败，请检查 db-proxy 日志") from exc
 
 
 @app.get("/health")

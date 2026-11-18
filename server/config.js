@@ -71,8 +71,6 @@ export default {
     .filter(Boolean),
   hdfsUrl: pick(fileCfg.hdfsUrl, 'HDFS_URL', 'http://hadoop-nn-1.bigdata.shiqiao.com:9870'),
   dsWebUrl: pick(fileCfg.dsWebUrl, 'DS_WEB_URL', 'http://olds.bigdata.shiqiao.com/dolphinscheduler'),
-  // 数据同步 DBA 服务(生成 db2hive SQL/JSON);配置后挂 /api/sync/db2hive
-  dbaSyncUrl: pick(fileCfg.dbaSyncUrl, 'DBA_SYNC_URL', ''),
   // 数据同步 API token:配置后 /api/sync/* 接口支持 X-API-Token header 鉴权(绕过 cookie 认证)
   syncApiToken: pick(fileCfg.syncApiToken, 'SYNC_API_TOKEN', ''),
   // 数据库查询 API token:独立于数据同步 token;库权限在 db-permissions 矩阵的 db-query-api 角色配置。

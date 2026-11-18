@@ -157,6 +157,10 @@ QueryView.vue
 
 SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固定向 `/api/spark/*` 与 db-proxy `/spark/*` 透传 `executionMode=thrift` 和 `executionMode=session`，覆盖查询、异步任务、状态/取消、日志、Stage、Schema 补全和导出。两者沿用相同门户模块/数据权限与写 SQL 校验。部署 session 通道需重启 db-proxy；发布独立引擎选项需重建门户镜像。
 
+### 数据同步代码生成流
+
+`SyncCodeView.vue` 继续调用门户 `POST /api/sync/db2hive`；网关执行 sync 模块认证后，用 `dbProxyUrl` 和 `dbProxyToken` 转发到 db-proxy `POST /sync/db2hive`。db-proxy 复用已加载的 MySQL/Oracle 数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`。门户响应仍为 `{code, data: {sqlContent, jsonContent}}`。旧 `dbaSyncUrl` 不再参与门户数据同步。
+
 ## 6. 配置体系
 
 唯一来源 `server/config.local.json`(不入 git,样例 `config.local.example.json`),`config.js` 缺省回退环境变量。**配置文件 JSON 非法(如布尔误写 `True`/`False`)时启动即报错退出**,避免配置静默失效。

@@ -1,10 +1,8 @@
-// 数据同步模块(从 index.js 拆出):代理内部 DBA 服务的 db2hive 接口。
-// 上游:http://10.25.100.51:8000/api/dba/db2hive?db_name=&table_name=
-// 返回 { code, data: { sql_content, json_content } }
-// 门户侧鉴权(登录门禁 /api 前缀)后再转发,避免内网 DBA 服务直接暴露。
+// 数据同步模块:网关认证后转发到 db-proxy 的 SQL/JSON 生成接口。
+// 门户 URL 与响应字段保持兼容，底层不再依赖 bigdata-service。
 import config from '../config.js'
 
-const DBA_BASE = config.dbaSyncUrl // 如 http://10.25.100.51:8000
+const DB_PROXY_BASE = config.dbProxyUrl
 
 // API Token 守卫:支持 X-API-Token header 鉴权,绕过 cookie 认证
 // 优先级:1. token 匹配直接放行;2. 无 token 时回退到 cookie 认证(auth-gate 处理)
@@ -19,8 +17,6 @@ function requireApiToken(req, res, next) {
 }
 
 export function setupSyncProxy(app) {
-  if (!DBA_BASE) return
-
   // 生成 db2hive 同步代码(SQL + JSON)
   app.post('/api/sync/db2hive', requireApiToken, async (req, res) => {
     const dbName = String(req.body?.db_name || '').trim()
@@ -28,12 +24,26 @@ export function setupSyncProxy(app) {
     if (!dbName || !tableName) {
       return res.status(400).json({ code: 400, msg: 'db_name 和 table_name 不能为空' })
     }
+    if (!DB_PROXY_BASE) {
+      return res.status(503).json({ code: 503, msg: 'db-proxy URL 未配置' })
+    }
     try {
-      const url = `${DBA_BASE}/api/dba/db2hive?db_name=${encodeURIComponent(dbName)}&table_name=${encodeURIComponent(tableName)}`
-      const r = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(30000) })
+      const url = new URL('/sync/db2hive', DB_PROXY_BASE.endsWith('/') ? DB_PROXY_BASE : `${DB_PROXY_BASE}/`)
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'X-DB-Token': config.dbProxyToken || '',
+        },
+        body: JSON.stringify({ db_name: dbName, table_name: tableName, align_with_hive: true }),
+        signal: AbortSignal.timeout(60000),
+      })
       const body = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(body.detail || body.msg || `DBA 服务 HTTP ${r.status}`)
-      // 上游结构 { code, data: { sql_content, json_content } }
+      if (!r.ok || body.code !== 0) {
+        const status = r.ok ? 502 : r.status
+        const message = body.detail || body.msg || `db-proxy HTTP ${r.status}`
+        return res.status(status).json({ code: status, msg: message })
+      }
       const data = body.data || {}
       res.json({ code: 0, data: { sqlContent: data.sql_content || '', jsonContent: data.json_content || '' } })
     } catch (e) {

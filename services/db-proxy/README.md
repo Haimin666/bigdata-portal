@@ -60,6 +60,10 @@
 
 `datasources` 中每个对象独立描述一个数据库，连接参数集中写在该对象的一行 `connectionString` 中；全局认证、超时、行数和并发配置仍放在 JSON 根级。JSON 是 db-proxy 的运行时配置，启动时读取，修改后需重启。
 
+### 数据同步 SQL/JSON 生成
+
+根级可选 `dataSync` 配置控制 `POST /sync/db2hive`。`enabled` 必须为 `true`；`hiveMetastore` 是查询 `lion_dw_ods` Hive 表结构的 MySQL 连接（`align_with_hive=true` 时必需）；`datax.mysqlPassword` 是输出到 MySQLReader JSON 的 DataX 密码，`datax.mysqlUsername` 可选覆盖源数据用户名，`datax.oracleUsername`/`oraclePassword` 用于 OracleReader；`datasourceOverrides` 可用数据源 `name` 覆盖单个源的相应 DataX 凭据或 Oracle JDBC URL。`defaultFs` 与 `hadoopConfig` 可覆盖 HDFS HA writer 设置。DataX 凭据与 Hive metastore 密码只放在运行机权限受限的 `datasources.json` 中。CSV 同步只替换 `datasources`，会保留这些根级配置。
+
 MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。其中 `datasource` 行定义连接，`credential_profile` 行定义共享账号或单数据源覆盖，`inventory` 行只记录 BI 主机和库名、不生成运行时连接。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备运行配置 `datasources.json`（首次部署时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置）。可先手动预演 CSV 与配置：
 
 ```bash
@@ -149,6 +153,7 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 | GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
+| POST | `/sync/db2hive` | 生成 Hive 建表/新增字段 SQL 与 DataX JSON，body `{db_name, table_name, align_with_hive?}`，仅 MySQL/Oracle 数据源 |
 | POST | `/spark/query` | Spark SQL 执行;body `{db, sql, executionMode?}` |
 | GET | `/spark/schema/databases?executionMode=` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;模式由 query 参数选择) |
 | GET | `/spark/schema/tables?db=&executionMode=` | Spark 库下表列表(SHOW TABLES IN;模式由 query 参数选择) |
