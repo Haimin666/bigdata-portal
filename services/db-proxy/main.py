@@ -5,9 +5,8 @@
 
 **所有配置集中在 datasources.json 一个文件**(代码写死路径,无需其他配置):
   - 服务配置:authToken / listenHost / listenPort / 超时 / 行数限制
-  - 白名单:allowedDbs / allowedTables
   - Oracle thick 模式:oracleClientLib
-  - 数据源:datasources 数组(每个源独立 type/host/port/账密/service)
+  - 数据源:datasources 数组(每个数据库独立成块;MySQL/Doris/Oracle 可用 connectionString)
 
 设计目标:
   - 网关管控读写权限;Impala 数据源可额外启用只读保护
@@ -31,6 +30,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import base64
+import hmac
 import re
 import time
 import uuid
@@ -41,6 +42,7 @@ import threading
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
@@ -76,6 +78,7 @@ CONFIG = _read_config()
 
 # 服务配置(JSON 顶层,缺失用默认值)
 AUTH_TOKEN = str(CONFIG.get("authToken", ""))
+IDENTITY_SECRET = str(CONFIG.get("identitySecret") or AUTH_TOKEN)
 LISTEN_HOST = str(CONFIG.get("listenHost", "0.0.0.0"))
 LISTEN_PORT = int(CONFIG.get("listenPort", 8756))
 # 行数契约(产品固定):默认返回 1000 行,显式上限硬顶 500000 行。
@@ -87,19 +90,27 @@ DEFAULT_LIMIT, MAX_LIMIT = effective_limits(
 MAX_SQL_LEN = int(CONFIG.get("maxSqlLen", 32768))
 QUERY_TIMEOUT = int(CONFIG.get("queryTimeout", 60))
 DB_CONNECT_TIMEOUT = int(CONFIG.get("connectTimeout", 5))
+# 旧配置兼容字段:仅由 /acl 回显,不参与 db-proxy 侧的库/表过滤。
 ALLOWED_DBS = [str(s).strip() for s in CONFIG.get("allowedDbs", []) if str(s).strip()]
 ALLOWED_TABLES = [
     str(s).strip() for s in CONFIG.get("allowedTables", []) if str(s).strip()
 ]
-# 可写白名单 / 过程白名单已移除:权限管控收口到门户网关(密码解锁),db-proxy 仅保留
-# 鉴权 + 库/表白名单 + 资源护栏(多语句/行数/长度/超时)
+# 查询授权由门户网关数据权限矩阵负责;db-proxy 保留鉴权、资源护栏与可选只读保护。
 # Oracle thick 模式:客户端库目录(含 libclntsh.so),连 11g 必配
 ORACLE_CLIENT_LIB = str(CONFIG.get("oracleClientLib", ""))
 
 # 服务端资源护栏:同时执行上限 + 请求限速(防批量请求刷爆数据库连接/拖垮库)
 MAX_CONCURRENT = max(1, int(CONFIG.get("maxConcurrent", 5)))
 MAX_QPS = max(1, int(CONFIG.get("maxQps", 10)))
+MAX_CONCURRENT_PER_SUBJECT = min(
+    MAX_CONCURRENT, max(1, int(CONFIG.get("maxConcurrentPerSubject", 2)))
+)
+MAX_QPS_PER_SUBJECT = max(1, int(CONFIG.get("maxQpsPerSubject", 3)))
 _query_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT)
+_subject_active: Dict[str, int] = {}
+_subject_qps: Dict[str, collections.deque] = {}
+_qps_lock = threading.Lock()
+_qps_window = collections.deque()
 _SEARCH_WORKERS = min(MAX_CONCURRENT, 8)
 _SEARCH_MAX_REQUESTS = max(1, int(CONFIG.get("maxConcurrentSearches", 2)))
 try:
@@ -108,8 +119,6 @@ except (TypeError, ValueError):
     _SEARCH_DEADLINE_SECONDS = 5.0
 _SEARCH_CONNECT_TIMEOUT = max(1, int(CONFIG.get("searchConnectTimeout", 2)))
 _search_request_semaphore = threading.BoundedSemaphore(_SEARCH_MAX_REQUESTS)
-_qps_lock = threading.Lock()
-_qps_window = collections.deque()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,6 +282,67 @@ def _oracle_session_ids(conn) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+def _expand_connection_string(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """把单条 MySQL/Doris/Oracle URI 展开为驱动参数;显式字段仍可覆盖 URI。"""
+    raw = cfg.get("connectionString")
+    if raw is None:
+        return cfg
+    name = str(cfg.get("name", "?"))
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"datasource '{name}' connectionString must be a non-empty string")
+
+    source_type = str(cfg.get("type", "mysql")).strip().lower()
+    try:
+        parsed = urlsplit(raw.strip())
+        host = parsed.hostname
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except ValueError as exc:
+        raise ValueError(f"datasource '{name}' has invalid connectionString") from exc
+
+    schemes = {"mysql": ("mysql", "doris"), "oracle": ("oracle",)}
+    if parsed.scheme.lower() not in schemes.get(source_type, ()):
+        raise ValueError(
+            f"datasource '{name}' connectionString scheme does not match type '{source_type}'"
+        )
+    if not parsed.netloc or not host:
+        raise ValueError(f"datasource '{name}' connectionString must include a host")
+    if parsed.fragment:
+        raise ValueError(f"datasource '{name}' connectionString must not include a fragment")
+
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    allowed_query_keys = {"mysql": {"charset"}, "oracle": {"service_name"}}
+    unknown = set(query) - allowed_query_keys.get(source_type, set())
+    if unknown:
+        raise ValueError(
+            f"datasource '{name}' connectionString has unsupported query options: "
+            + ", ".join(sorted(unknown))
+        )
+
+    fields: Dict[str, Any] = {"host": host}
+    if port is not None:
+        fields["port"] = port
+    if username is not None:
+        fields["user"] = unquote(username)
+    if password is not None:
+        fields["password"] = unquote(password)
+
+    database = unquote(parsed.path.lstrip("/"))
+    if source_type == "mysql":
+        if database:
+            fields["schema"] = database
+        if "charset" in query:
+            fields["charset"] = query["charset"][-1]
+    else:
+        service = database or (query.get("service_name") or [""])[-1]
+        if service:
+            fields["service"] = service
+
+    # 保持向后兼容:URI 给出连接默认值,同一数据源显式字段优先。
+    return {**fields, **cfg}
+
+
 class DataSource:
     """单个数据源配置:name 是请求 db 参数,type 是 mysql/oracle。"""
 
@@ -283,6 +353,7 @@ class DataSource:
         self.type: str = str(cfg.get("type", "mysql")).strip().lower()
         if self.type not in ("mysql", "oracle", "impala"):
             raise ValueError(f"datasource '{self.name}' type must be mysql/oracle/impala")
+        cfg = _expand_connection_string(cfg)
         raw_hosts = cfg.get("hosts", cfg.get("host", "127.0.0.1"))
         if isinstance(raw_hosts, list):
             self.host: str = ",".join(str(x).strip() for x in raw_hosts if str(x).strip())
@@ -507,9 +578,30 @@ class DataSource:
 
 
 def _load_datasources() -> Dict[str, DataSource]:
+    profiles = CONFIG.get("connectionProfiles") or {}
+    if not isinstance(profiles, dict):
+        raise ValueError("datasources.json 'connectionProfiles' must be an object")
+
     sources: Dict[str, DataSource] = {}
-    for cfg in CONFIG["datasources"]:
+    for raw_cfg in CONFIG["datasources"]:
+        cfg = dict(raw_cfg)
+        profile_name = cfg.pop("connectionProfile", None)
+        if profile_name is not None:
+            profile = profiles.get(str(profile_name))
+            if not isinstance(profile, dict):
+                raise ValueError(
+                    f"datasource '{cfg.get('name', '?')}' references unknown "
+                    f"connectionProfile '{profile_name}'"
+                )
+            # Per-datasource fields override shared connection defaults.
+            cfg = {**profile, **cfg}
+
         ds = DataSource(cfg)
+        if ds.name in sources:
+            log.warning(
+                "duplicate datasource name '%s'; later entry overrides earlier one",
+                ds.name,
+            )
         sources[ds.name] = ds
     return sources
 
@@ -532,6 +624,42 @@ def _impala_cache_namespace(ds: DataSource) -> str:
 
 
 # ── 安全工具 ──────────────────────────────────────────────────
+def verified_subject(payload: Optional[str], signature: Optional[str]) -> Tuple[str, bool]:
+    """验证网关签发的短时主体声明;返回主体与可信的门户管理员标记。"""
+    if not IDENTITY_SECRET:
+        raise HTTPException(status_code=503, detail="db-proxy identity signing secret is not configured")
+    if not payload or not signature:
+        raise HTTPException(status_code=401, detail="signed db-proxy subject required")
+    if len(payload) > 1024 or len(signature) > 128:
+        raise HTTPException(status_code=401, detail="invalid db-proxy subject")
+    try:
+        payload_bytes = payload.encode("ascii")
+        signature_bytes = signature.encode("ascii")
+    except UnicodeEncodeError:
+        raise HTTPException(status_code=401, detail="invalid db-proxy subject")
+    expected = hmac.new(
+        IDENTITY_SECRET.encode("utf-8"), payload_bytes, hashlib.sha256
+    ).hexdigest().encode("ascii")
+    if not secrets.compare_digest(signature_bytes, expected):
+        raise HTTPException(status_code=401, detail="invalid db-proxy subject signature")
+    try:
+        padded = payload + "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        subject = claims.get("subject")
+        expires_at = claims.get("expiresAt")
+    except Exception:
+        raise HTTPException(status_code=401, detail="invalid db-proxy subject")
+    now = int(time.time())
+    if (
+        not isinstance(subject, str) or len(subject) > 256
+        or not isinstance(expires_at, int) or expires_at < now or expires_at > now + 60
+    ):
+        raise HTTPException(status_code=401, detail="expired or invalid db-proxy subject")
+    if subject != "anonymous" and not subject.startswith(("user:", "token:")):
+        raise HTTPException(status_code=401, detail="invalid db-proxy subject")
+    return subject, claims.get("isAdmin") is True
+
+
 def require_auth(x_db_token: Optional[str]) -> None:
     """鉴权:配置了 authToken 则必须匹配(常量时间比较,避免时序侧信道)。"""
     if not AUTH_TOKEN:
@@ -628,12 +756,13 @@ class DbError(Exception):
 
 
 _MYSQL_ERROR_TYPES = {
-    1045: "AccessDenied", 1049: "UnknownDatabase", 1054: "ColumnNotFound",
-    1062: "DuplicateEntry", 1064: "SyntaxError", 1142: "TableAccessDenied",
+    1044: "AccessDenied", 1045: "AccessDenied", 1049: "UnknownDatabase", 1054: "ColumnNotFound",
+    1062: "DuplicateEntry", 1064: "SyntaxError", 1130: "AccessDenied", 1142: "TableAccessDenied",
     1146: "TableNotFound", 1205: "LockWaitTimeout", 1213: "Deadlock",
     1364: "FieldNotDefault", 1406: "DataTooLong",
     1451: "ForeignKeyViolation", 1452: "ForeignKeyViolation",
-    2002: "ConnectError", 2003: "ConnectError", 2006: "ConnectError", 2013: "ConnectError",
+    2002: "ConnectError", 2003: "ConnectError", 2005: "ConnectError", 2006: "ConnectError",
+    2013: "ConnectError", 2055: "ConnectError",
 }
 
 _ORACLE_ERROR_TYPES = {
@@ -641,9 +770,47 @@ _ORACLE_ERROR_TYPES = {
     "ORA-00904": "ColumnNotFound", "ORA-00933": "SyntaxError",
     "ORA-00942": "TableNotFound", "ORA-01017": "AccessDenied",
     "ORA-01400": "FieldNotDefault", "ORA-01401": "DataTooLong",
-    "ORA-12154": "ConnectError", "ORA-12541": "ConnectError",
-    "ORA-12560": "ConnectError", "ORA-00060": "Deadlock",
+    "ORA-00060": "Deadlock",
+    "ORA-03113": "ConnectError", "ORA-03114": "ConnectError", "ORA-03135": "ConnectError",
+    "ORA-12154": "ConnectError", "ORA-12170": "ConnectError", "ORA-12505": "ConnectError",
+    "ORA-12514": "ConnectError", "ORA-12516": "ConnectError", "ORA-12535": "ConnectError",
+    "ORA-12537": "ConnectError", "ORA-12541": "ConnectError", "ORA-12543": "ConnectError",
+    "ORA-12545": "ConnectError", "ORA-12547": "ConnectError", "ORA-12560": "ConnectError",
 }
+
+_DB_ERROR_GUIDANCE = {
+    "UnknownDatabase": ("数据库名不存在或配置不匹配。请核对当前数据源的数据库名称。"),
+    "TableNotFound": ("表不存在或当前账号不可见。请核对库名、表名、大小写及访问权限。"),
+    "ColumnNotFound": ("字段不存在或当前账号不可见。请核对字段名、表结构及访问权限。"),
+    "ConnectError": ("数据库连接失败。请检查主机地址、端口、网络连通性及数据库服务状态；Oracle 还需核对服务名或 SID。"),
+    "AccessDenied": ("数据库拒绝访问。请检查账号、密码及目标库的授权。"),
+    "TableAccessDenied": ("当前账号无权访问该表。请检查表级授权。"),
+}
+
+
+def _safe_db_error_text(message: str) -> str:
+    """清理错误详情中的常见凭证形式后再返回给门户。"""
+    text = " ".join(str(message or "").split())
+    text = re.sub(r"(//)[^/\s@]+:[^/\s@]+@", r"\1***:***@", text)
+    text = re.sub(
+        r"\b(username|user|password|passwd|pwd|token|secret|dsn|access[_-]?key)\b\s*([=:])\s*([^\s,;]+)",
+        r"\1\2***", text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"\b(username|user|password|passwd|pwd|token|secret|dsn|access[_-]?key)\b(\s+)([A-Za-z0-9+/=._-]{8,})",
+        r"\1\2***", text, flags=re.IGNORECASE
+    )
+    text = re.sub(r"\b(x-db-token|x-spark-token|x-spark-write)\b\s*[:=]\s*\S+", r"\1: ***", text, flags=re.IGNORECASE)
+    return text[:1000]
+
+
+def _describe_db_error(error: DbError) -> str:
+    """返回便于用户排查的中文说明，并保留脱敏后的驱动详情。"""
+    code = " [%s]" % error.error_code if error.error_code is not None else ""
+    guidance = _DB_ERROR_GUIDANCE.get(error.error_type, "数据库执行失败，请结合原始错误详情排查。")
+    return "%s %s%s：%s 原始错误：%s" % (
+        error.engine, error.error_type, code, guidance, _safe_db_error_text(error.message)
+    )
 
 
 def _extract_sql_error(e: Exception, engine: str) -> DbError:
@@ -746,11 +913,12 @@ def _execute_query(
     取消时据此在数据库侧终止语句(而不是只关本地连接)。
     """
     if is_select:
-        # 画布 SQL 不变;仅 SELECT/WITH 在服务端隐式限行(默认 1000,硬上限 500000)。
-        # SHOW/DESC/EXPLAIN 等特殊命令保持原文,结果读取仍受 limit 约束。
+        # 画布 SQL 不变;SELECT/WITH 由服务端限行(默认 1000,硬上限 500000)。
+        # Impala 无 FROM 常量查询及 SHOW/DESC/EXPLAIN 不追加限行子句,读取仍有界。
         row_mode = ds.effective_row_limit(conn)
         plan = plan_row_limit(clean_sql, mode=row_mode,
-                              default_limit=DEFAULT_LIMIT, max_limit=MAX_LIMIT)
+                              default_limit=DEFAULT_LIMIT, max_limit=MAX_LIMIT,
+                              engine=ds.type)
         clean_sql = plan.sql
         limit = plan.limit
         cur = conn.cursor()
@@ -848,6 +1016,7 @@ def _execute_database(
     job_logs: Optional[List[str]] = None,
     query_timeout: Optional[int] = None,
     state: Optional[Dict[str, Any]] = None,
+    ai_fix_enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """执行数据库语句,并为 Impala 增加类型检查、AI 修复与结构化日志。"""
     logs: List[str] = job_logs if job_logs is not None else []
@@ -898,6 +1067,12 @@ def _execute_database(
             de = _extract_sql_error(exc, ds.type)
             if de.error_type not in ("SyntaxError", "TypeMismatch", "ColumnNotFound", "TableNotFound"):
                 logs.append("【AI 修复】错误类型为 %s，当前不自动修复。" % de.error_type)
+                de.logs = logs
+                raise de
+            if ai_fix_enabled is False:
+                logs.append("【执行失败】错误类型：%s。" % de.error_type)
+                logs.append("【执行失败】数据库详情：%s" % de.message)
+                logs.append("【AI 修复】工作台已关闭 AI 自动修复，本次保留原 SQL。")
                 de.logs = logs
                 raise de
             error_labels = {
@@ -1006,6 +1181,7 @@ class QueryReq(BaseModel):
     db: str
     sql: str
     timeoutMs: int = 0  # 异步 job 用(毫秒,0=默认 1 小时);同步 /query 忽略
+    aiFix: Optional[bool] = None  # 异步 Impala job 的 AI 修复选择;省略沿用服务端配置
 
 
 @app.get("/health")
@@ -1037,39 +1213,35 @@ class DbJobManager:
         self._ttl = ttl
 
     def submit(self, db: str, sql: str, timeout_ms: int = 3600000,
-               owner: Optional[str] = None) -> str:
+               owner: Optional[str] = None, ai_fix: Optional[bool] = None) -> str:
         # 数据源在提交阶段就解析:未知 db 立刻 404,而不是等后台线程失败
         ds = get_datasource(db)
-        # 与同步 /query 共享并发信号量 + QPS 限制,防止异步 job 无限并发打爆数据库连接
-        if not _query_semaphore.acquire(blocking=False):
-            raise HTTPException(
-                status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
-            )
+        # 与同步 /query 共享全局与主体级并发/QPS 配额。
+        _acquire_query_slot(owner)
         try:
-            _check_qps()
             job_id = "dbj_%s" % uuid.uuid4().hex
             with self._lock:
                 self._jobs[job_id] = {
                     "id": job_id, "state": "queued", "db": db, "sql": sql,
-                    "timeout_ms": timeout_ms, "created_at": time.time(),
+                    "timeout_ms": timeout_ms, "ai_fix": ai_fix, "created_at": time.time(),
                     "started_at": None, "finished_at": None,
                     "result": None, "error": None, "logs": [], "executed_sql": None,
                     "conn": None, "cursor": None, "thread_id": None,
                     "session_ids": None, "ds": ds, "owner": owner,
                     "cancel_requested": False, "cancel_method": None,
                 }
-            threading.Thread(target=self._run, args=(job_id,), daemon=True, name="db-job-%s" % job_id).start()
+            threading.Thread(target=self._run, args=(job_id, owner), daemon=True, name="db-job-%s" % job_id).start()
             return job_id
         except Exception:
-            _query_semaphore.release()
+            _release_query_slot(owner)
             raise
 
-    def _run(self, job_id: str) -> None:
+    def _run(self, job_id: str, owner: str) -> None:
         try:
             self._run_inner(job_id)
         finally:
-            # 无论成功/失败/取消,释放并发信号量(submit 已 acquire)
-            _query_semaphore.release()
+            # 无论成功/失败/取消,释放全局与主体级查询槽(submit 已 acquire)
+            _release_query_slot(owner)
 
     def _job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -1096,13 +1268,23 @@ class DbJobManager:
             j["ds"] = ds
             if ds.type == "impala":
                 j["logs"].append("【Impala 进度】任务已启动，正在连接数据源。")
-            conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+            try:
+                conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+            except Exception as exc:
+                de = _extract_sql_error(exc, ds.type)
+                if de.error_type == "DatabaseError":
+                    de.error_type = "ConnectError"
+                raise DbError(
+                    ds.type, de.error_type, de.error_code,
+                    "connect failed: %s" % de.message, j["logs"]
+                ) from exc
             j["conn"] = conn  # 持有连接:取消时先杀语句再关连接
             if ds.type == "impala":
                 j["logs"].append("【Impala 进度】数据源连接成功，开始 SQL 类型校验。")
             try:
                 result = _execute_database(
-                    ds, conn, clean_sql, is_select, start, j["logs"], q_timeout, j
+                    ds, conn, clean_sql, is_select, start, j["logs"], q_timeout, j,
+                    ai_fix_enabled=j.get("ai_fix")
                 )
             finally:
                 j["conn"] = None
@@ -1132,8 +1314,12 @@ class DbJobManager:
                 if not is_select and clean_sql and ds is not None:
                     _write_audit(j["db"], ds.type, clean_sql, None, (time.time() - start) * 1000, "async")
                 if isinstance(e, DbError):
-                    j["logs"] = e.logs
-                j["error"] = str(e)[:2000]
+                    j["logs"] = list(e.logs)
+                    diagnosis = _describe_db_error(e)
+                    j["logs"].append("【错误诊断】" + diagnosis)
+                    j["error"] = diagnosis[:2000]
+                else:
+                    j["error"] = str(e)[:2000]
                 j["state"] = "failed"
         finally:
             j["finished_at"] = time.time()
@@ -1144,7 +1330,7 @@ class DbJobManager:
             j = self._jobs.get(job_id)
             if not j:
                 return None
-            if owner is not None and j.get("owner") not in (None, owner):
+            if owner is not None and j.get("owner") != owner:
                 return None
             return {
                 "id": j["id"], "state": j["state"], "db": j["db"], "sql": j["sql"][:500],
@@ -1165,7 +1351,7 @@ class DbJobManager:
             j = self._jobs.get(job_id)
             if not j or j["state"] not in ("queued", "running"):
                 return False
-            if owner is not None and j.get("owner") not in (None, owner):
+            if owner is not None and j.get("owner") != owner:
                 return False
             j["cancel_requested"] = True
             conn = j.get("conn")
@@ -1214,16 +1400,15 @@ DB_JOBS = DbJobManager()
 
 @app.post("/query")
 def query(
-    req: QueryReq, x_db_token: Optional[str] = Header(default=None)
+    req: QueryReq,
+    x_db_token: Optional[str] = Header(default=None),
+    x_db_subject: Optional[str] = Header(default=None),
+    x_db_subject_signature: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     require_auth(x_db_token)
-    # 并发上限:超过同时执行数直接拒绝(防打爆数据库连接)
-    if not _query_semaphore.acquire(blocking=False):
-        raise HTTPException(
-            status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
-        )
+    subject, _ = verified_subject(x_db_subject, x_db_subject_signature)
+    _acquire_query_slot(subject)
     try:
-        _check_qps()
         # SQL 长度上限(防超大 SQL)
         if len(req.sql) > MAX_SQL_LEN:
             raise HTTPException(
@@ -1250,12 +1435,7 @@ def query(
                 "code": 502,
                 "errorType": e.error_type,
                 "errorCode": e.error_code,
-                "detail": "%s %s%s: %s" % (
-                    e.engine,
-                    e.error_type,
-                    (" [%s]" % e.error_code) if e.error_code is not None else "",
-                    e.message,
-                )[:500],
+                "detail": _describe_db_error(e)[:500],
                 "logs": e.logs,
             },
         )
@@ -1265,29 +1445,81 @@ def query(
         log.exception("query unexpected error: %.300s", str(e))
         raise HTTPException(status_code=500, detail=str(e)[:500])
     finally:
-        _query_semaphore.release()
+        _release_query_slot(subject)
 
 
-def _check_qps() -> None:
-    """滑动窗口限速:1 秒窗口内超过 MAX_QPS 拒绝。"""
+def _acquire_query_slot(subject: str) -> None:
+    """原子申请全局与主体级并发槽，并累计双方的一秒滑动 QPS 窗口。"""
     now = time.time()
     with _qps_lock:
-        _qps_window.append(now)
-        while _qps_window and now - _qps_window[0] > 1.0:
-            _qps_window.popleft()
-        if len(_qps_window) > MAX_QPS:
+        active = _subject_active.get(subject, 0)
+        if active >= MAX_CONCURRENT_PER_SUBJECT:
             raise HTTPException(
-                status_code=429, detail=f"too many requests (max {MAX_QPS} qps)"
+                status_code=429,
+                detail=f"too many concurrent queries for subject (max={MAX_CONCURRENT_PER_SUBJECT})",
             )
+        if not _query_semaphore.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429, detail=f"too many concurrent queries (max={MAX_CONCURRENT})"
+            )
+        subject_window = None
+        try:
+            while _qps_window and now - _qps_window[0] > 1.0:
+                _qps_window.popleft()
+            for key, window in list(_subject_qps.items()):
+                while window and now - window[0] > 1.0:
+                    window.popleft()
+                if not window:
+                    _subject_qps.pop(key, None)
+            subject_window = _subject_qps.setdefault(subject, collections.deque())
+            while subject_window and now - subject_window[0] > 1.0:
+                subject_window.popleft()
+            if len(_qps_window) >= MAX_QPS:
+                raise HTTPException(status_code=429, detail=f"too many requests (max {MAX_QPS} qps)")
+            if len(subject_window) >= MAX_QPS_PER_SUBJECT:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"too many requests for subject (max {MAX_QPS_PER_SUBJECT} qps)",
+                )
+            _qps_window.append(now)
+            subject_window.append(now)
+            _subject_active[subject] = active + 1
+        except Exception:
+            if not subject_window:
+                _subject_qps.pop(subject, None)
+            _query_semaphore.release()
+            raise
+
+
+def _release_query_slot(subject: Optional[str]) -> None:
+    if subject is None:
+        return
+    with _qps_lock:
+        active = _subject_active.get(subject, 0)
+        if active <= 1:
+            _subject_active.pop(subject, None)
+        else:
+            _subject_active[subject] = active - 1
+        _query_semaphore.release()
+        subject_window = _subject_qps.get(subject)
+        if subject_window is not None:
+            now = time.time()
+            while subject_window and now - subject_window[0] > 1.0:
+                subject_window.popleft()
+            if not subject_window:
+                _subject_qps.pop(subject, None)
 
 
 @app.post("/jobs")
 def db_job_submit(
     req: QueryReq,
     x_db_token: Optional[str] = Header(default=None),
+    x_db_subject: Optional[str] = Header(default=None),
+    x_db_subject_signature: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    """异步提交 mysql/oracle 查询:立即返回 jobId,后台执行(网关 60s 超时安全)。"""
+    """异步提交 MySQL/Oracle/Impala 查询并按已验签主体隔离配额与任务结果。"""
     require_auth(x_db_token)
+    subject, _ = verified_subject(x_db_subject, x_db_subject_signature)
     if not req.sql or not req.sql.strip():
         raise HTTPException(status_code=400, detail="sql is required")
     # 与同步 /query 同一护栏:异步入口不能绕过 SQL 长度上限
@@ -1297,24 +1529,36 @@ def db_job_submit(
             detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
         )
     timeout_ms = req.timeoutMs or 3600000
-    job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms)
+    job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms, owner=subject, ai_fix=req.aiFix)
     log.info("db job submitted: %s db=%s", job_id, req.db)
     return {"code": 0, "data": {"jobId": job_id}}
 
 
 @app.get("/jobs/{job_id}")
-def db_job_status(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def db_job_status(
+    job_id: str,
+    x_db_token: Optional[str] = Header(default=None),
+    x_db_subject: Optional[str] = Header(default=None),
+    x_db_subject_signature: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     require_auth(x_db_token)
-    j = DB_JOBS.get(job_id)
+    subject, is_admin = verified_subject(x_db_subject, x_db_subject_signature)
+    j = DB_JOBS.get(job_id, owner=None if is_admin else subject)
     if not j:
         raise HTTPException(status_code=404, detail="job not found: %s" % job_id)
     return {"code": 0, "data": j}
 
 
 @app.post("/jobs/{job_id}/cancel")
-def db_job_cancel(job_id: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def db_job_cancel(
+    job_id: str,
+    x_db_token: Optional[str] = Header(default=None),
+    x_db_subject: Optional[str] = Header(default=None),
+    x_db_subject_signature: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     require_auth(x_db_token)
-    if not DB_JOBS.cancel(job_id):
+    subject, is_admin = verified_subject(x_db_subject, x_db_subject_signature)
+    if not DB_JOBS.cancel(job_id, owner=None if is_admin else subject):
         raise HTTPException(status_code=404, detail="job not found or already finished: %s" % job_id)
     return {"code": 0, "data": {"cancelled": True}}
 
@@ -1334,6 +1578,9 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
             "maxSqlLen": MAX_SQL_LEN,
             "maxConcurrent": MAX_CONCURRENT,
             "maxQps": MAX_QPS,
+            "maxConcurrentPerSubject": MAX_CONCURRENT_PER_SUBJECT,
+            "maxQpsPerSubject": MAX_QPS_PER_SUBJECT,
+            "identityEnabled": bool(IDENTITY_SECRET),
             "queryTimeout": QUERY_TIMEOUT,
             "authEnabled": bool(AUTH_TOKEN),
             "oracleThick": bool(ORACLE_CLIENT_LIB),

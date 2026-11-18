@@ -15,15 +15,15 @@
                     ↓  dbProxyUrl(如 http://10.25.15.106:8756) + X-DB-Token
               db-proxy(本服务)
               ├─ require_auth(X-DB-Token 匹配 authToken)     ← 服务入口鉴权
-              ├─ 资源护栏: 行数上限 / maxSqlLen / maxConcurrent / maxQps / 超时
+              ├─ 校验网关签发的短时 HMAC 主体声明(X-DB-Subject*)
+               ├─ 资源护栏: 行数上限 / maxSqlLen / 全局与主体级并发/QPS / 超时
               ├─ 执行: MySQL(Doris)/Oracle/Impala / Spark / Flink / prejob
               └─ 审计日志(时间/库/SQL/行数/耗时)
 ```
 
-> ⚠️ **安全边界**:除显式配置 `readOnly: true` 的 Impala 数据源外,db-proxy 对 `8756` 端口零读写限制——谁能持 `X-DB-Token`
-> 谁就能通过 Spark Thrift 执行 SQL。防护依赖两点:
+> ⚠️ **安全边界**:数据库 `/query` 与 `/jobs` 接口除 `X-DB-Token` 外,还要求网关签发的短时 HMAC 主体声明；任务状态和取消也会在 db-proxy 再次核对主体。直接持有 `X-DB-Token` 不足以冒充门户用户调用这些接口。其他 Spark/Flink/prejob 接口仍应由防火墙限制来源。
 > 1. **防火墙只放行门户服务器 IP** 访问 8756(禁止内网其他机器直连);
-> 2. `authToken` 保密(与门户 `config.local.json` 的 `dbProxyToken` 一致)。
+> 2. `authToken` 保密(与门户 `config.local.json` 的 `dbProxyToken` 一致),并建议单独配置随机 `identitySecret` 与门户 `dbProxyIdentitySecret` 一致；身份密钥不能下发浏览器。
 
 ## 配置唯一来源 `datasources.json`
 
@@ -31,45 +31,77 @@
 
 ```json
 {
-  "authToken": "你的访问token",                    // X-DB-Token 鉴权,留空=不鉴权
+  "authToken": "CHANGE_ME",
+  "identitySecret": "CHANGE_ME",
   "listenHost": "0.0.0.0",
   "listenPort": 8756,
-  "defaultLimit": 1000,                           // 无限制子句时默认行数
-  "maxLimit": 500000,                             // 行数硬上限
+  "maxConcurrent": 5,
+  "maxQps": 10,
+  "maxConcurrentPerSubject": 2,
+  "maxQpsPerSubject": 3,
+  "defaultLimit": 1000,
+  "maxLimit": 500000,
   "queryTimeout": 60,
   "connectTimeout": 5,
-  "allowedDbs": [],                               // 已废弃(不再拦截,仅 /acl 回显)
-  "allowedTables": [],                            // 已废弃(同上)
-  "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",  // Oracle 11g 必配(thick 模式)
+  "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
   "datasources": [
-    { "name": "credzy", "type": "oracle", "host": "...", "port": 1521,
-      "user": "...", "password": "...", "service": "credzy", "rowLimit": "rownum" },
-    { "name": "finance_order_trade", "type": "mysql", "host": "...", "port": 3343,
-      "user": "...", "password": "...", "schema": "finance_order_trade" },
-    { "name": "doris_cluster1", "type": "mysql", "host": "...", "port": 19030,
-      "user": "...", "password": "...", "schema": "default" },
-    { "name": "impala_warehouse", "type": "impala", "hosts": ["host1", "host2"],
-      "port": 21050, "user": "...", "password": "...", "database": "default", "readOnly": true }
+    { "name": "mysql_example", "type": "mysql", "connectionString": "mysql://USER:PASSWORD@mysql.example:3306/example_db?charset=utf8mb4" },
+    { "name": "oracle_example", "type": "oracle", "connectionString": "oracle://USER:PASSWORD@oracle.example:1521/service_name", "rowLimit": "rownum" },
+    { "name": "doris_example", "label": "Doris", "type": "mysql", "connectionString": "mysql://USER:PASSWORD@doris.example:9030/default?charset=utf8mb4" },
+    { "name": "impala_example", "type": "impala", "hosts": ["impala-1.example", "impala-2.example"], "port": 21050, "user": "USER", "password": "PASSWORD", "database": "default", "readOnly": true }
   ],
-  "impala": {
-    "typeCheck": { "enabled": true },
-    "aiFix": { "enabled": false, "baseUrl": "https://.../v1", "apiKey": "...", "model": "...", "maxAttempts": 2 }
-  },
-  "spark": { "enabled": false, "master": "yarn", "queue": "default", "executorMemory": "2g", "executorCores": 2, "executorInstances": 0, "sparkConf": {}, "jdbcUrl": "jdbc:hive2://127.0.0.1:10001/default", "user": "root", "beelinePath": "", "exportPath": "hdfs:///tmp/db-proxy-spark-exports" }, // Spark 双模式配置:session 使用历史 YARN client 字段,Thrift 使用 JDBC/Beeline 字段
-  "flink": { "enabled": false }                   // 见「Flink 引擎」
+  "impala": { "typeCheck": { "enabled": true }, "aiFix": { "enabled": false, "baseUrl": "https://api.example/v1", "apiKey": "CHANGE_ME", "model": "CHANGE_ME", "maxAttempts": 2 } },
+  "spark": { "enabled": false, "master": "yarn", "queue": "default", "executorMemory": "2g", "executorCores": 2, "executorInstances": 0, "sparkConf": {}, "jdbcUrl": "jdbc:hive2://127.0.0.1:10001/default", "user": "root", "beelinePath": "", "exportPath": "hdfs:///tmp/db-proxy-spark-exports" },
+  "flink": { "enabled": false }
 }
 ```
 
-- `type` 支持 `mysql`(含 Doris,走 mysql 协议)、`oracle` 与 `impala`
+### 数据源连接配置
+
+`datasources` 中每个对象独立描述一个数据库，连接参数集中写在该对象的一行 `connectionString` 中；全局认证、超时、行数和并发配置仍放在 JSON 根级。JSON 是 db-proxy 的运行时配置，启动时读取，修改后需重启。
+
+MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。其中 `datasource` 行定义连接，`credential_profile` 行定义共享账号或单数据源覆盖，`inventory` 行只记录 BI 主机和库名、不生成运行时连接。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备现有运行配置 `datasources.json`（没有时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置），再执行同步脚本：
+
+```bash
+python3 services/db-proxy/sync_datasources.py \
+  --csv bi_hosts_databases.csv \
+  --config services/db-proxy/datasources.json --dry-run
+python3 services/db-proxy/sync_datasources.py \
+  --csv bi_hosts_databases.csv \
+  --config services/db-proxy/datasources.json
+services/db-proxy/manage.sh restart
+```
+
+脚本会保留 JSON 根级配置以及不由 CSV 管理的引擎（如 Impala），只替换 MySQL/Oracle/Doris 条目。密码 profile 会展开成运行时 `connectionString`；生成 JSON 权限设为 `600`。不要把含账号密码的 CSV 提交到版本库。
+
+连接串中的用户名、密码和数据库名按 URL 规则编码；例如密码里的 `@` 写成 `%40`。MySQL/Doris 使用 `mysql://用户:密码@主机:端口/库名?charset=utf8mb4`；Oracle 使用 `oracle://用户:密码@主机:端口/service_name`。CSV 的 Doris 类型会生成 `type: "mysql"`，通过 MySQL 协议连接。Impala 支持多个主机，继续使用 `hosts` 等字段。旧式 `host`/`port`/`user`/`password` 配置和 `connectionProfiles` 仍可读取以兼容现有部署。
+
+- `allowedDbs`、`allowedTables` 在 db-proxy 配置中仅为旧版 `/acl` 回显字段，不在代理侧实施过滤；新配置可省略。前端列表只负责展示；网关会按 `db-permissions` 规则过滤列表并校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
+- `type` 支持 `mysql`(含 Doris)、`oracle` 与 `impala`
 - Impala 可配置多个 `hosts`,端口默认 `21050`;`typeCheck` 开启 sqlglot/Hive 方言校验和 DESCRIBE 驱动的类型修正
 - `impala.aiFix` 为可选 OpenAI-compatible 接口配置,密钥只放在客户机 `datasources.json`;仅语法/类型/表列名错误触发,修复 SQL 会重新校验为单条只读查询
-- Impala `readOnly: true` 会在 db-proxy 再次拒绝写语句;不配置时门户权限矩阵仍是用户侧主要读写授权点
-- oracle 连 11g 必须 `rowLimit: "rownum"` + `oracleClientLib`
-- `maxConcurrent/maxQps`、`maxSqlLen`(默认 32KB)在顶层配置
+- Impala `readOnly: true` 会在 db-proxy 再次拒绝写语句
+- Oracle 连 11g 必须 `rowLimit: "rownum"` + `oracleClientLib`
+- `maxConcurrent/maxQps` 是进程全局查询上限;`maxConcurrentPerSubject`(默认 2)与`maxQpsPerSubject`(默认 3)分别限制单个门户用户/API Token 主体;`maxSqlLen`(默认 32KB)在顶层配置
+- 网关对每个 db-proxy 请求签发短时 HMAC 主体声明;`identitySecret` 推荐使用独立随机密钥,缺省兼容回退 `authToken`。主体签名缺失、过期或无效时,查询执行/异步任务接口拒绝请求;`authToken` 与 `identitySecret` 都为空时,查询接口会以 503 拒绝请求。配额和任务归属表均为单进程内状态。
 - `allowWrite`/`writeToken`(spark/flink 段)已废弃,不再生效
 - SparkSQL 工作台「导出到 HDFS」把单条只读 `SELECT/WITH` 的完整结果写成带表头 CSV 目录;默认根目录 `hdfs:///tmp/db-proxy-spark-exports`,可用 `spark.exportPath` 覆盖。结果按唯一任务目录保存,不收集到 driver;导出失败不返回路径。此配置由 db-proxy 启动时加载,修改后重启生效。
 
-## 启动
+## 启动与进程管理
+
+生产 Linux 环境使用管理脚本；脚本会切换到自身目录、校验 `datasources.json`，并管理 PID 与日志：
+
+```bash
+./manage.sh start
+./manage.sh status
+./manage.sh logs --follow
+./manage.sh restart
+./manage.sh stop
+```
+
+默认使用 `/opt/spark4-orc/` 作为 `SPARK_HOME`、`/opt/spark/thrift-conf` 作为 `SPARK_CONF_DIR`，Python 使用 `/opt/spark/spark4/py312/bin/python3.12`，监听 `0.0.0.0:8756`。可通过 `DB_PROXY_DIR`、`DB_PROXY_SPARK_HOME`、`DB_PROXY_SPARK_CONF_DIR`、`DB_PROXY_PYTHON`、`DB_PROXY_HOST`、`DB_PROXY_PORT` 覆盖。PID 文件为 `db-proxy.pid`，日志为 `db-proxy.log`；启动后运行 `./manage.sh status` 查看状态。
+
+本地开发仍可直接运行：
 
 ```bash
 python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session 需 PySpark/YARN 客户端环境,Thrift 需 SPARK_HOME/bin/beeline
@@ -87,7 +119,7 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 ```
 
 **无感行数限制(各引擎统一,仅查询类)**
-- 前端画布 SQL 保持不变;db-proxy 只在发送到数据库前对无显式行数限制的 `SELECT` / `WITH` 隐式添加引擎对应的上限。
+- 前端画布 SQL 保持不变;db-proxy 只在发送到数据库前对无显式行数限制的 `SELECT` / `WITH` 隐式添加引擎对应的上限。Impala 无顶层 `FROM` 且不是集合查询的常量 `SELECT` 不追加 SQL `LIMIT`，但仍通过 `fetchmany(limit + 1)` 限制返回行数。
 - MySQL/Doris/Impala 使用 `LIMIT n`,Oracle 12c+ 使用 `FETCH FIRST n ROWS ONLY`,Oracle 11g 使用 `ROWNUM` 包装;Spark SELECT/WITH 使用执行计划限行。
 - `SHOW`/`DESC`/`DESCRIBE`/`EXPLAIN` 不追加 SQL 后缀,使用 cursor/Spark 有界迭代读取结果,避免特殊命令被改写后语法错误。
 - 默认返回上限为 1000 行;各引擎硬上限为 500,000 行。用户 SQL 自带行数限制时沿用;超过硬上限直接 400(Spark/Flink 按硬上限截取)。达到默认或用户上限时通过 `truncated` 标记告知前端。
@@ -100,7 +132,8 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 | `X-DB-Token` 鉴权 | 与 `authToken` 不符 → 401(配置空 = 不鉴权,不推荐) |
 | 行数上限 | 默认 1000 行;硬上限 `maxLimit`(默认 500000) |
 | `maxSqlLen` | SQL 超 32768 字节(默认)拒绝 |
-| `maxConcurrent` / `maxQps` | 并发信号量 + QPS 限流 → 429 |
+| `maxConcurrent` / `maxQps` | 进程级并发与 QPS 上限 → 429 |
+| `maxConcurrentPerSubject` / `maxQpsPerSubject` | 已验签门户主体的并发与查询提交 QPS 上限 → 429 |
 | 超时 | 连接/查询超时可配,防远端卡死 |
 | 审计 | 每次查询/写操作落日志(时间/库/SQL/行数/耗时) |
 | `/explain` 只读检查 | EXPLAIN 仅允许只读 SQL(防 MySQL 5.x EXPLAIN DML 真执行) |

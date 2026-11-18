@@ -136,16 +136,22 @@ export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
   return body.data as DbQueryResult
 }
 
-// ── mysql/oracle 异步任务(慢查询/大查询,规避公司网关 60s 超时)──
-/** 异步提交 mysql/oracle 查询:立即返回 jobId(不阻塞等结果)
+// ── MySQL/Oracle/Impala 异步任务(慢查询/大查询,规避公司网关 60s 超时)──
+/** 异步提交数据库查询:立即返回 jobId(不阻塞等结果); aiFix 仅用于 Impala。
  *  写 SQL 需 X-Spark-Token 解锁(网关 /api/db/jobs 校验,与 /api/dbquery/query 同防线) */
-export async function submitDbJob(db: string, sql: string, timeoutMs = 3600000, writeToken?: string): Promise<{ jobId: string }> {
+export async function submitDbJob(
+  db: string,
+  sql: string,
+  timeoutMs = 3600000,
+  writeToken?: string,
+  aiFix?: boolean
+): Promise<{ jobId: string }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
   const res = await fetch('/api/db/jobs', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ db, sql, timeoutMs })
+    body: JSON.stringify({ db, sql, timeoutMs, ...(aiFix !== undefined ? { aiFix } : {}) })
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`

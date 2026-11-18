@@ -1187,10 +1187,12 @@ function ensureDb(): boolean {
   return !!db.value
 }
 
-/** 当前 mysql/oracle 异步任务的 jobId(供停止按钮取消) */
+/** 当前 MySQL/Oracle/Impala 异步任务的 jobId(供停止按钮取消) */
 const currentDbJobId = ref('')
+/** Impala AI 自动修复偏好；默认开启以保持当前自动修复行为。 */
+const impalaAiFixEnabled = ref(true)
 
-/** mysql/oracle 执行:异步任务模式 —— 提交即返回 jobId,前端轮询。
+/** MySQL/Oracle/Impala 执行:异步任务模式 —— 提交即返回 jobId,前端轮询。
  *  前端体验与同步一致:持续 loading 阻塞,直到完成/失败/手动停止。
  *  动机:慢查询/大查询同步挂起会撞公司网关 60s 超时 504。 */
 async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> {
@@ -1198,7 +1200,8 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   dbJobLogText.value = ''
   if (engine.value === 'impala') activePane.value = 0
   const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
-    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000)
+    const aiFix = engine.value === 'impala' ? impalaAiFixEnabled.value : undefined
+    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000, undefined, aiFix)
     currentDbJobId.value = jid
     const deadline = Date.now() + 3600000 // 上限 1 小时
     let statusFailures = 0
@@ -1241,7 +1244,7 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
         currentDbJobId.value = ''
         throw new Error(j.error || '任务执行失败')
       }
-      await new Promise((r) => setTimeout(r, 3000)) // 3s 轮询(低频)
+      await new Promise((r) => setTimeout(r, 500)) // 状态轮询间隔 500ms
     }
     try {
       await cancelDbJob(jid)
@@ -1651,6 +1654,16 @@ watch([engine, db], () => resetRunVarValuesForScope())
       </template>
       <el-tooltip content="格式化 SQL(Cmd+Shift+F)" placement="top"><el-button :icon="MagicStick" :disabled="loading" @click="formatSql" /></el-tooltip>
       <el-tooltip content="执行计划(EXPLAIN)" placement="top"><el-button :icon="Promotion" :loading="explainLoading" :disabled="loading" @click="runExplain" /></el-tooltip>
+      <el-tooltip
+        v-if="engine === 'impala'"
+        content="开启后，仅对可修复的只读 SQL 错误调用服务端 AI 改写并重新提交；关闭后保留原 SQL 错误。需要 db-proxy 已配置 AI。"
+        placement="top"
+      >
+        <span class="impala-ai-fix-control">
+          <span>AI 自动修复</span>
+          <el-switch v-model="impalaAiFixEnabled" size="small" inline-prompt active-text="开" inactive-text="关" :disabled="loading" aria-label="Impala AI 自动修复" />
+        </span>
+      </el-tooltip>
       <el-tooltip v-if="loading" content="停止当前批次" placement="top"><el-button type="danger" :icon="VideoPause" @click="stopQuery">停止</el-button></el-tooltip>
       <el-tooltip v-if="isSparkEngine" content="导出当前 SQL 完整结果到 HDFS" placement="top">
         <el-button :icon="Download" :loading="exportLoading" :disabled="loading && !exportLoading" @click="exportSparkResult">导出到 HDFS</el-button>
@@ -2041,6 +2054,16 @@ watch([engine, db], () => resetRunVarValuesForScope())
 
 .toolbar-group-run {
   gap: 4px;
+}
+
+.impala-ai-fix-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  color: color-mix(in srgb, $text 72%, transparent);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 :deep(.toolbar .el-divider--vertical) {

@@ -24,7 +24,7 @@
 | 视图 | `src/views/db/FlinkConnectorDialog.vue` | Flink 连接器:批量建表/DDL 生成/表探测 |
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | 工具 | `src/utils/db-query-cache.ts` | 历史/收藏/列宽的 localStorage 统一读写:单一上限、读-改-写合并、`storage` 事件同步、配额超限逐条降级、列宽键容量治理 |
-| 网关工具 | `server/utils/sql-write-detect.js` / `timeout.js` / `upstream-error.js` / `job-ownership.js` | 引号感知的 SQL 掩码与表引用提取(fail-closed)、超时入参夹逼、上游错误状态/字段透传与脱敏、异步任务归属表 |
+| 网关工具 | `server/utils/sql-write-detect.js` / `timeout.js` / `upstream-error.js` / `job-ownership.js` / `db-proxy-identity.js` | 引号感知的 SQL 掩码与表引用提取(fail-closed)、超时入参夹逼、上游错误状态/字段透传与脱敏、异步任务归属表、短时 HMAC 主体声明 |
 | API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
 | 网关 | `server/routes/db.js` `/api/db*` 透传(不含 `/jobs`、`/query`、`/spark/*`、`/flink/*`,均走专用路由)、`server/routes/dbquery.js` `/api/dbquery/query`、`server/routes/spark.js` `/api/spark/*`、`server/routes/flink.js` `/api/flink/*`、`server/db-scripts.js` `/api/scripts` |
 | 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris/Impala)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发/SQL 长度/超时)、**异步 job 真实取消(`cancelMethod`)**;`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN / Impala EXPLAIN)、写审计(audit/audit-db.log)** |
@@ -50,7 +50,7 @@
 - **快捷键与分段执行**:Ctrl/Cmd+F 打开画布内查找；Ctrl+Tab 显式执行缩进(单光标插入缩进空格，多行选择整行缩进)，Shift+Tab 反缩进；SQL 分段只过滤空白和纯注释，不丢弃注释之后的有效语句。
 - **无感行数上限(2026-11 修订)**:前端画布 SQL 不变；MySQL/Oracle/Doris/Impala、SparkSQL、SparkSession、FlinkSQL 默认最多返回 **1000 行**,显式上限硬顶 **500,000 行**。db-proxy 的限行判定统一由 `services/db-proxy/sql_limits.py` 实现,并与 Spark 侧 `_apply_row_limit` 保持同一口径:
   - 判定作用域正确 —— 只有**顶层** `LIMIT`/`FETCH FIRST`/`ROWNUM` 才算显式上限；字符串字面量、注释、子查询/括号内的 `LIMIT` 一律忽略(掩码保持字符位置 1:1,不改写原 SQL 语义)。
-  - 无顶层显式上限时,**仅** `SELECT`/`WITH` 在服务端追加默认限制,且追加内容独占新行(MySQL `\nLIMIT 1000`、Oracle 12c+ `\nFETCH FIRST 1000 ROWS ONLY`、11g 外层 `SELECT * FROM ( ... ) WHERE ROWNUM <= 1000`),避免被末尾 `--` 行注释吞掉。
+  - 无顶层显式上限时,**仅** `SELECT`/`WITH` 在服务端追加默认限制,且追加内容独占新行(MySQL/Doris/Impala `\nLIMIT 1000`、Oracle 12c+ `\nFETCH FIRST 1000 ROWS ONLY`、11g 外层 `SELECT * FROM ( ... ) WHERE ROWNUM <= 1000`),避免被末尾 `--` 行注释吞掉。Impala 无顶层 `FROM` 且不是集合查询的常量 `SELECT`（如 `SELECT 1+1`）不追加 SQL `LIMIT`，仍用 `fetchmany(limit + 1)` 控制返回行数，因为 Impala 不接受该形式的 `LIMIT`。
   - 显式上限超过 500,000 时**压到硬上限**(不再返回 400),响应中 `truncated=true`;非常量上限表达式(绑定变量/函数)不改写,按硬上限有界读取。
   - `SHOW`/`DESC`/`EXPLAIN` 等特殊命令保持原文,仅通过有界结果读取防止超量返回。
   - 配置项 `defaultLimit`/`maxLimit` 只能在 `[1, 500000]` 内收紧,不能突破硬上限；产品默认值为 1000 / 500000。
@@ -79,7 +79,7 @@
 - **网关路径归一化(2026-11,安全)**:`/api/db/*` 上所有基于路径的判断统一走 `normalizedPath(req)`(`decodeURIComponent` 反复解码至稳定 → `\\` 归一 `/` → 小写;解码失败 400)。透传层从「黑名单」改为**显式白名单**(`GET acl/health/dbs/tables/fields/ddl/schema/search/tables`、`POST explain`、`GET jobs/:id`、`POST jobs/:id/cancel`),且要求归一化路径与原始路径一致 —— 百分号编码/双重编码/反斜杠变体一律 403。修复前 `/api/db/%73park/jobs`、`/%74ables?db=` 可绕过 Spark/Flink 写权限闸门与元数据权限中间件(Express 不解码、下游 uvicorn 会 unquote)。
 - **写 SQL 检测(2026-11,安全)**:`server/utils/sql-write-detect.js` 的掩码改为**引号/注释感知**(单引号含 `''`/`\\'`、双引号、反引号、`--`、`#`、`/* */`);修复 `SELECT '--' INTO OUTFILE ...`、`SELECT '--', LOAD_FILE(...)` 被判为只读的绕过。`extractTables` 无法可靠识别表引用时返回 `null`,权限矩阵对「配了 tables 白名单」的规则 **fail-closed 403**(此前返回 `[]` 会直接跳过表级校验)。
 - **异步任务归属(2026-11)**:网关维护 `jobId -> {owner, engine, expiresAt}` 内存表(TTL 2h/上限 5000,`server/utils/job-ownership.js`),`/api/db/jobs/:id`、`/api/spark/jobs/:id`、`/api/flink/async/:id`、`/api/flink/prejob/jobs/:id` 及其 cancel/stop/logs 均校验提交者;admin 放行,非本人/未知/过期一律 403。db-proxy 侧 jobId 同时改为随机 UUID(`dbj_<uuid hex>`),不再可预测。
-- **上游错误透传(2026-11)**:网关不再把 db-proxy 的 400/403/429/5xx 折成 502,原样透传状态码并附带 `errorType`/`errorCode`/`logs`(detail 截断并脱敏密码/token/DSN);拿不到上游状态才用 502。前端按状态码分支处理,不再一律当 502。
+- **数据库错误诊断**:MySQL/Oracle/Impala 异步任务失败时，错误信息按连接失败、数据库不存在、表不存在、权限拒绝等类别附中文排查提示，同时保留驱动错误码和脱敏后的原始详情。MySQL/Oracle 工作台错误提示展示该诊断文本；db-proxy job 日志也记录错误类别与详情。Oracle 服务名/SID 不存在和连接超时归为连接错误。网关对同步 db-proxy 错误仍透传状态码、`errorType`/`errorCode`/`logs`，并截断、脱敏错误详情；拿不到上游状态才用 502。
 - **超时入参校验(2026-11)**:网关统一 `clampTimeoutMs(value, def, min, max)`(取整/夹逼),避免 `timeoutMs=-1` 或小数让 `AbortSignal.timeout` 抛 `ERR_OUT_OF_RANGE`。
 - **构建边界**:`QueryView.vue` 由路由异步加载,Monaco 经 `SqlEditor.vue`/`monaco-setup.ts` 静态依赖，仅首次进入数据库查询模块时下载;不可把 Monaco 注册到入口或公共首屏 chunk。
 - **页面生命周期**:查询页接收 TabStage 的 `active` 状态;隐藏时暂停 Spark 日志轮询,重新激活后恢复必要轮询
@@ -91,7 +91,9 @@
 - 标题策略:数据库查询页不重复展示“数据库查询”标题,侧栏与 Tab 负责导航标识,工作台状态由引擎/库/结果状态栏承载。
 
 - **批执行互斥**:一次点击一个批次,批内 FIFO 串行(`execSegments`);执行中再点被拒;`batchCancelled` 停止按钮中断批 + `cancelSpark/cancelFlink`/`POST /api/db/jobs/:id/cancel` 取消当前引擎 job。MySQL/Oracle/Impala 的停止走 db-proxy **真实取消**(见「真实取消」),响应 `cancelMethod` 回显实际终止方式。按分号拆段时忽略纯注释段，但保留前置行注释/块注释后的可执行 SQL 段。
-- **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab。运行中的结果 tab 显示执行中状态,不把预置的空 `rows`/`columns` 当作查询结果；MySQL/Oracle 异步 job 的状态只保存在 db-proxy 进程内存,完成/失败状态保留 1 小时;页面轮询遇到临时网络错误应重试,但浏览器刷新会丢失 jobId,db-proxy 重启会丢失任务状态。
+- **数据库查询主体隔离**:网关用 `jobSubjectOf(req)` 生成 `user:<username>` 或 `token:<id>`，通过 HMAC 签名的短时请求头传给 db-proxy；db-proxy 用独立 `identitySecret` 验签（缺省回退 `authToken`），并把主体绑定到异步任务提交、状态读取和取消。查询入口拒绝缺少/无效签名的主体。`maxConcurrent` 与 `maxQps` 保留全局上限；`maxConcurrentPerSubject` 默认 2，`maxQpsPerSubject` 默认 3，429 表示主体级或全局护栏已满。配额覆盖 MySQL/Oracle/Impala 查询执行，不代表数据库连接或 Spark/Flink 集群资源按用户建立物理隔离。
+- **异步结果轮询**:MySQL/Oracle/Impala 状态轮询间隔 500ms；任务进入 `done` 后状态响应带完整结果集。
+- **多结果 tab**:`results[]` 数组,每段 SQL 一个 tab,默认展示最后一个;竖排结果 tab。运行中的结果 tab 显示执行中状态,不把预置的空 `rows`/`columns` 当作查询结果；MySQL/Oracle/Impala 异步 job 的状态只保存在 db-proxy 进程内存,完成/失败状态保留 1 小时;页面每 500ms 轮询，遇到临时网络错误以 3 秒间隔重试；浏览器刷新会丢失 jobId,db-proxy 重启会丢失任务状态。任务状态在完成时一次返回完整结果集；客户端表格分页仅减少 DOM 行数，不减少下载的 JSON 大小。
 - **结果表格**:el-table(斑马纹 + 固定序号列 + 表头按数值列右对齐 + **内置排序**)+ 前端分页(15/50/100/200);切换/更新结果项时页码重置为第 1 页，避免沿用旧结果页码造成有数据却显示空白;点击列名复制列名;单元格点击复制,NULL 灰字胶囊,对象/数组值显示 JSON 标签点击弹窗格式化查看(已转义);双击单元格行内编辑(预览 tab);**列宽拖拽持久化(2026-11 修订)**:el-table `@header-dragend` 按 `引擎|库|表名`(非预览结果用 `引擎|库|SQL djb2 哈希`)签名写入 localStorage,读入时一次扫描进内存 Map(不在渲染路径逐列 `getItem`),写入 try/catch,`db-query-colw.` 前缀最多 200 个键、超出删最旧。结果区合成一个整体卡片(.result-card):**表格 → 翻页 → 底部信息条(行×列/复制/选择模式)**,内部细线分隔
 - **结果复制**:单元格/列名点击复制,复制走 src/utils/clipboard.ts 的 copyText(非安全上下文 HTTP 自动降级 execCommand);工具条提供「复制整表(TSV)」与大结果集确认
 - **复制/选择模式**:底部开关切换 —— 复制模式(默认)点击单元格即复制;选择模式取消点击劫持,可用鼠标自由选中文本复制
@@ -117,13 +119,15 @@
 - **历史与收藏**:读写统一收口 `src/utils/db-query-cache.ts`(单一 key 前缀、读-改-写前重新读取合并、监听 `storage` 事件)。QueryView 每次成功执行把 SQL 记入 localStorage `db-query-history:<用户名>`(**按用户隔离**,同一浏览器多账号互不可见;认证关闭落到 `default`),「历史」与「收藏」**上限统一 50 条**(新在前、同 sql 去重);**点击历史/收藏条目只回填编辑器不自动执行**;**结果快照随历史缓存**——执行成功时把该 SQL 的列+前 100 行快照写入条目(按 `Blob` 真实字节估算,>200KB 不缓存),点击带快照的条目除回填编辑器外直接开一个「缓存」标记的结果 tab 免重查展示。**配额保护(2026-11)**:localStorage 写入 `QuotaExceededError` 时逐条剥离最旧快照重试,仍失败则降级为不含快照的条目并 `console.warn`,不再静默丢弃整份历史。**快照明确标注(2026-11)**:cached tab 的状态栏与信息条显示「缓存快照 · 前 N 行」,导出按钮为「导出快照」(文件名带 `_snapshot`),不再伪装成完整结果。历史/收藏列表仍以「结果」小徽标标识
 - **画布专业化(DataGrip 式)**:编辑器↔结果区可拖拽调高(`.sql-dragbar`);结果 tab 显示运行状态点(执行中 spinner / 成功绿 / 失败红 / 截断黄),tab 名固定 queryN;底部全局状态栏(引擎/库/行×列·耗时·截断标记/主题 + 快捷键提示);快捷键 Cmd/Ctrl+F 画布内查找、Cmd+Enter 运行、Cmd+S 保存、Cmd+Space 补全、Cmd+Shift+F 格式化、Cmd+/ 注释;保存 SQL 后自动刷新左侧脚本目录树(`treePanelRef.reloadMy()`);**多 tab 独立文档(Monaco model 池,2026-08)**:每个 tab 一个 ITextModel(SqlEditor 内部 `modelId→ITextModel` 池,`editor.setModel` 切换),独立撤销历史(Cmd+Z 不串文件)+ 光标位置;切 tab 不触发 change 事件,参数行由 showTabInEditor 重建,内容快照由 change 事件回调写回(`t.content = editor.getValue()`),自动保存只读活跃 tab 实时内容,非活跃用切换时写回的快照,切走即触发脏 tab 保存
 - **SparkSQL / SparkSession 配置**:`datasources.json` 顶层 `spark` 段中，SparkSQL/Thrift 使用 `enabled`、`jdbcUrl`(默认 `jdbc:hive2://127.0.0.1:10001/default`)、`user`(默认 `root`)、`beelinePath`(默认 `$SPARK_HOME/bin/beeline`)、`defaultLimit`、`maxLimit`、`maxSqlLen`、`exportPath`;SparkSession 使用历史字段 `master`、`queue`、`executorMemory`、`executorCores`、`executorInstances`、`sparkConf` 等 YARN client 配置。SparkSession 使用 PySpark 常驻 `SparkSession`,不是 `spark-sql` shell。更改数据源配置后重启 db-proxy；发布独立引擎选择需重建门户镜像。
-- **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。Impala 表名列表和表字段结构缓存到 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用;类型检查、`/tables`、`/fields`、`/schema` 共用缓存,缓存缺表/缺结构时按需 DESCRIBE 并持久化。查询返回字段/表引用无法识别错误时强制刷新 SQL 涉及表的结构,更新持久化缓存后再进入 AI 修复流程。缓存按数据源连接指纹与库隔离,不包含密码;数据源结构变化后通过下一次相关错误触发刷新。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数,密钥不下发浏览器。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
+- **Impala 类型检查与修复**:db-proxy 使用 sqlglot 解析只读查询,通过 DESCRIBE 元数据检查并修正常见列/字面量类型不匹配;列解析按 SELECT 作用域处理未限定字段,并沿 CTE/派生表的直接投影传递字段类型,用于检查跨 CTE/JOIN 的字段比较;JOIN 两侧类型不一致时将两侧均显式转为 STRING。Impala 表名列表和表字段结构缓存到 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用;类型检查、`/tables`、`/fields`、`/schema` 共用缓存,缓存缺表/缺结构时按需 DESCRIBE 并持久化。查询返回字段/表引用无法识别错误时强制刷新 SQL 涉及表的结构,更新持久化缓存后再进入 AI 修复流程。缓存按数据源连接指纹与库隔离,不包含密码;数据源结构变化后通过下一次相关错误触发刷新。执行错误时仅对可修复的 SQL 语法/类型错误调用服务端 AI,每次改写必须再次解析为只读 SQL 并重新执行,不重试网络、认证、权限或超时错误;Impala `operands of type ... not comparable` 等错误按类型不匹配处理。工作台工具栏仅 Impala 显示「AI 自动修复」开关,默认开启以维持当前行为;异步提交的 `aiFix` 经网关白名单传给 db-proxy,关闭时不调用 AI,其他请求省略该项时沿用服务端原有行为。AI 修复仍要求服务端 `impala.aiFix` 已配置,密钥不下发浏览器。执行日志使用中文阶段提示,区分连接、类型校验、SQL 提交/执行、结果读取、执行错误类型、AI 修复建议 SQL 与最终实际执行 SQL,保留数据库原始错误便于排查;执行中的页面显示不确定进度动画和当前阶段,不伪造百分比。`datasources.json` 的 Impala 数据源配置连接地址/端口/库/只读策略;服务端 `impala.aiFix` 配置控制 AI endpoint、密钥、模型与重试数。job 状态中的 `logs` 与 `executedSql` 由前端执行日志面板展示。
 
 ## 5. 数据源
 
-`db-proxy/datasources.json`(启动加载,改后重启):
-- `allowedDbs`:可用库列表(引擎按 db 段配置)
-- 库别名:oracle 连接串可配置别名,未配置显示库名
+`db-proxy/datasources.json` 是运行时配置(启动加载,改后重启；Linux 部署可用 `services/db-proxy/manage.sh` 管理启动、停止、重启、状态与日志):
+- MySQL、Oracle、Doris 以项目根目录 `bi_hosts_databases.csv` 为维护源；运行 `services/db-proxy/sync_datasources.py` 同步到 JSON。CSV 的 `datasource` 行生成连接对象，`credential_profile` 行提供默认/例外账号，`inventory` 行只保留 BI 主机清单，不生成运行时连接；CSV 的 Doris 类型同步为运行时 `type: "mysql"`。
+- `datasources` 每个对象对应一个数据库；生成的 MySQL、Doris、Oracle 连接参数集中写成一行 `connectionString`，全局配置仍放 JSON 根级；Doris 使用 `type: "mysql"` 的 MySQL 协议。旧式连接字段和共享 profile 仍兼容
+- `allowedDbs` 仅为 db-proxy `/acl` 的旧版回显字段，不在代理侧过滤，前端使用 `/acl` 返回的 `datasources` 列表；网关按 `db-permissions` 规则过滤列表并校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
+- 代码默认值可从配置省略；Oracle 连接可配置别名，未配置显示库名
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句
 
 ### SparkSQL 与 SparkSession 环境

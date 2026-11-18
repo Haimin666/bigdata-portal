@@ -130,13 +130,15 @@ src/
 | `flink_connectors.py` | Flink 连接器元数据:批量建表/DDL 生成/表探测 |
 | `selfcheck_guards.py` | 护栏自检(12 例) |
 
-- **数据源**:`datasources.json`(**启动时加载,改配置必须重启**),含 allowedDbs、flink/spark 段配置
-- **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、SparkSession、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。
+- **数据源**:`datasources.json` 启动时加载,改配置必须重启。MySQL/Oracle/Doris 以项目根目录 `bi_hosts_databases.csv` 为维护源,由 `services/db-proxy/sync_datasources.py` 生成运行时 `datasources.json` 的对应条目;同步保留 JSON 根级全局项及非 CSV 引擎。CSV 的凭据 profile 在生成时展开为每个数据源的一行 `connectionString`;CSV 中标为 `doris` 的行同步后使用运行时 `type: "mysql"`。旧式字段与 `connectionProfiles` 仍兼容。db-proxy 配置里的 `allowedDbs` 只供旧版 `/acl` 回显；网关按 `db-permissions` 规则过滤列表和校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
+- **db-proxy 运维**:Linux 部署通过 `services/db-proxy/manage.sh` 管理 start/stop/restart/status/logs；PID 与日志落在服务目录，Spark/Python 环境变量可通过 `DB_PROXY_*` 覆盖
+- **查询结果行数限制**:MySQL/Oracle/Doris/Impala、SparkSQL、SparkSession、FlinkSQL 默认最多返回 1000 行;硬上限统一为 500,000 行。无显式限制时采用默认值,用户显式限制不得超过硬上限。Impala 无顶层 `FROM` 的简单常量查询不改写 SQL 追加 `LIMIT`，由 `fetchmany` 限制结果读取。
+- **数据库查询资源隔离**:网关从已认证会话/API Token 提取主体，以 `dbProxyIdentitySecret`（未配置时兼容回退 `dbProxyToken`）签发短时 HMAC 身份头；db-proxy 验签后同时实施全局 `maxConcurrent`/`maxQps` 与主体级 `maxConcurrentPerSubject`（默认 2）/`maxQpsPerSubject`（默认 3）。用户隔离键为 `user:<username>`，外部 API Token 为 `token:<id>`；无有效签名的 MySQL/Oracle/Impala 查询拒绝执行。全局上限仍是总资源硬上限；配额计数在单个 db-proxy 进程内，不跨多实例共享。
 - **Spark 查询结果限制**:SparkSQL 与 SparkSession 保持相同结果结构与行数上限。SparkSQL/Thrift 在 SQL 层追加/收紧 LIMIT 并解析 Beeline 有界输出;SparkSession 通过相同限行规则有界收集;达到上限时标记 truncated。HDFS 导出由对应引擎执行。
 - **Spark 引擎选择**:工作台将 `SparkSQL`(Thrift) 与 `SparkSession`(历史 YARN client PySpark Session)列为两个独立引擎，不提供混在 SparkSQL 下的执行模式下拉。底层 API 继续使用 `executionMode: "thrift" | "session"`;旧调用缺省为 `thrift` 以保持兼容。SparkSession 不是 `spark-sql` 命令行。Thrift 使用 `spark` 配置段的 JDBC/Beeline 字段;session 使用同段已有的 `master`、YARN `queue`、executor 与 `sparkConf` 等字段。
 - **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;每个请求模式路由到对应适配器，不因失败切换或重试另一模式。
 - **Spark 取消与日志**:任务状态、取消、日志/Stage 状态、Schema 补全及 HDFS 导出均按请求的 `executionMode` 路由;两种模式共享门户权限检查与响应结构。失败请求不会重试另一模式。
-- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;SparkSQL 与 SparkSession 是两个门户引擎，分别走 Spark Thrift 和历史 PySpark Session 适配器
+- **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,工作台提供 AI 自动修复开关并随异步 job 传至 db-proxy;db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;数据库任务失败时按错误类别返回中文排查提示并保留脱敏后的驱动详情;SparkSQL 与 SparkSession 是两个门户引擎，分别走 Spark Thrift 和历史 PySpark Session 适配器
 - **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 
@@ -162,7 +164,7 @@ SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固
 - 服务:`port`(默认 3000)、`enabledModules`(空=全量)
 - 开发助手:`assistantUrl`/`assistantToken`/`assistantWorkspace`(Reasonix);`datadeckUrl`(Datadeck Agent,默认 Docker 宿主机映射 `http://host.docker.internal:8000`)
 - 集群:`yarnRmList`/`yarnProxyAllowHosts`、`hdfsUrl`、`dsWebUrl`/`dsToken`、`omdUrl`、`stingrayUrl`、`streamxUrl`、`jupyterUrl`
-- 数据:`dbProxyUrl`/`dbProxyToken`、`dbScriptsDir`、`dsDepsCacheFile`
+- 数据:`dbProxyUrl`/`dbProxyToken`/`dbProxyIdentitySecret`(网关与 db-proxy 共用；身份密钥缺省回退 dbProxyToken)、`dbScriptsDir`、`dsDepsCacheFile`
 - 安全:`auth.enabled`/`auth.sessionHours`、`sparkWritePassword`、`dbQueryApiToken`、`trustProxy`(反代层数,直连部署保持 0);~~loginTlsInsecure/accounts.*~~ 已随子应用自动登录移除(2026-08,多用户体系)
 
 ## 7. 部署拓扑

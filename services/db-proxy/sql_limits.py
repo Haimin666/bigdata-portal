@@ -225,13 +225,15 @@ def plan_row_limit(
     mode: str = "mysql",
     default_limit: int = DEFAULT_ROWS,
     max_limit: int = MAX_ROWS,
+    engine: str = "",
 ) -> RowLimitPlan:
     """Return the statement to execute plus the bounded read size.
 
     ``mode`` is ``mysql`` (MySQL/Doris/Impala ``LIMIT``), ``fetch`` (Oracle 12c+)
     or ``rownum`` (Oracle 11g). Non-``SELECT``/``WITH`` statements and
     multi-statement input are returned untouched — callers still bound their
-    result read with ``plan.limit``.
+    result read with ``plan.limit``. Impala's constant SELECT form without a
+    top-level FROM also stays unchanged because its grammar rejects LIMIT there.
     """
     default, cap = effective_limits(default_limit, max_limit)
     original = sql or ""
@@ -265,6 +267,13 @@ def plan_row_limit(
             limit=default,
             appended=True,
         )
+    # Impala allows constant SELECT expressions without FROM, but rejects LIMIT
+    # in that grammar form. With no source table, keep the SQL unchanged and rely
+    # on the caller's bounded fetch for the returned row count.
+    has_from = re.search(r"\bFROM\b", top, re.IGNORECASE)
+    has_set_operation = re.search(r"\b(?:UNION|INTERSECT|EXCEPT)\b", top, re.IGNORECASE)
+    if engine == "impala" and not has_from and not has_set_operation:
+        return RowLimitPlan(sql=original, limit=default)
     return RowLimitPlan(sql=body + "\nLIMIT %d" % default + suffix, limit=default, appended=True)
 
 

@@ -9,16 +9,6 @@
   "maxConcurrent": 5,
   "maxQps": 10,
   "connectTimeout": 5,
-  "allowedDbs": [
-    "sq_ccrs2",
-    "sq_ccrs",
-    "th_ccrs",
-    "sqqy_ccrs",
-    "pre_ccrs",
-    "finance_order_trade",
-    "impala_warehouse"
-  ],
-  "allowedTables": [],
   "oracleClientLib": "/usr/lib/oracle/19.19/client64/lib",
   "impala": {
     "typeCheck": {"enabled": true},
@@ -128,74 +118,29 @@
   },
   "datasources": [
     {
-      "name": "sq_ccrs2",
-      "label": "etc",
-      "type": "oracle",
-      "host": "10.25.2.87",
-      "port": 1521,
-      "user": "sq_ccrs2",
-      "password": "CHANGE_ME",
-      "service": "credzx",
-      "rowLimit": "rownum"
-    },
-    {
-      "name": "sq_ccrs",
-      "label": "狮桥个人",
-      "type": "oracle",
-      "host": "10.25.2.87",
-      "port": 1521,
-      "user": "sq_ccrs",
-      "password": "CHANGE_ME",
-      "service": "credzx",
-      "rowLimit": "rownum"
-    },
-    {
-      "name": "th_ccrs",
-      "label": "通汇",
-      "type": "oracle",
-      "host": "10.25.2.82",
-      "port": 1521,
-      "user": "th_ccrs",
-      "password": "CHANGE_ME",
-      "service": "credzy",
-      "rowLimit": "rownum"
-    },
-    {
-      "name": "sqqy_ccrs",
-      "label": "狮桥企业",
-      "type": "oracle",
-      "host": "10.25.2.82",
-      "port": 1521,
-      "user": "sqqy_ccrs",
-      "password": "CHANGE_ME",
-      "service": "credzy",
-      "rowLimit": "rownum"
-    },
-    {
-      "name": "pre_ccrs",
-      "label": "卓远",
-      "type": "oracle",
-      "host": "10.25.2.82",
-      "port": 1521,
-      "user": "pre_ccrs",
-      "password": "CHANGE_ME",
-      "service": "credzy",
-      "rowLimit": "rownum"
-    },
-    {
-      "name": "finance_order_trade",
+      "name": "mysql_example",
+      "label": "MySQL",
       "type": "mysql",
-      "host": "10.26.2.23",
-      "port": 3343,
-      "user": "financemxh_o0",
-      "password": "CHANGE_ME",
-      "schema": "finance_order_trade"
+      "connectionString": "mysql://CHANGE_ME:CHANGE_ME@mysql.example:3306/example_db?charset=utf8mb4"
     },
     {
-      "name": "impala_warehouse",
+      "name": "oracle_example",
+      "label": "Oracle",
+      "type": "oracle",
+      "connectionString": "oracle://CHANGE_ME:CHANGE_ME@oracle.example:1521/service_name",
+      "rowLimit": "rownum"
+    },
+    {
+      "name": "doris_example",
+      "label": "Doris",
+      "type": "mysql",
+      "connectionString": "mysql://CHANGE_ME:CHANGE_ME@doris.example:9030/default?charset=utf8mb4"
+    },
+    {
+      "name": "impala_example",
       "label": "Impala",
       "type": "impala",
-      "hosts": ["CHANGE_ME_IMPALA_HOST"],
+      "hosts": ["impala-1.example", "impala-2.example"],
       "port": 21050,
       "user": "CHANGE_ME",
       "password": "CHANGE_ME",

@@ -11,6 +11,7 @@ import { loadPerms, savePerms, checkDbAccess, allowedDbsFor, apiTokenAllowsDatab
 import { clampTimeoutMs } from '../utils/timeout.js'
 import { createUpstreamError, sendUpstreamError } from '../utils/upstream-error.js'
 import { jobOwnership } from '../utils/job-ownership.js'
+import { dbProxyIdentityHeaders } from '../utils/db-proxy-identity.js'
 
 // /api/db 透传白名单(显式放行,其余一律 403)。每项含 HTTP 方法与归一化后的路径。
 const DB_PROXY_WHITELIST = [
@@ -267,11 +268,17 @@ export function setupDb(app, auth) {
     }
     // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 3600000, 1000, 7200000)
+    const proxyBody = { db: dbName, sql, timeoutMs }
+    if (engine === 'impala') proxyBody.aiFix = req.body?.aiFix !== false
     try {
       const r = await fetch(config.dbProxyUrl + '/jobs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-        body: JSON.stringify({ db: dbName, sql, timeoutMs }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-DB-Token': config.dbProxyToken,
+          ...dbProxyIdentityHeaders(req)
+        },
+        body: JSON.stringify(proxyBody),
         signal: AbortSignal.timeout(30000)
       })
       const body = await r.json().catch(() => ({}))
@@ -345,9 +352,12 @@ export function setupDb(app, auth) {
       pathRewrite: { '^/api/db': '' },
       logLevel: 'warn',
       on: {
-        proxyReq: (proxyReq) => {
-          // 由网关注入鉴权 token,前端不感知(与客户机 datasources.json authToken 一致)
+        proxyReq: (proxyReq, req) => {
+          // 由网关注入机器鉴权与短时签名主体,前端不接触密钥。
           if (config.dbProxyToken) proxyReq.setHeader('X-DB-Token', config.dbProxyToken)
+          for (const [name, value] of Object.entries(dbProxyIdentityHeaders(req))) {
+            proxyReq.setHeader(name, value)
+          }
         }
       }
     })

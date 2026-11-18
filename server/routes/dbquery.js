@@ -6,6 +6,7 @@ import { isSparkWriteSql, extractTables } from '../utils/sql-write-detect.js'
 import { dbEngine, ensureEngineMap } from '../engine-map.js'
 import { checkDbAccess } from '../db-permissions.js'
 import { isDbQueryApiReadSql } from '../utils/db-query-api-policy.js'
+import { dbProxyIdentityHeaders } from '../utils/db-proxy-identity.js'
 import { clampTimeoutMs } from '../utils/timeout.js'
 import { createUpstreamError, sendUpstreamError } from '../utils/upstream-error.js'
 
@@ -47,7 +48,11 @@ export function setupDbQuery(app) {
     try {
       const r = await fetch(config.dbProxyUrl + '/query', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-DB-Token': config.dbProxyToken,
+          ...dbProxyIdentityHeaders(req)
+        },
         body: JSON.stringify({ db: dbName, sql, timeoutMs }),
         signal: AbortSignal.timeout(timeoutMs)
       })

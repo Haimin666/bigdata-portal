@@ -85,6 +85,8 @@ export default {
   dsToken: pick(fileCfg.dsToken, 'DS_TOKEN', ''),
   dbProxyUrl: pick(fileCfg.dbProxyUrl, 'DB_PROXY_URL', ''),
   dbProxyToken: pick(fileCfg.dbProxyToken, 'DB_PROXY_TOKEN', ''),
+  // Gateway-to-db-proxy principal signing; falls back to the existing proxy token.
+  dbProxyIdentitySecret: pick(fileCfg.dbProxyIdentitySecret, 'DB_PROXY_IDENTITY_SECRET', ''),
   assistantUrl: pick(fileCfg.assistantUrl, 'ASSISTANT_URL', 'http://127.0.0.1:8787'),
   assistantToken: pick(fileCfg.assistantToken, 'ASSISTANT_TOKEN', ''),
   assistantWorkspace: pick(fileCfg.assistantWorkspace, 'ASSISTANT_WORKSPACE', ''),

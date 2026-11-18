@@ -200,7 +200,7 @@ function checkBroken(perms) {
  * MySQL/Oracle/Impala 引擎访问校验:
  *  - 命中规则 → 按 engine+db 匹配 engineRules:读需 read=true,写需 write=true,
  *    tables 非空时请求引用的表必须 ⊆ 允许表;
- *  - 无规则 → defaultDeny 开启时拒绝(未授权),否则放行(db-proxy 全局白名单兜底);
+ *  - 无规则 → defaultDeny 开启时拒绝(未授权),否则网关放行(交由 db-proxy 连接与资源护栏处理);
  *  - admin 一律放行。
  */
 export function checkDbAccess(req, dbName, opts = {}) {
