@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 HIVE_DATABASE = "lion_dw_ods"
+_ALLOWED_HIVE_TYPES = frozenset({"bigint", "double", "string"})
 DEFAULT_HADOOP_CONFIG = {
     "dfs.nameservices": "lbc",
     "dfs.ha.namenodes.lbc": "nn1,nn2",
@@ -59,6 +60,34 @@ def _source_type_to_hive(source_type: str, column_type: str) -> str:
     if base in ("decimal", "numeric"):
         return "double"
     return _HIVE_TYPE_MAP.get(base, "string")
+
+
+def _hive_type_warnings(
+    columns: List[Dict[str, Any]],
+    hive_columns: List[Dict[str, str]],
+    source_type: str,
+) -> List[str]:
+    source_map = {str(col["COLUMN_NAME"]).lower(): col for col in columns}
+    warnings: List[str] = []
+    for hive_col in hive_columns:
+        source_col = source_map.get(str(hive_col["name"]).lower())
+        hive_type = str(hive_col.get("type") or "").strip().lower()
+        if not source_col:
+            if hive_type not in _ALLOWED_HIVE_TYPES:
+                warnings.append(
+                    "{}：Hive 类型 {}，源表无对应字段".format(
+                        hive_col["name"], hive_type or "<empty>"
+                    )
+                )
+            continue
+        datax_type = _source_type_to_hive(source_type, source_col["COLUMN_TYPE"])
+        if hive_type not in _ALLOWED_HIVE_TYPES or hive_type != datax_type:
+            warnings.append(
+                "{}：Hive 类型 {}，DataX 类型 {}".format(
+                    hive_col["name"], hive_type or "<empty>", datax_type
+                )
+            )
+    return warnings
 
 
 def _hive_columns(ds, table_name: str, timeout: int) -> Optional[List[Dict[str, str]]]:
@@ -292,7 +321,10 @@ def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]]
         for hive_col in hive_columns:
             source_col = source_map.pop(str(hive_col["name"]).lower(), None)
             if source_col:
-                aligned.append({"name": source_col["COLUMN_NAME"], "type": hive_col["type"]})
+                aligned.append({
+                    "name": source_col["COLUMN_NAME"],
+                    "type": _source_type_to_hive(source_type, source_col["COLUMN_TYPE"]),
+                })
         for source_col in source_map.values():
             aligned.append({"name": source_col["COLUMN_NAME"], "type": _source_type_to_hive(source_type, source_col["COLUMN_TYPE"])})
     else:
@@ -359,6 +391,10 @@ def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, c
     hive_columns = None
     if align_with_hive:
         hive_columns = _hive_columns(sync_cfg.get("hiveMetastore"), hive_table, query_timeout)
+    type_warnings = (
+        _hive_type_warnings(columns, hive_columns, source_type)
+        if hive_columns else []
+    )
     diffs: List[Dict[str, Any]] = []
     new_columns: List[Dict[str, Any]] = []
     if hive_columns:
@@ -387,4 +423,5 @@ def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, c
         "hive_columns": len(hive_columns) if hive_columns else 0,
         "new_columns": len(new_columns),
         "diff_summary": diffs,
+        "type_warnings": type_warnings,
     }

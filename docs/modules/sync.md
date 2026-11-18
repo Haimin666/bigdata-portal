@@ -17,8 +17,8 @@
 
 - 前端仍向 `POST /api/sync/db2hive` 发送 `{db_name, table_name}`。
 - 网关使用 `dbProxyUrl`、`dbProxyToken` 调用 db-proxy `POST /sync/db2hive`，请求体为 `{db_name, table_name, align_with_hive}`。
-- db-proxy 按已配置的数据源读取 MySQL/Oracle 表结构；默认对齐 `lion_dw_ods` 中的同名 Hive 表，并生成 DataX JSON。
-- 网关继续返回 `{code: 0, data: {sqlContent, jsonContent}}`，页面无需改变。
+- db-proxy 按已配置的数据源读取 MySQL/Oracle 表结构；默认对齐 `lion_dw_ods` 中的同名 Hive 表，并生成 DataX JSON。DataX 字段类型只生成 `bigint`、`double`、`string`；若 Hive 字段类型与源字段映射类型不一致，或 Hive 字段类型不在白名单内，仍完成生成并在响应中返回告警，前端提示核对 Hive 与 DataX 字段类型。
+- 网关继续返回 `{code: 0, data: {sqlContent, jsonContent, typeWarnings?}}`；存在字段类型问题时保留生成结果，并由页面提示核对 Hive 与 DataX 字段类型。
 - 旧 `dbaSyncUrl` 不再用于门户同步页面。`bigdata-service` 可以继续服务其他调用方。
 
 ### db-proxy 配置

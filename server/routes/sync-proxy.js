@@ -45,7 +45,14 @@ export function setupSyncProxy(app) {
         return res.status(status).json({ code: status, msg: message })
       }
       const data = body.data || {}
-      res.json({ code: 0, data: { sqlContent: data.sql_content || '', jsonContent: data.json_content || '' } })
+      res.json({
+        code: 0,
+        data: {
+          sqlContent: data.sql_content || '',
+          jsonContent: data.json_content || '',
+          typeWarnings: Array.isArray(data.type_warnings) ? data.type_warnings : [],
+        },
+      })
     } catch (e) {
       console.error('[sync/db2hive]', e instanceof Error ? e.message : e)
       res.status(502).json({ code: 502, msg: `同步代码生成失败: ${e instanceof Error ? e.message : String(e)}` })

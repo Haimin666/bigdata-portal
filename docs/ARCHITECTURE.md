@@ -159,7 +159,7 @@ SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固
 
 ### 数据同步代码生成流
 
-`SyncCodeView.vue` 继续调用门户 `POST /api/sync/db2hive`；网关执行 sync 模块认证后，用 `dbProxyUrl` 和 `dbProxyToken` 转发到 db-proxy `POST /sync/db2hive`。db-proxy 复用已加载的 MySQL/Oracle 数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`。门户响应仍为 `{code, data: {sqlContent, jsonContent}}`。旧 `dbaSyncUrl` 不再参与门户数据同步。
+`SyncCodeView.vue` 继续调用门户 `POST /api/sync/db2hive`；网关执行 sync 模块认证后，用 `dbProxyUrl` 和 `dbProxyToken` 转发到 db-proxy `POST /sync/db2hive`。db-proxy 复用已加载的 MySQL/Oracle 数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`。门户响应为 `{code, data: {sqlContent, jsonContent, typeWarnings?}}`；类型不匹配时生成结果照常返回，页面显示核对提示。旧 `dbaSyncUrl` 不再参与门户数据同步。
 
 ## 6. 配置体系
 

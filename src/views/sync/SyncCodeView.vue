@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 数据同步模块:输入库名/表名 → 展示 db2hive 生成的 SQL 与 JSON 代码 → 一键复制。
- * 数据源:网关 /api/sync/db2hive(代理内部 DBA 服务 10.25.100.51:8000)。
+ * 数据源:门户网关 /api/sync/db2hive → db-proxy。
  */
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -13,6 +13,7 @@ import TableToolbar from '@/components/TableToolbar.vue'
 interface SyncResult {
   sqlContent: string
   jsonContent: string
+  typeWarnings?: string[]
 }
 
 const dbName = ref('')
@@ -41,7 +42,18 @@ async function generate() {
     if (!res.ok || (body.code !== undefined && body.code !== 0)) {
       throw new Error(body.msg || body.detail || `HTTP ${res.status}`)
     }
-    result.value = body.data as SyncResult
+    const generated = body.data as SyncResult
+    result.value = generated
+    if (generated.typeWarnings?.length) {
+      const details = generated.typeWarnings.slice(0, 4).join('；')
+      const remaining = generated.typeWarnings.length - 4
+      const suffix = remaining > 0 ? `；另有 ${remaining} 项` : ''
+      ElMessage.warning({
+        message: `检测到数据类型问题，核对 Hive 和 DataX 字段类型是否一致：${details}${suffix}`,
+        duration: 8000,
+        showClose: true,
+      })
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
     ElMessage.error(`生成失败:${error.value}`)

@@ -153,7 +153,7 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 | GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
 | GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema) |
 | POST | `/explain` | 执行计划树(只读 SQL) |
-| POST | `/sync/db2hive` | 生成 Hive 建表/新增字段 SQL 与 DataX JSON，body `{db_name, table_name, align_with_hive?}`，仅 MySQL/Oracle 数据源 |
+| POST | `/sync/db2hive` | 生成 Hive 建表/新增字段 SQL 与 DataX JSON，body `{db_name, table_name, align_with_hive?}`，仅 MySQL/Oracle 数据源；DataX 类型限 `bigint`、`double`、`string`，与 Hive 类型不一致时仍生成并在 `data.type_warnings` 返回告警 |
 | POST | `/spark/query` | Spark SQL 执行;body `{db, sql, executionMode?}` |
 | GET | `/spark/schema/databases?executionMode=` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;模式由 query 参数选择) |
 | GET | `/spark/schema/tables?db=&executionMode=` | Spark 库下表列表(SHOW TABLES IN;模式由 query 参数选择) |
