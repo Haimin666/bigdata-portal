@@ -124,7 +124,7 @@
 ## 5. 数据源
 
 `db-proxy/datasources.json` 是运行时配置(启动加载,改后重启；Linux 部署可用 `services/db-proxy/manage.sh` 管理启动、停止、重启、状态与日志):
-- MySQL、Oracle、Doris 以项目根目录 `bi_hosts_databases.csv` 为维护源；运行 `services/db-proxy/sync_datasources.py` 同步到 JSON。CSV 的 `datasource` 行生成连接对象，`credential_profile` 行提供默认/例外账号，`inventory` 行只保留 BI 主机清单，不生成运行时连接；CSV 的 Doris 类型同步为运行时 `type: "mysql"`。
+- MySQL、Oracle、Doris 以项目根目录 `bi_hosts_databases.csv` 为维护源；每次 `manage.sh start` 真正启动新进程前都会运行 `services/db-proxy/sync_datasources.py` 同步到 JSON。`restart` 会经由 `start` 自动同步；CSV 缺失或校验失败时拒绝启动，特殊部署路径可用 `DB_PROXY_CSV` 指定。CSV 的 `datasource` 行生成连接对象，`credential_profile` 行提供默认/例外账号，`inventory` 行只保留 BI 主机清单，不生成运行时连接；CSV 的 Doris 类型同步为运行时 `type: "mysql"`。
 - `datasources` 每个对象对应一个数据库；生成的 MySQL、Doris、Oracle 连接参数集中写成一行 `connectionString`，全局配置仍放 JSON 根级；Doris 使用 `type: "mysql"` 的 MySQL 协议。旧式连接字段和共享 profile 仍兼容
 - `allowedDbs` 仅为 db-proxy `/acl` 的旧版回显字段，不在代理侧过滤，前端使用 `/acl` 返回的 `datasources` 列表；网关按 `db-permissions` 规则过滤列表并校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
 - 代码默认值可从配置省略；Oracle 连接可配置别名，未配置显示库名

@@ -60,19 +60,15 @@
 
 `datasources` 中每个对象独立描述一个数据库，连接参数集中写在该对象的一行 `connectionString` 中；全局认证、超时、行数和并发配置仍放在 JSON 根级。JSON 是 db-proxy 的运行时配置，启动时读取，修改后需重启。
 
-MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。其中 `datasource` 行定义连接，`credential_profile` 行定义共享账号或单数据源覆盖，`inventory` 行只记录 BI 主机和库名、不生成运行时连接。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备现有运行配置 `datasources.json`（没有时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置），再执行同步脚本：
+MySQL、Oracle、Doris 的维护源是项目根目录 `bi_hosts_databases.csv`。其中 `datasource` 行定义连接，`credential_profile` 行定义共享账号或单数据源覆盖，`inventory` 行只记录 BI 主机和库名、不生成运行时连接。Doris 在 CSV 中标为 `doris`，同步后转换成 db-proxy 所需的 `type: "mysql"`。先准备运行配置 `datasources.json`（首次部署时从 `datasources.json.example` 复制，并填写根级设置及非 CSV 引擎配置）。可先手动预演 CSV 与配置：
 
 ```bash
 python3 services/db-proxy/sync_datasources.py \
   --csv bi_hosts_databases.csv \
   --config services/db-proxy/datasources.json --dry-run
-python3 services/db-proxy/sync_datasources.py \
-  --csv bi_hosts_databases.csv \
-  --config services/db-proxy/datasources.json
-services/db-proxy/manage.sh restart
 ```
 
-脚本会保留 JSON 根级配置以及不由 CSV 管理的引擎（如 Impala），只替换 MySQL/Oracle/Doris 条目。密码 profile 会展开成运行时 `connectionString`；生成 JSON 权限设为 `600`。不要把含账号密码的 CSV 提交到版本库。
+`manage.sh start` 在每次启动新进程前自动执行同步；`restart` 也会经过该启动流程。CSV 缺失、CSV 校验失败或现有 JSON 无效时，脚本会拒绝启动，避免沿用旧数据源配置。默认查找项目根目录的 `bi_hosts_databases.csv`；特殊部署布局可设置 `DB_PROXY_CSV` 指向维护文件。同步会保留 JSON 根级配置和不由 CSV 管理的引擎（如 Impala），只替换 MySQL/Oracle/Doris 条目；密码 profile 会展开成运行时 `connectionString`，生成 JSON 权限设为 `600`。不要把含账号密码的 CSV 提交到版本库。
 
 连接串中的用户名、密码和数据库名按 URL 规则编码；例如密码里的 `@` 写成 `%40`。MySQL/Doris 使用 `mysql://用户:密码@主机:端口/库名?charset=utf8mb4`；Oracle 使用 `oracle://用户:密码@主机:端口/service_name`。CSV 的 Doris 类型会生成 `type: "mysql"`，通过 MySQL 协议连接。Impala 支持多个主机，继续使用 `hosts` 等字段。旧式 `host`/`port`/`user`/`password` 配置和 `connectionProfiles` 仍可读取以兼容现有部署。
 
@@ -89,7 +85,7 @@ services/db-proxy/manage.sh restart
 
 ## 启动与进程管理
 
-生产 Linux 环境使用管理脚本；脚本会切换到自身目录、校验 `datasources.json`，并管理 PID 与日志：
+生产 Linux 环境使用管理脚本；新进程启动前会同步项目根目录 CSV 到 `datasources.json`、校验运行配置，并管理 PID 与日志。服务已运行时，`start` 不会重写配置；修改 CSV 后运行 `restart` 使配置生效：
 
 ```bash
 ./manage.sh start
@@ -99,7 +95,7 @@ services/db-proxy/manage.sh restart
 ./manage.sh stop
 ```
 
-默认使用 `/opt/spark4-orc/` 作为 `SPARK_HOME`、`/opt/spark/thrift-conf` 作为 `SPARK_CONF_DIR`，Python 使用 `/opt/spark/spark4/py312/bin/python3.12`，监听 `0.0.0.0:8756`。可通过 `DB_PROXY_DIR`、`DB_PROXY_SPARK_HOME`、`DB_PROXY_SPARK_CONF_DIR`、`DB_PROXY_PYTHON`、`DB_PROXY_HOST`、`DB_PROXY_PORT` 覆盖。PID 文件为 `db-proxy.pid`，日志为 `db-proxy.log`；启动后运行 `./manage.sh status` 查看状态。
+默认使用 `/opt/spark4-orc/` 作为 `SPARK_HOME`、`/opt/spark/thrift-conf` 作为 `SPARK_CONF_DIR`，Python 使用 `/opt/spark/spark4/py312/bin/python3.12`，监听 `0.0.0.0:8756`。可通过 `DB_PROXY_DIR`、`DB_PROXY_CSV`、`DB_PROXY_SPARK_HOME`、`DB_PROXY_SPARK_CONF_DIR`、`DB_PROXY_PYTHON`、`DB_PROXY_HOST`、`DB_PROXY_PORT` 覆盖。PID 文件为 `db-proxy.pid`，日志为 `db-proxy.log`；启动后运行 `./manage.sh status` 查看状态。
 
 本地开发仍可直接运行：
 
