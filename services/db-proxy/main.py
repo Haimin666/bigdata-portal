@@ -1237,9 +1237,11 @@ def sync_db2hive(
     table_name = req.table_name.strip()
     if not db_name or not table_name:
         raise HTTPException(status_code=400, detail="db_name 和 table_name 不能为空")
-    if not re.fullmatch(r"[A-Za-z0-9_$#]+", table_name):
-        raise HTTPException(status_code=400, detail="table_name 只允许字母、数字、下划线、$ 和 #")
+    if not re.fullmatch(r"[A-Za-z0-9_$#]+(?:\.[A-Za-z0-9_$#]+)?", table_name):
+        raise HTTPException(status_code=400, detail="table_name 只允许表名，或 Oracle 的 OWNER.TABLE 格式")
     ds = _find_sync_datasource(db_name)
+    if "." in table_name and ds.type != "oracle":
+        raise HTTPException(status_code=400, detail="OWNER.TABLE 格式仅支持 Oracle 数据源")
     try:
         data = generate_db2hive(
             ds,
@@ -3077,11 +3079,12 @@ def tables(
             names = IMPALA_ENGINE.list_tables(conn, cache_namespace, ds.service)
             items = [{"name": name, "comment": ""} for name in names]
         else:
-            # 当前用户 schema 下表 + 注释(Oracle 注释可为 NULL → 空串)
+            # 数据源 name 是 Oracle 元数据 owner；service 仅用于连接。
             cur.execute(
-                "SELECT t.table_name, c.comments FROM user_tables t "
-                "LEFT JOIN user_tab_comments c ON t.table_name = c.table_name "
-                "ORDER BY t.table_name"
+                "SELECT t.table_name, c.comments FROM all_tables t "
+                "LEFT JOIN all_tab_comments c ON t.owner = c.owner AND t.table_name = c.table_name "
+                "WHERE t.owner = :owner ORDER BY t.table_name",
+                {"owner": ds.name.upper()},
             )
             rows = cur.fetchall()
             items = [{"name": r[0], "comment": str(r[1] or "")} for r in rows]
@@ -3153,23 +3156,25 @@ def fields(
             # 主键列集合(约束型 P)
             pk_set = set()
             cur.execute(
-                "SELECT cc.column_name FROM user_cons_columns cc "
-                "JOIN user_constraints c ON cc.constraint_name = c.constraint_name "
-                "WHERE c.constraint_type = 'P' AND c.table_name = :t",
-                {"t": table.upper()},
+                "SELECT cc.column_name FROM all_cons_columns cc "
+                "JOIN all_constraints c ON cc.owner = c.owner "
+                "AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name "
+                "WHERE c.owner = :owner AND c.constraint_type = 'P' AND c.table_name = :t",
+                {"owner": ds.name.upper(), "t": table.upper()},
             )
             for r in cur.fetchall():
                 pk_set.add(str(r[0]).upper())
             cur.execute(
-                "SELECT column_name, data_type, nullable FROM user_tab_columns "
-                "WHERE table_name = :t ORDER BY column_id",
-                {"t": table.upper()},
+                "SELECT column_name, data_type, nullable FROM all_tab_columns "
+                "WHERE owner = :owner AND table_name = :t ORDER BY column_id",
+                {"owner": ds.name.upper(), "t": table.upper()},
             )
             rows = cur.fetchall()
             col_meta = {r[0]: (r[1], r[2]) for r in rows}
             cur.execute(
-                "SELECT column_name, comments FROM user_col_comments WHERE table_name = :t",
-                {"t": table.upper()},
+                "SELECT column_name, comments FROM all_col_comments "
+                "WHERE owner = :owner AND table_name = :t",
+                {"owner": ds.name.upper(), "t": table.upper()},
             )
             comments = {r[0]: str(r[1] or "") for r in cur.fetchall()}
             cols = []
@@ -3223,8 +3228,8 @@ def ddl(
             ddl_text = "\n".join(str(r[0]) for r in rows if r and r[0])
         else:
             cur.execute(
-                "SELECT DBMS_METADATA.GET_DDL('TABLE', :t) FROM dual",
-                {"t": table.upper()},
+                "SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :owner) FROM dual",
+                {"t": table.upper(), "owner": ds.name.upper()},
             )
             row = cur.fetchone()
             ddl_text = str(row[0]) if row and row[0] else ""
@@ -3256,7 +3261,7 @@ def schema(
 
     - MySQL/Doris(走 mysql 协议):information_schema.tables/columns;table_schema 取
       连接库(ds.service,与 /tables 的 SHOW TABLE STATUS 一致),而非请求参数 db
-    - Oracle:all_tables(OWNER=当前用户)+ all_tab_comments + all_tab_columns
+    - Oracle:all_tables/all_tab_comments/all_tab_columns 以工作台数据源 name 作为 OWNER
     表数 > 800 只返回前 800 张并在 data.truncated=true。"""
     require_auth(x_db_token)
     ds = get_datasource(db)
@@ -3342,12 +3347,14 @@ def schema(
             cur.execute(
                 "SELECT t.table_name, c.comments FROM all_tables t "
                 "LEFT JOIN all_tab_comments c ON t.owner = c.owner AND t.table_name = c.table_name "
-                "WHERE t.owner = (SELECT user FROM dual) ORDER BY t.table_name"
+                "WHERE t.owner = :owner ORDER BY t.table_name",
+                {"owner": ds.name.upper()},
             )
             table_rows = cur.fetchall()
             cur.execute(
                 "SELECT table_name, column_name, data_type FROM all_tab_columns "
-                "WHERE owner = (SELECT user FROM dual) ORDER BY table_name, column_id"
+                "WHERE owner = :owner ORDER BY table_name, column_id",
+                {"owner": ds.name.upper()},
             )
             col_rows = cur.fetchall()
             tables = [{"name": str(r[0] or ""), "comment": str(r[1] or ""), "columns": []} for r in table_rows]

@@ -139,7 +139,7 @@ src/
 - **Spark Thrift 生命周期**:db-proxy 通过参数数组启动 `$SPARK_HOME/bin/beeline`,连接配置默认 `jdbc:hive2://127.0.0.1:10001/default` 与用户 `root`;每个请求模式路由到对应适配器，不因失败切换或重试另一模式。
 - **Spark 取消与日志**:任务状态、取消、日志/Stage 状态、Schema 补全及 HDFS 导出均按请求的 `executionMode` 路由;两种模式共享门户权限检查与响应结构。失败请求不会重试另一模式。
 - **引擎路由**:`/dbs`、`/query`(MySQL/Oracle/Doris/Impala)、`/acl`、`/spark/*`、`/flink/*`、`/prejob/*`、`/flink/status` 等;异步 query job 状态按 `queued → running → done/failed/cancelled` 更新;Impala 使用该通道,工作台提供 AI 自动修复开关并随异步 job 传至 db-proxy;db-proxy 执行服务端类型检查及可选 AI SQL 修复,连接/校验/SQL 执行/结果读取进度日志随 job 状态返回;数据库任务失败时按错误类别返回中文排查提示并保留脱敏后的驱动详情;SparkSQL 与 SparkSession 是两个门户引擎，分别走 Spark Thrift 和历史 PySpark Session 适配器
-- **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
+- **元数据与补全**:`/tables` `/fields`(detail=1 注释/可空/键)、`/ddl`、`/schema`(全量表+字段扁平元数据,供前端补全)、`/explain`(MySQL EXPLAIN FORMAT=JSON / Oracle EXPLAIN PLAN+DBMS_XPLAN);Oracle 元数据 owner 取工作台数据源 name,Service Name 仅用于连接;Impala 表清单/字段结构持久化在 db-proxy 本地 `data/impala-schema-cache.json`,服务重启后复用,字段/表引用错误触发相关表结构刷新
 - **写审计**:MySQL/Oracle/Doris 写 SQL(INSERT/UPDATE/DELETE/DDL)执行后追加 `audit/audit-db.log`(JSON Lines:时间/数据源/sql 截断 500/影响行数/耗时/来源);只读拦截的写尝试同样记录
 
 ## 5. 典型数据流:数据库查询(SQL)
@@ -159,7 +159,7 @@ SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固
 
 ### 数据同步代码生成流
 
-`SyncCodeView.vue` 继续调用门户 `POST /api/sync/db2hive`；网关执行 sync 模块认证后，用 `dbProxyUrl` 和 `dbProxyToken` 转发到 db-proxy `POST /sync/db2hive`。db-proxy 复用已加载的 MySQL/Oracle 数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`。门户响应为 `{code, data: {sqlContent, jsonContent, typeWarnings?}}`；类型不匹配时生成结果照常返回，页面显示核对提示。旧 `dbaSyncUrl` 不再参与门户数据同步。
+`SyncCodeView.vue` 继续调用门户 `POST /api/sync/db2hive`；网关执行 sync 模块认证后，用 `dbProxyUrl` 和 `dbProxyToken` 转发到 db-proxy `POST /sync/db2hive`。db-proxy 复用已加载的 MySQL/Oracle 数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`，生成 JSON 时 reader `password` 按 `lion#code_` 可逆变换格式编码（非密码学加密）。门户响应为 `{code, data: {sqlContent, jsonContent, typeWarnings?}}`；类型不匹配时生成结果照常返回，页面显示核对提示。旧 `dbaSyncUrl` 不再参与门户数据同步。
 
 ## 6. 配置体系
 

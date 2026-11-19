@@ -419,7 +419,7 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   engine.value = isSpark ? (engine.value === 'sparksession' ? 'sparksession' : 'sparksql') : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
   db.value = isSpark ? SPARK_SOURCE.name : payload.db
   const sparkIdent = (value: string) => '`' + value.replace(/`/g, '``') + '`'
-  const ident = isSpark ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}` : isOracle ? `"${payload.table}"` : `\`${payload.table}\``
+  const ident = isSpark ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}` : isOracle ? `"${payload.db}"."${payload.table}"` : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
   const tabId = `${isSpark ? 'spark-' : ''}tbl-${payload.db}.${payload.table}`
   const existing = tabs.value.find((t) => t.id === tabId)

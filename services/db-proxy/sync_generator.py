@@ -154,7 +154,7 @@ def _hive_columns(ds, table_name: str, timeout: int) -> Optional[List[Dict[str, 
         conn.close()
 
 
-def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: int) -> Tuple[List[Dict[str, Any]], str]:
+def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: int, oracle_owner: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str]:
     if ds.type not in ("mysql", "oracle") or getattr(ds, "source_type", ds.type) == "doris":
         raise ValueError("数据同步仅支持 MySQL/Oracle 数据源")
 
@@ -179,6 +179,7 @@ def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: in
                 comment_row = _rows_as_dicts(cur)
                 table_comment = str(comment_row[0].get("TABLE_COMMENT") or "") if comment_row else ""
             else:
+                owner = str(oracle_owner or ds.service).upper()
                 cur.execute(
                     "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.DATA_PRECISION, "
                     "c.DATA_SCALE, c.NULLABLE AS IS_NULLABLE, c.COLUMN_ID AS ORDINAL_POSITION, "
@@ -187,7 +188,7 @@ def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: in
                     "ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME "
                     "AND cc.COLUMN_NAME = c.COLUMN_NAME "
                     "WHERE c.OWNER = :owner AND c.TABLE_NAME = :table_name ORDER BY c.COLUMN_ID",
-                    {"owner": ds.service.upper(), "table_name": table_name.upper()},
+                    {"owner": owner, "table_name": table_name.upper()},
                 )
                 columns = _rows_as_dicts(cur)
                 for col in columns:
@@ -200,7 +201,7 @@ def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: in
                 cur.execute(
                     "SELECT COMMENTS AS TABLE_COMMENT FROM ALL_TAB_COMMENTS "
                     "WHERE OWNER = :owner AND TABLE_NAME = :table_name AND TABLE_TYPE = 'TABLE'",
-                    {"owner": ds.service.upper(), "table_name": table_name.upper()},
+                    {"owner": owner, "table_name": table_name.upper()},
                 )
                 comment_row = _rows_as_dicts(cur)
                 table_comment = str(comment_row[0].get("TABLE_COMMENT") or "") if comment_row else ""
@@ -287,7 +288,34 @@ def _diff_columns(columns: List[Dict[str, Any]], hive_columns: List[Dict[str, st
     return diffs
 
 
-def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]], hive_columns: Optional[List[Dict[str, str]]], source_type: str, cfg: Dict[str, Any]) -> str:
+def _encode_datax_password(password: str) -> str:
+    """Encode like lion_decrypt.py::encrypt for DataX's lion#code_ format."""
+    prefix = "lion#code_"
+    if password.startswith(prefix):
+        return password
+
+    payload = password
+    encoded = []
+    for index, char in enumerate(payload):
+        code = ord(char)
+        if 97 <= code <= 122:
+            lower, upper = 97, 122
+        elif 65 <= code <= 90:
+            lower, upper = 65, 90
+        else:
+            encoded.append(char)
+            continue
+        offset = (index + 5) % 26  # key=2, so key + index + 3
+        shifted = code + offset
+        if shifted < lower:
+            shifted += 26
+        if shifted > upper:
+            shifted -= 26
+        encoded.append(chr(shifted))
+    return prefix + "".join(encoded)
+
+
+def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]], hive_columns: Optional[List[Dict[str, str]]], source_type: str, cfg: Dict[str, Any], source_table_name: Optional[str] = None) -> str:
     datax_cfg = dict(cfg.get("datax") or {})
     overrides = cfg.get("datasourceOverrides") or {}
     if not isinstance(overrides, dict):
@@ -315,6 +343,8 @@ def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]]
         reader_name = "mysqlreader"
         jdbc_url = "jdbc:mysql://{}:{}/{}".format(ds.host, ds.port, ds.service)
 
+    reader_password = _encode_datax_password(reader_password)
+
     if hive_columns:
         source_map = {str(col["COLUMN_NAME"]).lower(): col for col in columns}
         aligned = []
@@ -331,7 +361,7 @@ def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]]
         aligned = [{"name": col["COLUMN_NAME"], "type": _source_type_to_hive(source_type, col["COLUMN_TYPE"])} for col in columns]
 
     reader_columns = [col["name"] if source_type == "oracle" else "`{}`".format(col["name"]) for col in aligned]
-    connection = {"table": [table_name], "jdbcUrl": [jdbc_url]}
+    connection = {"table": [source_table_name or table_name], "jdbcUrl": [jdbc_url]}
     reader_parameter: Dict[str, Any] = {
         "username": reader_user,
         "password": reader_password,
@@ -383,11 +413,23 @@ def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, c
     source_type = str(getattr(ds, "source_type", ds.type)).lower()
     if source_type == "doris":
         raise ValueError("数据同步仅支持 MySQL/Oracle 数据源")
-    columns, table_comment = _source_columns(ds, table_name, connect_timeout, query_timeout)
-    if not columns:
-        raise LookupError("{} 表不存在: {}.{}".format(source_type.upper(), ds.service, table_name))
 
-    hive_table = "{}_{}".format(db_name, table_name)
+    hive_table_name = table_name
+    source_table_name = table_name
+    oracle_owner = ds.service
+    if source_type == "oracle" and "." in table_name:
+        oracle_owner, hive_table_name = table_name.split(".", 1)
+        oracle_owner = oracle_owner.upper()
+        source_table_name = "{}.{}".format(oracle_owner, hive_table_name.upper())
+    columns, table_comment = _source_columns(
+        ds, hive_table_name, connect_timeout, query_timeout,
+        oracle_owner=oracle_owner if source_type == "oracle" else None,
+    )
+    if not columns:
+        source_owner = oracle_owner if source_type == "oracle" else ds.service
+        raise LookupError("{} 表不存在: {}.{}".format(source_type.upper(), source_owner, hive_table_name))
+
+    hive_table = "{}_{}".format(db_name, hive_table_name)
     hive_columns = None
     if align_with_hive:
         hive_columns = _hive_columns(sync_cfg.get("hiveMetastore"), hive_table, query_timeout)
@@ -407,16 +449,19 @@ def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, c
                     new_columns.append(col)
 
     if hive_columns and new_columns:
-        sql_content = _alter_table_sql(db_name, table_name, new_columns, source_type)
+        sql_content = _alter_table_sql(db_name, hive_table_name, new_columns, source_type)
     elif not hive_columns:
-        sql_content = _create_table_sql(db_name, table_name, columns, table_comment, source_type)
+        sql_content = _create_table_sql(db_name, hive_table_name, columns, table_comment, source_type)
     else:
         sql_content = ""
 
-    json_content = _datax_json(ds, db_name, table_name, columns, hive_columns, source_type, sync_cfg)
+    json_content = _datax_json(
+        ds, db_name, hive_table_name, columns, hive_columns, source_type, sync_cfg,
+        source_table_name=source_table_name,
+    )
     return {
         "database": db_name,
-        "table": table_name,
+        "table": hive_table_name,
         "sql_content": sql_content,
         "json_content": json_content,
         "mysql_columns": len(columns),

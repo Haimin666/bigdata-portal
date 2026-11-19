@@ -75,7 +75,7 @@ async function copy(text: string, label: string) {
       <div class="sync-form">
         <el-input v-model="dbName" placeholder="库名,如 pangu" class="sync-input" clearable @keyup.enter="generate" />
         <span class="sync-dot">.</span>
-        <el-input v-model="tableName" placeholder="表名,如 sys_flow_s_cap_h" class="sync-input" clearable @keyup.enter="generate" />
+        <el-input v-model="tableName" placeholder="表名; Oracle 可填 OWNER.TABLE" class="sync-input" clearable @keyup.enter="generate" />
         <el-button type="primary" :loading="loading" @click="generate">
           <el-icon v-if="!loading"><Search /></el-icon> 生成
         </el-button>
