@@ -135,6 +135,7 @@ npm run dev:vite     # 前端
 | /stingray-static | Stingray | 静态资源 |
 | /__/stingray | Stingray | API + **WebSocket**(server.on('upgrade') 手动代理) |
 | /api/config | 本地 | 配置下发 |
+| /api/db-config/* | db-proxy 管理 API | admin-only，服务端注入独立管理凭证；认证关闭时 fail-closed |
 | /api/login/{ds,stingray,omd} | 各系统 | createLoginEndpoint(transport: form/query/json + passwordEncode) |
 
 **所有 `createProxyMiddleware` 必须用 `on: { proxyRes }` 写法**(v3 不再支持顶层 `onProxyRes`)。

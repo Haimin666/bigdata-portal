@@ -1,5 +1,6 @@
 {
   "authToken": "CHANGE_ME",
+  "adminToken": "CHANGE_ME_DIFFERENT_FROM_AUTH_TOKEN",
   "listenHost": "0.0.0.0",
   "listenPort": 8756,
   "defaultLimit": 1000,

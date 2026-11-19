@@ -72,5 +72,5 @@ docs/
 - YARN iframe 代理对复杂 JS 路由页(Spark UI 时间线等)重写脆弱,自建 UI 弹窗优先
 - Flink 1.13(StreamX 旧作业)与 1.17(本地)并存,`/jobs/:jid` 结构有差异,前端已兼容
 - Spark UI 的 SQL/时间线/日志无 REST,只能跳原生页或 iframe
-- db-proxy `datasources.json` 启动时加载,改配置必须重启
+- db-proxy `datasources.json` 是唯一运行时数据源配置；管理 API 写入后原子持久化并热重载，CSV 只用于显式的一次性导入
 - 生产 docker 必须 `docker compose up -d --build`(dist 不入 git,restart 跑旧镜像)

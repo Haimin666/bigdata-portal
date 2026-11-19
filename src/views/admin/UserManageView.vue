@@ -5,6 +5,7 @@ import { Plus, Delete, EditPen, Grid } from '@element-plus/icons-vue'
 import { userApi, type UserInfo, type RolesDef } from '@/api/auth'
 import { menus } from '@/config/menu'
 import DbPermView from './DbPermView.vue'
+import DbConnectionView from './DbConnectionView.vue'
 import DbRuleEditor, { type DbRuleV2 } from './DbRuleEditor.vue'
 import { getDbPerms, saveDbPerms, listDataSources, type DbUserRule, type DbRoleRule } from '@/api/db'
 import TableToolbar from '@/components/TableToolbar.vue'
@@ -390,6 +391,10 @@ function statusInfo(s: string) {
 
       <el-tab-pane label="数据权限" name="dbperm">
         <DbPermView />
+      </el-tab-pane>
+
+      <el-tab-pane label="数据库连接" name="dbconnections">
+        <DbConnectionView />
       </el-tab-pane>
     </el-tabs>
   </div>

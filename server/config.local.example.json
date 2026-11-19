@@ -10,6 +10,8 @@
   "dsToken": "",
   "dbProxyUrl": "http://10.25.15.106:8756",
   "dbProxyToken": "",
+  "_dbProxy管理说明": "仅门户服务端使用；必须与 db-proxy datasources.json 根级 adminToken 一致，不下发浏览器",
+  "dbProxyAdminToken": "",
   "_dbProxy身份说明": "网关与 db-proxy.datasources.json 的 identitySecret 共用 HMAC 密钥；为空时回退 dbProxyToken",
   "dbProxyIdentitySecret": "",
   "_dbQueryApi说明": "外部数据库查询 API Token(请求头 X-API-Token)。此项只认证身份；Impala/MySQL/Oracle/Spark 库权限在门户用户管理→数据权限中的 db-query-api 虚拟角色设置。Impala/MySQL/Oracle 仅允许只读查询。留空即不开启 Token。",

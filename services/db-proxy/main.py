@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -574,6 +574,7 @@ class DataSource:
             "name": self.name,
             "label": self.label,
             "type": self.type,
+            "sourceType": self.source_type,
             "host": self.host,
             "port": self.port,
             "user": self.user,
@@ -582,13 +583,15 @@ class DataSource:
         }
 
 
-def _load_datasources() -> Dict[str, DataSource]:
-    profiles = CONFIG.get("connectionProfiles") or {}
+def _build_datasources(config: Dict[str, Any], *, reject_duplicates: bool = False) -> Dict[str, DataSource]:
+    profiles = config.get("connectionProfiles") or {}
     if not isinstance(profiles, dict):
         raise ValueError("datasources.json 'connectionProfiles' must be an object")
 
     sources: Dict[str, DataSource] = {}
-    for raw_cfg in CONFIG["datasources"]:
+    for raw_cfg in config["datasources"]:
+        if not isinstance(raw_cfg, dict):
+            raise ValueError("each datasource must be an object")
         cfg = dict(raw_cfg)
         profile_name = cfg.pop("connectionProfile", None)
         if profile_name is not None:
@@ -603,6 +606,8 @@ def _load_datasources() -> Dict[str, DataSource]:
 
         ds = DataSource(cfg)
         if ds.name in sources:
+            if reject_duplicates:
+                raise ValueError(f"duplicate datasource name '{ds.name}'")
             log.warning(
                 "duplicate datasource name '%s'; later entry overrides earlier one",
                 ds.name,
@@ -611,7 +616,12 @@ def _load_datasources() -> Dict[str, DataSource]:
     return sources
 
 
+def _load_datasources() -> Dict[str, DataSource]:
+    return _build_datasources(CONFIG)
+
+
 DATASOURCES = _load_datasources()
+_DATASOURCE_CONFIG_LOCK = threading.RLock()
 
 
 def get_datasource(db: str) -> DataSource:
@@ -1634,6 +1644,320 @@ def db_job_cancel(
     return {"code": 0, "data": {"cancelled": True}}
 
 
+class DatasourceAdminRequest(BaseModel):
+    name: Optional[str] = None
+    label: Optional[str] = None
+    type: str
+    host: str
+    port: int
+    user: str
+    password: Optional[str] = None
+    database: Optional[str] = None
+    serviceName: Optional[str] = None
+    charset: Optional[str] = None
+    rowLimit: Optional[str] = None
+    readOnly: bool = False
+    expectedRevision: Optional[str] = None
+
+
+def _admin_revision(config: Dict[str, Any]) -> str:
+    serialized = json.dumps(config.get("datasources", []), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    key = str(config.get("adminToken") or "db-proxy-unconfigured").encode("utf-8")
+    return hmac.new(key, serialized.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+
+def _managed_source(ds: DataSource) -> bool:
+    return ds.type in ("mysql", "oracle")
+
+
+def _admin_datasource_dict(ds: DataSource) -> Dict[str, Any]:
+    kind = "doris" if ds.source_type == "doris" else ds.type
+    return {
+        "name": ds.name,
+        "label": ds.label,
+        "type": kind,
+        "host": ds.host,
+        "port": ds.port,
+        "user": ds.user,
+        "database": ds.service if ds.type == "mysql" else None,
+        "serviceName": ds.service if ds.type == "oracle" else None,
+        "charset": ds.charset if ds.type == "mysql" else None,
+        "rowLimit": ds.row_limit if ds.type == "oracle" else None,
+        "readOnly": ds.read_only,
+        "hasPassword": bool(ds.password),
+    }
+
+
+def _require_admin_token(provided: Optional[str]) -> None:
+    expected = str(CONFIG.get("adminToken", ""))
+    if not expected or secrets.compare_digest(expected, AUTH_TOKEN or ""):
+        raise HTTPException(status_code=503, detail="db-proxy adminToken must be configured separately from authToken")
+    if not secrets.compare_digest(provided or "", expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _read_admin_config() -> Dict[str, Any]:
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as stream:
+            cfg = json.load(stream)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="datasources.json could not be read") from exc
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("datasources"), list):
+        raise HTTPException(status_code=500, detail="datasources.json has invalid structure")
+    return cfg
+
+
+def _resolve_admin_source(raw: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(raw)
+    profile_name = cfg.pop("connectionProfile", None)
+    if profile_name is not None:
+        profile = (config.get("connectionProfiles") or {}).get(str(profile_name))
+        if not isinstance(profile, dict):
+            raise ValueError("datasource references an invalid connection profile")
+        cfg = {**profile, **cfg}
+    return _expand_connection_string(cfg)
+
+
+def _parse_admin_request(payload: Any) -> DatasourceAdminRequest:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="datasource request must be an object")
+    try:
+        return DatasourceAdminRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid datasource request fields") from exc
+
+
+def _validate_admin_fields(request: DatasourceAdminRequest, *, creating: bool) -> Dict[str, Any]:
+    name = str(request.name or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+        raise HTTPException(status_code=400, detail="name must use letters, digits, dot, underscore, or hyphen")
+    kind = str(request.type or "").strip().lower()
+    if kind not in ("mysql", "oracle", "doris"):
+        raise HTTPException(status_code=400, detail="type must be mysql, oracle, or doris")
+    host = str(request.host or "").strip()
+    if not host or len(host) > 255 or any(char.isspace() for char in host) or any(char in host for char in "/\\@?#"):
+        raise HTTPException(status_code=400, detail="host is invalid")
+    if not 1 <= int(request.port) <= 65535:
+        raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
+    username = str(request.user or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="user is required")
+    password = request.password
+    if creating and not password:
+        raise HTTPException(status_code=400, detail="password is required for a new datasource")
+
+    result: Dict[str, Any] = {
+        "name": name,
+        "label": str(request.label or "").strip() or name,
+        "type": "mysql" if kind == "doris" else kind,
+        "sourceType": kind,
+        "host": host,
+        "port": int(request.port),
+        "user": username,
+        "readOnly": bool(request.readOnly),
+    }
+    if password:
+        result["password"] = password
+    if kind in ("mysql", "doris"):
+        database = str(request.database or "").strip()
+        if not database:
+            raise HTTPException(status_code=400, detail="database is required")
+        result["database"] = database
+        result["charset"] = str(request.charset or "utf8mb4").strip() or "utf8mb4"
+    else:
+        service = str(request.serviceName or "").strip()
+        if not service:
+            raise HTTPException(status_code=400, detail="Oracle serviceName is required")
+        row_limit = str(request.rowLimit or "").strip().lower()
+        if row_limit and row_limit not in ("fetch", "rownum"):
+            raise HTTPException(status_code=400, detail="rowLimit must be fetch or rownum")
+        result["service"] = service
+        if row_limit:
+            result["rowLimit"] = row_limit
+    return result
+
+
+def _save_admin_config(candidate: Dict[str, Any], sources: Dict[str, DataSource]) -> None:
+    temp_path = CONFIG_FILE + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as stream:
+            os.chmod(temp_path, 0o600)
+            json.dump(candidate, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, CONFIG_FILE)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail="datasources.json could not be saved") from exc
+
+    global CONFIG, DATASOURCES
+    CONFIG = candidate
+    DATASOURCES = sources
+
+
+def _redact_admin_error(error: BaseException, password: str = "") -> str:
+    text = str(error)
+    if password:
+        text = text.replace(password, "<redacted>")
+    text = " ".join(text.split()) or "connection failed"
+    text = re.sub(r"(?i)(password|passwd|pwd)(\s*[:=]\s*)(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)", r"\1\2<redacted>", text)
+    text = re.sub(r"(?i)\b(mysql|oracle)://[^\s/@]+:[^\s/@]+@", r"\1://<redacted>@", text)
+    return text[:500]
+
+
+def _admin_mutate_datasources(action: str, name: str, incoming: Optional[Dict[str, Any]], expected_revision: Optional[str]) -> Dict[str, Any]:
+    global CONFIG, DATASOURCES
+    with _DATASOURCE_CONFIG_LOCK:
+        current = _read_admin_config()
+        current_revision = _admin_revision(current)
+        if expected_revision and not secrets.compare_digest(expected_revision, current_revision):
+            raise HTTPException(status_code=409, detail="datasources changed; refresh and retry")
+        raw_sources = current["datasources"]
+        indices = [index for index, item in enumerate(raw_sources) if isinstance(item, dict) and str(item.get("name", "")) == name]
+        if action == "create" and indices:
+            raise HTTPException(status_code=409, detail="datasource name already exists")
+        if action in ("update", "delete") and not indices:
+            raise HTTPException(status_code=404, detail="datasource not found")
+        if len(indices) > 1:
+            raise HTTPException(status_code=409, detail="duplicate datasource names exist in configuration")
+
+        candidate = dict(current)
+        raw_copy = [dict(item) if isinstance(item, dict) else item for item in raw_sources]
+        if action == "delete":
+            old_cfg = _resolve_admin_source(raw_copy[indices[0]], current)
+            old_ds = DataSource(old_cfg)
+            if not _managed_source(old_ds):
+                raise HTTPException(status_code=400, detail="datasource type cannot be managed here")
+            raw_copy.pop(indices[0])
+        else:
+            assert incoming is not None
+            submitted_name = str(incoming.get("name") or "").strip()
+            if submitted_name != name:
+                raise HTTPException(status_code=400, detail="datasource name cannot be changed")
+            previous: Dict[str, Any] = {}
+            if action == "update":
+                previous = _resolve_admin_source(raw_copy[indices[0]], current)
+                previous_ds = DataSource(previous)
+                if not _managed_source(previous_ds):
+                    raise HTTPException(status_code=400, detail="datasource type cannot be managed here")
+                requested_type = str(incoming.get("type", "")).strip().lower()
+                requested_source_type = str(incoming.get("sourceType", requested_type)).strip().lower()
+                if requested_type != previous_ds.type or requested_source_type != previous_ds.source_type:
+                    raise HTTPException(status_code=409, detail="datasource type cannot be changed; create a new name")
+            built = dict(previous)
+            built.update(incoming)
+            if action == "update" and not incoming.get("password"):
+                built["password"] = previous.get("password", "")
+            built.pop("connectionString", None)
+            built.pop("connectionProfile", None)
+            if built.get("type") == "oracle":
+                built.pop("database", None)
+                built.pop("schema", None)
+                built.pop("charset", None)
+                if "rowLimit" not in incoming:
+                    built.pop("rowLimit", None)
+            else:
+                built.pop("service", None)
+                built.pop("schema", None)
+                built.pop("rowLimit", None)
+            if action == "create":
+                raw_copy.append(built)
+            else:
+                raw_copy[indices[0]] = built
+
+        candidate["datasources"] = raw_copy
+        try:
+            next_sources = _build_datasources(candidate, reject_duplicates=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=_redact_admin_error(exc)) from exc
+        _save_admin_config(candidate, next_sources)
+        items = [_admin_datasource_dict(ds) for ds in next_sources.values() if _managed_source(ds)]
+        return {"datasources": items, "revision": _admin_revision(candidate)}
+
+
+def _require_admin_header(x_db_admin_token: Optional[str]) -> None:
+    _require_admin_token(x_db_admin_token)
+
+
+@app.get("/admin/datasources")
+def admin_list_datasources(x_db_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    with _DATASOURCE_CONFIG_LOCK:
+        return {"code": 0, "data": {"datasources": [_admin_datasource_dict(ds) for ds in DATASOURCES.values() if _managed_source(ds)], "revision": _admin_revision(CONFIG)}}
+
+
+@app.post("/admin/datasources")
+def admin_create_datasource(payload: Any = Body(...), x_db_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    request = _parse_admin_request(payload)
+    fields = _validate_admin_fields(request, creating=True)
+    data = _admin_mutate_datasources("create", fields["name"], fields, request.expectedRevision)
+    return {"code": 0, "data": data}
+
+
+@app.put("/admin/datasources/{name}")
+def admin_update_datasource(name: str, payload: Any = Body(...), x_db_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    request = _parse_admin_request(payload)
+    target_name = str(name).strip()
+    fields = _validate_admin_fields(request, creating=False)
+    data = _admin_mutate_datasources("update", target_name, fields, request.expectedRevision)
+    return {"code": 0, "data": data}
+
+
+@app.delete("/admin/datasources/{name}")
+def admin_delete_datasource(name: str, x_db_admin_token: Optional[str] = Header(default=None), expected_revision: Optional[str] = Header(default=None, alias="If-Match")) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    data = _admin_mutate_datasources("delete", str(name).strip(), None, expected_revision)
+    return {"code": 0, "data": data}
+
+
+@app.post("/admin/datasources/test")
+def admin_test_datasource(payload: Any = Body(...), x_db_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    request = _parse_admin_request(payload)
+    fields = _validate_admin_fields(request, creating=True)
+    started = time.monotonic()
+    if not _query_semaphore.acquire(timeout=1):
+        return {"code": 0, "data": {"ok": False, "elapsedMs": 0, "error": "db-proxy 当前连接测试繁忙，请稍后重试"}}
+    connection = None
+    cursor = None
+    try:
+        ds = DataSource(fields)
+        connection = ds.connect(5, 5)
+        cursor = connection.cursor()
+        cursor.execute("SELECT 1 FROM dual" if ds.type == "oracle" else "SELECT 1")
+        if cursor.fetchone() is None:
+            raise RuntimeError("probe query returned no rows")
+        return {"code": 0, "data": {"ok": True, "elapsedMs": int((time.monotonic() - started) * 1000)}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {"code": 0, "data": {"ok": False, "elapsedMs": elapsed_ms, "error": _redact_admin_error(exc, str(request.password or ""))}}
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        _query_semaphore.release()
+
+
 @app.get("/acl")
 def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """回显当前配置(脱敏),排查用。"""
@@ -1642,7 +1966,7 @@ def acl(x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         "code": 0,
         "data": {
             "datasources": [ds.to_dict() for ds in DATASOURCES.values()],
-            "allowedDbs": ALLOWED_DBS or sorted(DATASOURCES.keys()),
+            "allowedDbs": [name for name in ALLOWED_DBS if name in DATASOURCES] if ALLOWED_DBS else sorted(DATASOURCES.keys()),
             "allowedTables": ALLOWED_TABLES,
             "defaultLimit": DEFAULT_LIMIT,
             "maxLimit": MAX_LIMIT,

@@ -20,6 +20,7 @@ import { setupYarnProxy } from './routes/yarn-proxy.js'
 import { setupSubappsProxy } from './routes/subapps-proxy.js'
 import { setupPortal } from './routes/portal.js'
 import { setupDb } from './routes/db.js'
+import { setupDbConfig } from './routes/db-config.js'
 import { setupSpark } from './routes/spark.js'
 import { setupFlink } from './routes/flink.js'
 import { setupDbQuery } from './routes/dbquery.js'
@@ -74,6 +75,7 @@ setupYarnProxy(app) // YARN:hadoopapi 动态代理 + yarniframe HTML 重写 + if
 setupSubappsProxy(app) // 子应用 iframe:HDFS/DS Web/Jupyter/DolphinScheduler/Stingray
 setupPortal(app) // 门户配置下发:/api/config/modules + /api/config
 setupDb(app, auth) // DB 访问:/api/db(权限+acl+jobs+explain+透传)+ /api/db-perms 管理
+setupDbConfig(app, auth) // 数据源管理:/api/db-config(管理员→db-proxy热加载)
 setupSpark(app) // Spark SQL:token 体系 + 限速 + query/jobs/logs/status/config/stages/cancel
 setupFlink(app) // Flink SQL:交互/async/连接器/DDL/jobs/PreJob
 setupDbQuery(app) // MySQL/Oracle 同步查询:/api/dbquery/query

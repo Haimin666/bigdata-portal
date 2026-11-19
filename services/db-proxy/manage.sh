@@ -35,6 +35,7 @@ Commands:
   restart            Stop, then start db-proxy
   status             Show process and listening-port status
   check-datasources  Test every configured MySQL/Doris/Impala/Oracle datasource
+  import-csv         Explicitly import MySQL/Oracle/Doris sources from CSV
   logs [--follow]    Show recent log lines; follow continuously with --follow
   help               Show this help
 
@@ -97,13 +98,20 @@ sync_datasources() {
   fi
 }
 
+import_csv() {
+  [[ $# -eq 0 ]] || { fail 'import-csv 不接受参数'; return 2; }
+  [[ -x "$PYTHON" ]] || fail "Python 不存在或不可执行: $PYTHON" || return 1
+  [[ -f "$CONFIG_FILE" ]] || fail "找不到配置文件 $CONFIG_FILE" || return 1
+  cd "$APP_DIR"
+  sync_datasources
+}
+
 check_datasources() {
   [[ -x "$PYTHON" ]] || fail "Python 不存在或不可执行: $PYTHON" || return 1
   [[ -f "$APP_DIR/main.py" ]] || fail "找不到 $APP_DIR/main.py" || return 1
   [[ -f "$CHECK_SCRIPT" ]] || fail "找不到连通性检查脚本: $CHECK_SCRIPT" || return 1
   [[ -f "$CONFIG_FILE" ]] || fail "找不到配置文件 $CONFIG_FILE" || return 1
   cd "$APP_DIR"
-  sync_datasources || return 1
   "$PYTHON" "$CHECK_SCRIPT" --workers "$CHECK_WORKERS" --timeout "$CHECK_TIMEOUT" "$@"
 }
 
@@ -146,7 +154,6 @@ start() {
     return 1
   fi
 
-  sync_datasources || return 1
   chmod 600 "$CONFIG_FILE"
   export SPARK_HOME SPARK_CONF_DIR
   export PYSPARK_PYTHON="$PYTHON"
@@ -253,6 +260,7 @@ case "$cmd" in
   restart) [[ $# -eq 0 ]] || { fail 'restart 不接受参数'; exit 2; }; stop && start ;;
   status) [[ $# -eq 0 ]] || { fail 'status 不接受参数'; exit 2; }; status ;;
   check-datasources) check_datasources "$@" ;;
+  import-csv) import_csv "$@" ;;
   logs|log) logs "$@" ;;
   help|-h|--help) usage ;;
   '') usage; exit 2 ;;

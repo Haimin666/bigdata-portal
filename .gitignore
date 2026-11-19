@@ -51,9 +51,12 @@ tmp/
 .dsh/
 # 本地 UI demo(可敲定参考,非交付物)
 demo-query-ui/
-# 本地克隆参考项目与文档目录(不跟踪新增文件)
+# 本地克隆参考项目与文档目录(默认不跟踪新增文件；功能模块文档显式纳入)
 .clone-ui/
-docs/
+docs/*
+!docs/modules/
+docs/modules/*
+!docs/modules/db-connection-admin.md
 # MCP 本地配置(含本机绝对路径)
 .mcp.json
 # Python 编译缓存与虚拟环境

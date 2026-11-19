@@ -83,6 +83,8 @@ export default {
   dsToken: pick(fileCfg.dsToken, 'DS_TOKEN', ''),
   dbProxyUrl: pick(fileCfg.dbProxyUrl, 'DB_PROXY_URL', ''),
   dbProxyToken: pick(fileCfg.dbProxyToken, 'DB_PROXY_TOKEN', ''),
+  // 独立的数据源配置管理凭证；仅服务器端传给 db-proxy，不发往浏览器。
+  dbProxyAdminToken: pick(fileCfg.dbProxyAdminToken, 'DB_PROXY_ADMIN_TOKEN', ''),
   // Gateway-to-db-proxy principal signing; falls back to the existing proxy token.
   dbProxyIdentitySecret: pick(fileCfg.dbProxyIdentitySecret, 'DB_PROXY_IDENTITY_SECRET', ''),
   assistantUrl: pick(fileCfg.assistantUrl, 'ASSISTANT_URL', 'http://127.0.0.1:8787'),
