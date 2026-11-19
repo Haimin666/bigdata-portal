@@ -14,6 +14,7 @@ import {
 } from '@/api/db-connections'
 
 const connections = ref<DbConnection[]>([])
+const activeType = ref<DbConnectionType>('oracle')
 const revision = ref('')
 const loading = ref(false)
 const loadError = ref('')
@@ -43,10 +44,11 @@ const typeCounts = computed(() => ({
   oracle: connections.value.filter((item) => item.type === 'oracle').length,
   doris: connections.value.filter((item) => item.type === 'doris').length
 }))
+const activeConnections = computed(() => connections.value.filter((item) => item.type === activeType.value))
 
 const filteredConnections = computed(() => {
   const terms = keyword.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
-  const matches = connections.value.filter((item) => {
+  const matches = activeConnections.value.filter((item) => {
     if (!terms.length) return true
     const searchable = [
       item.label, item.name, typeLabels[item.type] || item.type, item.type,
@@ -62,7 +64,6 @@ const filteredConnections = computed(() => {
     let result = 0
     switch (sortProp.value) {
       case 'name': result = compareText(left.label || left.name, right.label || right.name); break
-      case 'type': result = compareText(typeLabels[left.type] || left.type, typeLabels[right.type] || right.type); break
       case 'host': result = compareText(left.host, right.host) || left.port - right.port; break
       case 'user': result = compareText(left.user, right.user); break
       case 'database': result = compareText(left.database || left.serviceName, right.database || right.serviceName); break
@@ -80,6 +81,7 @@ const pagedConnections = computed(() => {
 })
 
 watch(keyword, () => { currentPage.value = 1 })
+watch(activeType, () => { currentPage.value = 1 })
 watch(pageSize, () => { currentPage.value = 1 })
 watch(() => filteredConnections.value.length, (total) => {
   const lastPage = Math.max(1, Math.ceil(total / pageSize.value))
@@ -119,6 +121,8 @@ function openCreate() {
   if (saving.value || deletingName.value) return
   resetForm()
   isEditing.value = false
+  form.type = activeType.value
+  form.port = defaultPort[activeType.value]
   dialogVisible.value = true
 }
 
@@ -172,8 +176,10 @@ async function save() {
   if (invalid) return ElMessage.warning(invalid)
   saving.value = true
   try {
+    const savedType = form.type
     if (isEditing.value) await updateDbConnection(form.name, payload())
     else await createDbConnection(payload())
+    activeType.value = savedType
     ElMessage.success(isEditing.value ? '数据库连接已更新' : '数据库连接已创建')
     dialogVisible.value = false
     await refresh()
@@ -254,6 +260,18 @@ onMounted(refresh)
       <template #default><el-button link type="primary" @click="refresh">重试</el-button></template>
     </el-alert>
 
+    <el-tabs v-model="activeType" class="connection-tabs">
+      <el-tab-pane name="oracle">
+        <template #label><span class="connection-tab-label">Oracle <el-tag size="small" effect="plain">{{ typeCounts.oracle }}</el-tag></span></template>
+      </el-tab-pane>
+      <el-tab-pane name="mysql">
+        <template #label><span class="connection-tab-label">MySQL <el-tag size="small" effect="plain">{{ typeCounts.mysql }}</el-tag></span></template>
+      </el-tab-pane>
+      <el-tab-pane name="doris">
+        <template #label><span class="connection-tab-label">Doris <el-tag size="small" effect="plain">{{ typeCounts.doris }}</el-tag></span></template>
+      </el-tab-pane>
+    </el-tabs>
+
     <div class="list-shell">
       <div v-loading="loading" class="table-wrap">
         <el-table
@@ -268,9 +286,6 @@ onMounted(refresh)
               <div class="source-name">{{ row.label || row.name }}</div>
               <div class="source-key">{{ row.name }}</div>
             </template>
-          </el-table-column>
-          <el-table-column prop="type" label="类型" width="110" align="center" sortable="custom">
-            <template #default="{ row }"><el-tag size="small" effect="plain">{{ connectionTypeLabel(row.type) }}</el-tag></template>
           </el-table-column>
           <el-table-column prop="host" label="连接地址" min-width="210" sortable="custom">
             <template #default="{ row }"><span class="mono">{{ row.host }}:{{ row.port }}</span></template>
@@ -295,20 +310,17 @@ onMounted(refresh)
             </template>
           </el-table-column>
           <template #empty>
-            <el-empty v-if="connections.length && !loading" description="没有匹配的数据库连接" />
-            <el-empty v-else-if="!loading && !loadError" description="暂无数据库连接">
-              <el-button type="primary" :icon="Plus" @click="openCreate">新增第一个连接</el-button>
+            <el-empty v-if="activeConnections.length && !loading" description="当前引擎中没有匹配的数据库连接" />
+            <el-empty v-else-if="!loading && !loadError" :description="connections.length ? `${connectionTypeLabel(activeType)} 暂无连接` : '暂无数据库连接'">
+              <el-button type="primary" :icon="Plus" @click="openCreate">{{ connections.length ? `新增 ${connectionTypeLabel(activeType)} 连接` : '新增第一个连接' }}</el-button>
             </el-empty>
           </template>
         </el-table>
       </div>
       <div v-if="connections.length || (!loading && !loadError)" class="list-footer">
         <div class="list-summary">
-          <span class="summary-total">共 <strong>{{ connections.length }}</strong> 个连接</span>
-          <el-tag size="small" effect="plain">MySQL {{ typeCounts.mysql }}</el-tag>
-          <el-tag size="small" effect="plain">Oracle {{ typeCounts.oracle }}</el-tag>
-          <el-tag size="small" effect="plain">Doris {{ typeCounts.doris }}</el-tag>
-          <span v-if="keyword.trim()" class="match-count">匹配 {{ filteredConnections.length }} 条</span>
+          <span class="summary-total">{{ connectionTypeLabel(activeType) }} 共 <strong>{{ activeConnections.length }}</strong> 个连接</span>
+          <span v-if="keyword.trim()" class="match-count">当前搜索匹配 {{ filteredConnections.length }} 条</span>
           <span v-if="revision" class="revision">配置版本 {{ revision }}</span>
         </div>
         <el-pagination
@@ -392,6 +404,10 @@ onMounted(refresh)
 .toolbar-title { color: var(--bd-text); font-size: 13px; font-weight: 600; white-space: nowrap; }
 .tip { overflow: hidden; color: var(--bd-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .load-error { margin-top: 12px; }
+.connection-tabs { flex: 0 0 auto; }
+.connection-tabs :deep(.el-tabs__header) { margin: 0; }
+.connection-tabs :deep(.el-tabs__content) { display: none; }
+.connection-tab-label { display: inline-flex; align-items: center; gap: 7px; }
 .list-shell { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
 .table-wrap { position: relative; flex: 1; min-height: 0; padding-top: 12px; overflow: hidden; }
 .connection-table { width: 100%; height: 100%; }
