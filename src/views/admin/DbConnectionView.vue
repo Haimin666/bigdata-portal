@@ -5,6 +5,7 @@ import { Delete, EditPen, Plus, Refresh, Connection, Search } from '@element-plu
 import {
   createDbConnection,
   deleteDbConnection,
+  discoverDbOwners,
   listDbConnections,
   testDbConnection,
   updateDbConnection,
@@ -23,11 +24,13 @@ const isEditing = ref(false)
 const saving = ref(false)
 const deletingName = ref('')
 const testing = ref(false)
+const discoveringOwners = ref(false)
+const ownerOptions = ref<string[]>([])
 const testResult = ref<{ ok: boolean; elapsedMs: number; error?: string } | null>(null)
 
 const form = reactive<DbConnectionPayload>({
   name: '', label: '', type: 'mysql', host: '', port: 3306, user: '', database: '',
-  serviceName: '', owner: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
+  serviceName: '', owner: '', owners: [], charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
 })
 
 const defaultPort: Record<DbConnectionType, number> = { mysql: 3306, oracle: 1521, doris: 9030 }
@@ -112,8 +115,9 @@ async function refresh() {
 function resetForm() {
   Object.assign(form, {
     name: '', label: '', type: 'mysql', host: '', port: 3306, user: '', database: '',
-    serviceName: '', owner: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
+    serviceName: '', owner: '', owners: [], charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
   })
+  ownerOptions.value = []
   testResult.value = null
 }
 
@@ -140,11 +144,13 @@ function openEdit(connection: DbConnection) {
     database: connection.database || '',
     serviceName: connection.serviceName || '',
     owner: connection.owner || '',
+    owners: [...(connection.owners || [])],
     charset: connection.charset || '',
     rowLimit: connection.rowLimit || '',
     readOnly: connection.readOnly,
     password: ''
   })
+  ownerOptions.value = [...(connection.owners || [])]
   dialogVisible.value = true
 }
 
@@ -166,6 +172,7 @@ function payload(): DbConnectionPayload {
     name: form.name.trim(), label: form.label.trim(), host: form.host.trim(),
     user: form.user.trim(), database: form.database.trim(), serviceName: form.serviceName.trim(),
     owner: form.type === 'oracle' ? form.owner?.trim() || undefined : undefined,
+    owners: form.type === 'oracle' ? [...new Set((form.owners || []).map((owner) => owner.trim().toUpperCase()).filter(Boolean))] : undefined,
     password: form.password, expectedRevision: revision.value || undefined
   }
 }
@@ -231,6 +238,22 @@ async function testConnection() {
     ElMessage.error(`连接测试失败：${message}`)
   } finally {
     testing.value = false
+  }
+}
+
+async function discoverOwners() {
+  if (discoveringOwners.value || saving.value || deletingName.value) return
+  if (form.type !== 'oracle') return
+  const invalid = validate(false)
+  if (invalid) return ElMessage.warning(invalid)
+  discoveringOwners.value = true
+  try {
+    ownerOptions.value = await discoverDbOwners(payload())
+    ElMessage.success(`探查到 ${ownerOptions.value.length} 个可见 Owner / Schema`)
+  } catch (error) {
+    ElMessage.error(`探查 Owner / Schema 失败：${error instanceof Error ? error.message : error}`)
+  } finally {
+    discoveringOwners.value = false
   }
 }
 
@@ -354,9 +377,18 @@ onMounted(refresh)
           <el-form-item v-if="form.type !== 'oracle'" label="数据库名" required><el-input v-model="form.database" :disabled="saving" /></el-form-item>
           <el-form-item v-if="form.type === 'oracle'" label="Oracle Service Name" required><el-input v-model="form.serviceName" :disabled="saving" placeholder="必须明确填写服务名" /></el-form-item>
           <el-form-item v-else label="字符集"><el-input v-model="form.charset" :disabled="saving" placeholder="例如 utf8mb4" /></el-form-item>
-          <el-form-item v-if="form.type === 'oracle'" label="Oracle Owner / Schema">
-            <el-input v-model="form.owner" :disabled="saving" placeholder="可选，留空默认使用数据源名称" />
-            <span class="field-note">用于 Oracle 元数据和当前 schema；旧配置未设置时也默认使用数据源名称。</span>
+          <el-form-item v-if="form.type === 'oracle'" label="默认 Owner / Schema">
+            <el-input v-model="form.owner" :disabled="saving" placeholder="可选，留空使用 Oracle 登录账号默认 schema" />
+            <span class="field-note">用于默认查询上下文；不影响 Service Name。旧配置未设置 owner 时仍兼容回退到连接名称。</span>
+          </el-form-item>
+          <el-form-item v-if="form.type === 'oracle'" label="可访问 Owner / Schema" class="full-row">
+            <div class="owner-allowlist">
+              <el-select v-model="form.owners" :disabled="saving || discoveringOwners" multiple filterable collapse-tags collapse-tags-tooltip clearable placeholder="留空表示账号全部可见 schema" style="width: 100%">
+                <el-option v-for="owner in ownerOptions" :key="owner" :label="owner" :value="owner" />
+              </el-select>
+              <el-button :icon="Connection" :loading="discoveringOwners" :disabled="saving || testing || !!deletingName" @click="discoverOwners">探查可见 Schema</el-button>
+            </div>
+            <span class="field-note">探查依据 Oracle `ALL_TABLES`。未选择时不额外限制，查询以 Oracle 账号权限为边界；选择后仅允许读取勾选的 schema。</span>
           </el-form-item>
           <el-form-item v-if="form.type === 'oracle'" label="行数限制模式"><el-select v-model="form.rowLimit" :disabled="saving" clearable placeholder="自动探测"><el-option label="自动探测" value="" /><el-option label="FETCH (12c+)" value="fetch" /><el-option label="ROWNUM (11g)" value="rownum" /></el-select></el-form-item>
           <el-form-item label="数据库密码" :required="!isEditing">
@@ -423,6 +455,9 @@ onMounted(refresh)
 .revision { margin-left: 4px; color: var(--bd-muted); font-size: 11px; white-space: nowrap; }
 .connection-pagination { flex-shrink: 0; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+.full-row { grid-column: 1 / -1; }
+.owner-allowlist { display: flex; align-items: flex-start; gap: 8px; width: 100%; }
+.owner-allowlist .el-select { min-width: 0; }
 .connection-form :deep(.el-form-item) { margin-bottom: 14px; }
 .connection-form :deep(.el-form-item__label) { padding-bottom: 4px; color: var(--bd-muted); font-size: 12px; }
 .connection-form :deep(.el-input__wrapper), .connection-form :deep(.el-select__wrapper) { background: var(--bd-panel); }
@@ -441,5 +476,7 @@ onMounted(refresh)
   .toolbar-actions { width: 100%; flex-wrap: wrap; }
   .keyword-search { width: 100%; }
   .form-grid { grid-template-columns: 1fr; }
+  .owner-allowlist { align-items: stretch; flex-direction: column; }
+  .owner-allowlist .el-button { align-self: flex-start; }
 }
 </style>

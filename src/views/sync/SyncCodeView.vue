@@ -7,7 +7,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, CopyDocument } from '@element-plus/icons-vue'
 import { copyText } from '@/utils/clipboard'
-import { listDataSources, listTables, type DbDataSource } from '@/api/db'
+import { listDataSources, listOwners, listTables, type DbDataSource, type TableMeta } from '@/api/db'
 import StateView from '@/components/StateView.vue'
 import TableToolbar from '@/components/TableToolbar.vue'
 
@@ -23,6 +23,9 @@ const datasources = ref<DbDataSource[]>([])
 const databaseType = ref<DatabaseType>('mysql')
 const datasourceId = ref('')
 const serviceName = ref('')
+const oracleSchemaName = ref('')
+const oracleOwners = ref<string[]>([])
+const oracleOwnersLoading = ref(false)
 const tableName = ref('')
 const tableOptions = ref<string[]>([])
 const datasourceLoading = ref(false)
@@ -33,6 +36,7 @@ const loading = ref(false)
 const result = ref<SyncResult | null>(null)
 const error = ref('')
 let tableLoadSequence = 0
+let ownerLoadSequence = 0
 
 const mysqlSources = computed(() => datasources.value.filter(
   (source) => source.type === 'mysql' && source.sourceType !== 'doris'
@@ -52,9 +56,9 @@ const selectedSource = computed(() => availableSources.value.find((source) => so
 const selectedDatabase = computed(() => {
   const source = selectedSource.value
   if (!source) return ''
-  return databaseType.value === 'mysql'
-    ? (source.database?.trim() || source.name)
-    : (source.owner?.trim() || source.name)
+  if (databaseType.value === 'mysql') return source.database?.trim() || source.name
+  if (oracleSchemaName.value) return oracleSchemaName.value
+  return tableName.value.includes('.') ? tableName.value.split('.', 1)[0] : source.owner?.trim() || ''
 })
 
 function sourceLabel(source: DbDataSource) {
@@ -62,18 +66,40 @@ function sourceLabel(source: DbDataSource) {
 }
 
 function databaseLabel(source: DbDataSource) {
-  const database = databaseType.value === 'mysql'
-    ? (source.database?.trim() || source.name)
-    : (source.owner?.trim() || source.name)
-  const duplicates = availableSources.value.filter((item) => {
-    const name = databaseType.value === 'mysql' ? (item.database?.trim() || item.name) : (item.owner?.trim() || item.name)
-    return name === database
-  }).length > 1
+  if (databaseType.value === 'oracle') {
+    const defaultOwner = source.owner?.trim()
+    return `${sourceLabel(source)}${defaultOwner ? ` · 默认 ${defaultOwner}` : ''}`
+  }
+  const database = source.database?.trim() || source.name
+  const duplicates = availableSources.value.filter((item) => (item.database?.trim() || item.name) === database).length > 1
   return duplicates ? `${database}（${sourceLabel(source)}）` : database
 }
 
 function clearSelectedSource() {
   datasourceId.value = ''
+  oracleSchemaName.value = ''
+  oracleOwners.value = []
+  ownerLoadSequence += 1
+  oracleOwnersLoading.value = false
+}
+
+async function loadOracleOwners(source: DbDataSource) {
+  const sequence = ++ownerLoadSequence
+  oracleSchemaName.value = ''
+  oracleOwners.value = []
+  if (databaseType.value !== 'oracle') return
+  oracleOwnersLoading.value = true
+  try {
+    const owners = await listOwners(source.name)
+    if (sequence !== ownerLoadSequence || selectedSource.value?.name !== source.name) return
+    oracleOwners.value = owners.map((owner) => owner.toUpperCase())
+    const configuredOwner = source.owner?.trim().toUpperCase() || ''
+    oracleSchemaName.value = oracleOwners.value.find((owner) => owner === configuredOwner) || ''
+  } catch (e) {
+    if (sequence === ownerLoadSequence) datasourceError.value = `加载 Oracle Schema 失败:${e instanceof Error ? e.message : e}`
+  } finally {
+    if (sequence === ownerLoadSequence) oracleOwnersLoading.value = false
+  }
 }
 
 async function loadSelectedTables() {
@@ -89,12 +115,18 @@ async function loadSelectedTables() {
 
   tableLoading.value = true
   try {
-    const tables = await listTables(source.name)
+    const isOracle = databaseType.value === 'oracle'
+    const schemaAtRequest = isOracle ? oracleSchemaName.value : undefined
+    const tables = await listTables(source.name, isOracle, schemaAtRequest)
     if (sequence !== tableLoadSequence) return
-    tableOptions.value = tables
-      .map((item) => typeof item === 'string' ? item : item.name)
-      .filter((name) => Boolean(name?.trim()))
-      .map((name) => name.trim())
+    tableOptions.value = isOracle
+      ? (tables as TableMeta[])
+          .map((item) => schemaAtRequest ? item.name : item.qualifiedName || (item.owner ? `${item.owner}.${item.name}` : item.name))
+          .filter((name) => Boolean(name?.trim()))
+          .map((name) => name.trim())
+      : (tables as string[])
+          .filter((name) => Boolean(name?.trim()))
+          .map((name) => name.trim())
   } catch (e) {
     if (sequence === tableLoadSequence) {
       tableError.value = e instanceof Error ? e.message : String(e)
@@ -121,6 +153,16 @@ async function handleServiceNameChange() {
 }
 
 async function handleDatabaseChange() {
+  const source = selectedSource.value
+  if (databaseType.value === 'oracle') {
+    if (source) await loadOracleOwners(source)
+    else {
+      ownerLoadSequence += 1
+      oracleOwnersLoading.value = false
+      oracleOwners.value = []
+      oracleSchemaName.value = ''
+    }
+  }
   await loadSelectedTables()
 }
 
@@ -156,11 +198,12 @@ async function generate() {
     ElMessage.warning('请先选择表')
     return
   }
-  if (databaseType.value === 'oracle' && (
-    !serviceName.value ||
-    (selected.owner?.trim() || selected.name).toUpperCase() !== db.toUpperCase()
-  )) {
-    ElMessage.warning('请选择当前 Oracle 服务下的库/schema')
+  if (databaseType.value === 'oracle' && !serviceName.value) {
+    ElMessage.warning('请先选择 Oracle Service Name')
+    return
+  }
+  if (databaseType.value === 'oracle' && !oracleSchemaName.value && !tbl.includes('.')) {
+    ElMessage.warning('全部 Schema 模式下请选择 OWNER.TABLE 格式的表')
     return
   }
 
@@ -177,7 +220,7 @@ async function generate() {
   }
   if (databaseType.value === 'oracle') {
     payload.service_name = serviceName.value
-    payload.owner = selected.owner?.trim() || selected.name
+    if (oracleSchemaName.value) payload.owner = oracleSchemaName.value
   }
 
   loading.value = true
@@ -250,10 +293,8 @@ onMounted(() => {
             <el-option v-for="name in oracleServiceNames" :key="name" :label="name" :value="name" />
           </el-select>
         </div>
-        <span v-if="databaseType === 'oracle'" class="sync-dot">.</span>
-
         <div class="sync-field">
-          <span class="sync-label">库</span>
+          <span class="sync-label">{{ databaseType === 'oracle' ? '连接' : '库' }}</span>
           <el-select
             v-model="datasourceId"
             class="sync-input sync-source-input"
@@ -264,6 +305,22 @@ onMounted(() => {
             @change="handleDatabaseChange"
           >
             <el-option v-for="source in availableSources" :key="source.name" :label="databaseLabel(source)" :value="source.name" />
+          </el-select>
+        </div>
+        <div v-if="databaseType === 'oracle'" class="sync-field">
+          <span class="sync-label">Schema</span>
+          <el-select
+            v-model="oracleSchemaName"
+            class="sync-input sync-schema-input"
+            placeholder="全部可见 Schema"
+            filterable
+            clearable
+            :loading="oracleOwnersLoading"
+            :disabled="datasourceLoading || !selectedSource"
+            @change="loadSelectedTables"
+          >
+            <el-option label="全部可见 Schema" value="" />
+            <el-option v-for="owner in oracleOwners" :key="owner" :label="owner" :value="owner" />
           </el-select>
         </div>
 
@@ -364,6 +421,9 @@ onMounted(() => {
 .sync-source-input {
   width: 190px;
 }
+.sync-schema-input {
+  width: 160px;
+}
 .sync-table-field .sync-input {
   width: 180px;
 }
@@ -454,6 +514,7 @@ onMounted(() => {
   .sync-engine-field .sync-input,
   .sync-service-input,
   .sync-source-input,
+  .sync-schema-input,
   .sync-table-field .sync-input {
     width: 100%;
   }

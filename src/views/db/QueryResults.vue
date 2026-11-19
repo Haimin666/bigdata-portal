@@ -35,7 +35,9 @@ export interface QueryResultItem {
   snapshotRows?: number // 缓存快照包含的行数(历史快照最多前 100 行)
   // ── 行内编辑(仅表预览结果)────────────────────────
   editable?: boolean // 是否允许单元格双击编辑
-  db?: string // 目标库(onOpenTable 设置)
+  db?: string // 目标数据源 ID(onOpenTable 设置)
+  owner?: string // Oracle 目标 owner/schema(onOpenTable 设置)
+  schemaName?: string // Oracle 查询上下文;空字符串表示全部可见 schema
   table?: string // 目标表(onOpenTable 设置)
   engine?: 'mysql' | 'oracle' | 'impala' // 目标引擎(onOpenTable 设置)
   logs?: string[]
@@ -194,7 +196,7 @@ function buildUpdateSql(r: QueryResultItem): string[] {
   if (!r.table || !r.pkCols?.length || !r.pendingEdits?.length) return []
   const isOracle = r.engine === 'oracle'
   const q = (id: string) => (isOracle ? `"${id}"` : `\`${id}\``)
-  const tbl = q(r.table)
+  const tbl = isOracle && r.owner ? `${q(r.owner)}.${q(r.table)}` : q(r.table)
   const byRow = new Map<number, { row: Record<string, unknown>; edits: PendingEdit[] }>()
   for (const p of r.pendingEdits) {
     const item = r.rows[p.row]
@@ -251,7 +253,7 @@ async function commitEdits() {
   emit('busy', true) // 提交期间互斥,防用户同时执行新查询导致 rerunResult 竞态
   try {
     for (const sql of stmts) {
-      await queryDb(r.db || props.db, sql)
+      await queryDb(r.db || props.db, sql, r.schemaName)
     }
     ElMessage.success(`已提交 ${r.pendingEdits.length} 处修改`)
     r.pendingEdits = []

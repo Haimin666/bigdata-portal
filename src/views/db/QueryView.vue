@@ -6,7 +6,7 @@ import { CaretRight, Loading, MagicStick, DocumentChecked, Document, Plus, Close
 import SqlEditor from './SqlEditor.vue'
 import QueryResults, { type QueryResultItem } from './QueryResults.vue'
 import { format as sqlFormat, type SqlLanguage } from 'sql-formatter'
-import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, listSparkTables, listSparkFields, explainSql, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
+import { listDataSources, queryFlink, cancelFlink, flinkAsyncSubmit, flinkAsyncStatus, flinkAsyncCancel, sparkLogs, sparkStages, submitSparkJob, submitSparkExportJob, getSparkJob, cancelSparkJob, submitDbJob, getDbJob, cancelDbJob, saveScriptContent, getScriptContent, createScriptNode, getSchema, listSparkTables, listSparkFields, explainSql, listOwners, listFields, type SparkExecutionMode, type SparkStageSnapshot, type DbDataSource, type DbSchema, type ScriptNode, type TableFieldDetail, type ExplainNode } from '@/api/db'
 import { getTheme, THEME_EVENT, type ThemeMode } from '@/utils/theme'
 import { hasExecutableSql } from '@/utils/sql-query-comments.js'
 import { addHistoryEntry, readJson, writeJson, TEMP_DRAFTS_KEY } from '@/utils/db-query-cache'
@@ -402,7 +402,7 @@ function onRunHistorySql(sql: string, result?: { columns: string[]; rows: Record
 }
 
 /** 双击表目录中的表:新开/复用预览 tab,自动执行 SELECT * 前 100 行 */
-async function onOpenTable(payload: { db: string; table: string; engine?: string }) {
+async function onOpenTable(payload: { db: string; table: string; owner?: string; engine?: string }) {
   const isSpark = payload.engine === 'spark'
   if (isSpark && (loading.value || sparkBatchActive.value)) {
     ElMessage.warning('上一批 SQL 仍在执行,预览已取消,请等待完成')
@@ -418,15 +418,21 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   // 引擎与库切到预览目标(Oracle 用 FETCH FIRST,MySQL/Impala 用 LIMIT)
   engine.value = isSpark ? (engine.value === 'sparksession' ? 'sparksession' : 'sparksql') : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
   db.value = isSpark ? SPARK_SOURCE.name : payload.db
+  if (isOracle) {
+    await loadOracleOwners(payload.db, payload.owner || src?.owner)
+    if (payload.owner) oracleSchemaName.value = payload.owner.toUpperCase()
+  }
+  const previewOwner = payload.owner?.trim() || oracleSchemaName.value || src?.owner?.trim() || payload.db
   const sparkIdent = (value: string) => '`' + value.replace(/`/g, '``') + '`'
   const oracleIdent = (value: string) => `"${value.replace(/"/g, '""')}"`
   const ident = isSpark
     ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}`
     : isOracle
-      ? `${oracleIdent(src?.owner || payload.db)}.${oracleIdent(payload.table)}`
+      ? `${oracleIdent(previewOwner)}.${oracleIdent(payload.table)}`
       : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
-  const tabId = `${isSpark ? 'spark-' : ''}tbl-${payload.db}.${payload.table}`
+  const previewIdentity = isOracle ? `${previewOwner}.${payload.table}` : `${payload.db}.${payload.table}`
+  const tabId = `${isSpark ? 'spark-' : ''}tbl-${previewIdentity}`
   const existing = tabs.value.find((t) => t.id === tabId)
   flushActiveContent()
   if (existing) {
@@ -435,7 +441,7 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
     const tab: EditorTab = {
       id: tabId,
       file: null,
-      name: `${payload.db}.${payload.table}`,
+      name: previewIdentity,
       content: sql,
       dirty: false
     }
@@ -459,17 +465,19 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   if (!isSpark && r && !r.error && r.sql.trim() === sql.trim()) {
     r.editable = !isImpala
     r.db = payload.db
+    r.owner = isOracle ? previewOwner : undefined
+    r.schemaName = isOracle ? previewOwner : undefined
     r.table = payload.table
     r.engine = isImpala ? 'impala' : isOracle ? 'oracle' : 'mysql'
     r.pendingEdits = []
-    void loadPreviewPk(r, payload.db, payload.table, isOracle)
+    void loadPreviewPk(r, payload.db, payload.table, isOracle, previewOwner)
   }
 }
 
 /** 异步取表主键列(listFields detail 中 key==='PRI';Oracle 主键列转大写比较,名字原样存) */
-async function loadPreviewPk(r: QueryResultItem, dbName: string, tableName: string, isOracle: boolean) {
+async function loadPreviewPk(r: QueryResultItem, dbName: string, tableName: string, isOracle: boolean, schemaName?: string) {
   try {
-    const fields = (await listFields(dbName, tableName, true)) as TableFieldDetail[]
+    const fields = (await listFields(dbName, tableName, true, isOracle ? schemaName || '' : undefined)) as TableFieldDetail[]
     const pks = (fields || []).filter((f) => String(f.key || '').toUpperCase() === 'PRI').map((f) => f.name)
     // Oracle 元数据列名通常为大写;比较时统一转大写,存储保持原样
     r.pkCols = isOracle ? pks.map((p) => p.toUpperCase()) : pks
@@ -565,7 +573,7 @@ function oracleServiceKey(source: DbDataSource): string {
 }
 
 function oracleOwnerKey(source: DbDataSource): string {
-  return source.owner?.trim() || source.name
+  return source.owner?.trim() || ''
 }
 
 const oracleSources = computed(() => datasources.value.filter((source) => source.type === 'oracle'))
@@ -579,13 +587,42 @@ const oracleServiceName = computed({
     db.value = selected?.name || ''
   }
 })
-const oracleOwnerSources = computed(() => oracleSources.value.filter((source) => oracleServiceKey(source) === oracleServiceName.value))
-const oracleSchemaName = computed(() => selectedOracleSource.value ? oracleOwnerKey(selectedOracleSource.value) : '')
+const oracleConnectionSources = computed(() => oracleSources.value.filter((source) => oracleServiceKey(source) === oracleServiceName.value))
+const oracleSchemaName = ref('')
+const oracleOwners = ref<string[]>([])
+const oracleOwnersLoading = ref(false)
+let oracleOwnersSequence = 0
 
-function oracleOwnerLabel(source: DbDataSource): string {
-  const owner = oracleOwnerKey(source)
-  const duplicates = oracleOwnerSources.value.filter((item) => oracleOwnerKey(item) === owner).length > 1
-  return duplicates ? `${owner} (${source.name})` : owner
+function oracleConnectionLabel(source: DbDataSource): string {
+  const base = source.label && source.label !== source.name ? `${source.label} (${source.name})` : source.name
+  const defaultOwner = oracleOwnerKey(source)
+  return defaultOwner ? `${base} · 默认 ${defaultOwner}` : base
+}
+
+async function loadOracleOwners(dbName: string, preferredOwner = ''): Promise<void> {
+  const sequence = ++oracleOwnersSequence
+  oracleOwners.value = []
+  oracleSchemaName.value = ''
+  if (!dbName) {
+    oracleOwnersLoading.value = false
+    return
+  }
+  oracleOwnersLoading.value = true
+  try {
+    const owners = await listOwners(dbName)
+    if (sequence !== oracleOwnersSequence) return
+    oracleOwners.value = owners.map((owner) => owner.toUpperCase())
+    const preferred = preferredOwner.trim().toUpperCase()
+      || selectedOracleSource.value?.owner?.trim().toUpperCase()
+      || ''
+    oracleSchemaName.value = oracleOwners.value.find((owner) => owner === preferred) || ''
+  } catch (error) {
+    if (sequence === oracleOwnersSequence) {
+      ElMessage.warning(`加载 Oracle Schema 失败：${error instanceof Error ? error.message : error}`)
+    }
+  } finally {
+    if (sequence === oracleOwnersSequence) oracleOwnersLoading.value = false
+  }
 }
 
 // 库下拉占位:区分「没选引擎」「加载失败」「该引擎无库」三种空状态,避免用户对着禁用框猜测
@@ -606,12 +643,16 @@ const canvasRef = ref<HTMLElement>()
 const editorRef = ref<InstanceType<typeof SqlEditor>>()
 // 补全元数据:关系库全量 schema;Spark 按发起时快照的引擎/模式加载指定库的表或指定表的字段
 // (engine/executionMode 由 SqlEditor 显式传入,避免请求返回时已切引擎/模式导致串库)
-const schemaLoader = async (db: string, engine: string, executionMode: SparkExecutionMode, table?: string): Promise<DbSchema | null> => {
+const schemaLoader = async (db: string, engine: string, executionMode: SparkExecutionMode, table?: string, schemaName = ''): Promise<DbSchema | null> => {
   if (engine === 'sparksql' || engine === 'sparksession') {
     if (table) return { tables: [{ name: table, columns: await listSparkFields(db, table, executionMode) }] }
     return { tables: (await listSparkTables(db, executionMode)).map((name) => ({ name, columns: [] })) }
   }
-  return getSchema(db)
+  const schema = await getSchema(db, engine === 'oracle' ? schemaName : undefined)
+  if (engine === 'oracle' && !schemaName) {
+    return { ...schema, tables: schema.tables.map((item) => ({ ...item, name: item.qualifiedName || item.name })) }
+  }
+  return schema
 }
 
 // 默认 SQL:清空(用户自行编写);编辑器默认内容由 SqlEditor 的 :value/model 池提供
@@ -1624,6 +1665,17 @@ watch(engine, async (val) => {
   // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
 
+watch([engine, db], ([nextEngine, nextDb]) => {
+  if (nextEngine === 'oracle' && nextDb) {
+    void loadOracleOwners(nextDb, selectedOracleSource.value?.owner || '')
+  } else {
+    oracleOwnersSequence += 1
+    oracleOwnersLoading.value = false
+    oracleOwners.value = []
+    oracleSchemaName.value = ''
+  }
+})
+
 // 换引擎/数据源后清空 ${var} 输入,避免把上一个库的参数带到新库执行
 watch([engine, db], () => resetRunVarValuesForScope())
 
@@ -1676,12 +1728,25 @@ watch([engine, db], () => resetRunVarValuesForScope())
         <el-select
           v-model="db"
           class="db-select"
-          placeholder="Oracle owner / schema"
-          aria-label="Oracle owner / schema"
+          placeholder="选择 Oracle 连接"
+          aria-label="选择 Oracle 连接"
           filterable
-          :disabled="loading || sparkBatchActive || exportLoading || !oracleOwnerSources.length"
+          :disabled="loading || sparkBatchActive || exportLoading || !oracleConnectionSources.length"
         >
-          <el-option v-for="source in oracleOwnerSources" :key="source.name" :label="oracleOwnerLabel(source)" :value="source.name" />
+          <el-option v-for="source in oracleConnectionSources" :key="source.name" :label="oracleConnectionLabel(source)" :value="source.name" />
+        </el-select>
+        <el-select
+          v-model="oracleSchemaName"
+          class="oracle-context-select"
+          placeholder="全部可见 Schema"
+          aria-label="选择 Oracle Owner 或全部可见 Schema"
+          filterable
+          clearable
+          :loading="oracleOwnersLoading"
+          :disabled="loading || sparkBatchActive || exportLoading || !db"
+        >
+          <el-option label="全部可见 Schema" value="" />
+          <el-option v-for="owner in oracleOwners" :key="owner" :label="owner" :value="owner" />
         </el-select>
       </template>
       <el-select
@@ -1781,6 +1846,7 @@ watch([engine, db], () => resetRunVarValuesForScope())
         :theme-mode="themeMode"
         :font-size="fontSize"
         :current-db="db"
+        :current-schema-name="oracleSchemaName"
         :engine="engine"
         :execution-mode="sparkExecutionMode"
         :schema-loader="schemaLoader"

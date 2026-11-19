@@ -154,6 +154,20 @@ def _hive_columns(ds, table_name: str, timeout: int) -> Optional[List[Dict[str, 
         conn.close()
 
 
+def _oracle_current_schema(ds, connect_timeout: int, query_timeout: int) -> str:
+    conn = ds.connect(connect_timeout, query_timeout)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual")
+            row = cur.fetchone()
+            return str(row[0] or "").strip().upper() if row else ""
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
 def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: int, oracle_owner: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str]:
     if ds.type not in ("mysql", "oracle") or getattr(ds, "source_type", ds.type) == "doris":
         raise ValueError("数据同步仅支持 MySQL/Oracle 数据源")
@@ -179,7 +193,13 @@ def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: in
                 comment_row = _rows_as_dicts(cur)
                 table_comment = str(comment_row[0].get("TABLE_COMMENT") or "") if comment_row else ""
             else:
-                owner = str(oracle_owner or getattr(ds, "owner", ds.service)).upper()
+                owner = str(oracle_owner or getattr(ds, "owner", "") or "").strip().upper()
+                if not owner:
+                    cur.execute("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual")
+                    owner_row = cur.fetchone()
+                    owner = str(owner_row[0] or "").strip().upper() if owner_row else ""
+                if not owner:
+                    raise ValueError("未能确定 Oracle 当前 schema，请指定 owner/schema")
                 cur.execute(
                     "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.DATA_PRECISION, "
                     "c.DATA_SCALE, c.NULLABLE AS IS_NULLABLE, c.COLUMN_ID AS ORDINAL_POSITION, "
@@ -316,30 +336,14 @@ def _encode_datax_password(password: str) -> str:
 
 
 def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]], hive_columns: Optional[List[Dict[str, str]]], source_type: str, cfg: Dict[str, Any], source_table_name: Optional[str] = None) -> str:
-    datax_cfg = dict(cfg.get("datax") or {})
-    overrides = cfg.get("datasourceOverrides") or {}
-    if not isinstance(overrides, dict):
-        raise RuntimeError("dataSync.datasourceOverrides 必须是 JSON 对象")
-    source_override = overrides.get(ds.name) or {}
-    if not isinstance(source_override, dict):
-        raise RuntimeError("dataSync.datasourceOverrides[{}] 必须是 JSON 对象".format(ds.name))
-    datax_cfg.update(source_override)
+    reader_user = str(getattr(ds, "user", "") or "").strip()
+    reader_password = str(getattr(ds, "password", "") or "")
+    if not reader_user or not reader_password:
+        raise RuntimeError("所选数据源未配置连接用户名或密码")
     if source_type == "oracle":
-        username = str(datax_cfg.get("oracleUsername") or "").strip()
-        password = str(datax_cfg.get("oraclePassword") or "")
-        if not username or not password:
-            raise RuntimeError("dataSync.datax.oracleUsername/oraclePassword 未配置")
         reader_name = "oraclereader"
-        jdbc_url = str(datax_cfg.get("oracleJdbcUrl") or getattr(ds, "datax_jdbc_url", "") or "")
-        if not jdbc_url:
-            jdbc_url = "jdbc:oracle:thin:@//{}:{}/{}".format(ds.host, ds.port, ds.service)
-        reader_user = username
-        reader_password = password
+        jdbc_url = "jdbc:oracle:thin:@//{}:{}/{}".format(ds.host, ds.port, ds.service)
     else:
-        reader_user = str(datax_cfg.get("mysqlUsername") or ds.user)
-        reader_password = str(datax_cfg.get("mysqlPassword") or "")
-        if not reader_password:
-            raise RuntimeError("dataSync.datax.mysqlPassword 未配置")
         reader_name = "mysqlreader"
         jdbc_url = "jdbc:mysql://{}:{}/{}".format(ds.host, ds.port, ds.service)
 
@@ -425,15 +429,23 @@ def generate_db2hive(
 
     hive_table_name = table_name
     source_table_name = table_name
-    configured_owner = str(getattr(ds, "owner", ds.service) or ds.service).upper()
-    resolved_owner = str(oracle_owner or configured_owner).strip().upper()
-    if source_type == "oracle" and "." in table_name:
-        table_owner, hive_table_name = table_name.split(".", 1)
-        table_owner = table_owner.upper()
-        if oracle_owner and table_owner != str(oracle_owner).strip().upper():
-            raise ValueError("OWNER.TABLE 中的 owner 与单独传入的 owner 不一致")
-        resolved_owner = table_owner
+    resolved_owner = ""
     if source_type == "oracle":
+        if "." in table_name:
+            table_owner, hive_table_name = table_name.split(".", 1)
+            table_owner = table_owner.strip().upper()
+            if oracle_owner and table_owner != str(oracle_owner).strip().upper():
+                raise ValueError("OWNER.TABLE 中的 owner 与单独传入的 owner 不一致")
+            resolved_owner = table_owner
+        else:
+            resolved_owner = str(oracle_owner or getattr(ds, "owner", "") or "").strip().upper()
+            if not resolved_owner:
+                resolved_owner = _oracle_current_schema(ds, connect_timeout, query_timeout)
+        if not resolved_owner:
+            raise ValueError("未能确定 Oracle 当前 schema，请指定 owner/schema")
+        allowed_owners = getattr(ds, "owners", []) or []
+        if allowed_owners and resolved_owner not in allowed_owners:
+            raise ValueError("Oracle owner 不在当前数据源允许的 schema 列表中")
         source_table_name = "{}.{}".format(resolved_owner, hive_table_name.upper())
     columns, table_comment = _source_columns(
         ds, hive_table_name, connect_timeout, query_timeout,

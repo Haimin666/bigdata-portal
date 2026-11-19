@@ -10,6 +10,7 @@ export interface DbConnection {
   database: string
   serviceName: string
   owner?: string
+  owners?: string[]
   charset: string
   rowLimit: string
   readOnly: boolean
@@ -27,6 +28,7 @@ export interface DbConnectionPayload {
   database: string
   serviceName: string
   owner?: string
+  owners?: string[]
   charset: string
   rowLimit: string
   readOnly: boolean
@@ -99,4 +101,9 @@ export async function deleteDbConnection(name: string, revision: string): Promis
 export async function testDbConnection(payload: DbConnectionPayload): Promise<DbConnectionTestResult> {
   const data = await request<DbConnectionTestResult>('/test', jsonBody(payload))
   return data
+}
+
+export async function discoverDbOwners(payload: DbConnectionPayload): Promise<string[]> {
+  const data = await request<{ owners?: string[] }>('/discover-owners', jsonBody(payload))
+  return Array.isArray(data?.owners) ? data.owners : []
 }

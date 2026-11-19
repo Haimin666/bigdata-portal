@@ -15,8 +15,10 @@ export interface DbDataSource {
   user: string
   /** Oracle Service Name (connection attribute; not the stable datasource name). */
   serviceName?: string
-  /** Oracle schema owner used for metadata and the default session schema. */
+  /** Oracle default session schema, optional. */
   owner?: string
+  /** Optional metadata and sync owner allowlist; empty means all visible schemas. */
+  owners?: string[]
   rowLimit?: string
 }
 
@@ -114,6 +116,8 @@ export interface TableSearchHit {
   engine: 'mysql' | 'oracle' | 'impala'
   db: string
   table: string
+  schema?: string
+  owner?: string
 }
 
 /** 拉取数据源列表(带类型,来自 /acl) */
@@ -127,7 +131,7 @@ export async function queryDb(db: string, sql: string, schemaName?: string): Pro
   const res = await fetch('/api/dbquery/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ db, sql, ...(schemaName ? { schemaName } : {}) })
+    body: JSON.stringify({ db, sql, ...(schemaName !== undefined ? { schemaName } : {}) })
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -165,7 +169,7 @@ export async function submitDbJob(
       sql,
       timeoutMs,
       ...(aiFix !== undefined ? { aiFix } : {}),
-      ...(schemaName ? { schemaName } : {})
+      ...(schemaName !== undefined ? { schemaName } : {})
     })
   })
   if (!res.ok) {
@@ -864,16 +868,20 @@ export async function getScriptContent(id: string): Promise<{ id: string; conten
 export interface TableField {
   name: string
   type: string
+  owner?: string
 }
 
 /** 表元数据(detail=1,含注释) */
 export interface TableMeta {
   name: string
+  owner?: string
+  qualifiedName?: string
   comment?: string
 }
 
 /** 字段完整元数据(detail=1:注释/可空/键) */
 export interface TableFieldDetail extends TableField {
+  owner?: string
   comment?: string
   nullable?: boolean
   key?: string
@@ -886,21 +894,32 @@ export interface TableDDL {
   ddl: string
 }
 
-/** 表列表;detail=true 时返回 [{name, comment}](含表注释),否则 string[] */
-export async function listTables(db: string, detail = false): Promise<string[] | TableMeta[]> {
-  const q = `db=${encodeURIComponent(db)}${detail ? '&detail=1' : ''}`
-  return request<string[] | TableMeta[]>(`/tables?${q}`, undefined, METADATA_TIMEOUT_MS)
+/** Oracle owner 清单;使用当前账号可见的 ALL_TABLES 并应用数据源 owners allowlist */
+export async function listOwners(db: string): Promise<string[]> {
+  return request<string[]>(`/owners?db=${encodeURIComponent(db)}`, undefined, METADATA_TIMEOUT_MS)
 }
 
-/** 字段列表;detail=true 时返回完整元数据(注释/可空/键),否则 [{name, type}] */
-export async function listFields(db: string, table: string, detail = false): Promise<TableField[] | TableFieldDetail[]> {
-  const q = `db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}${detail ? '&detail=1' : ''}`
-  return request<TableField[] | TableFieldDetail[]>(`/fields?${q}`, undefined, METADATA_TIMEOUT_MS)
+/** 表列表;detail=true 时返回 [{name, owner, comment}],否则 string[];Oracle 可指定 schemaName */
+export async function listTables(db: string, detail = false, schemaName?: string): Promise<string[] | TableMeta[]> {
+  const q = new URLSearchParams({ db })
+  if (detail) q.set('detail', '1')
+  if (schemaName !== undefined) q.set('schemaName', schemaName)
+  return request<string[] | TableMeta[]>(`/tables?${q.toString()}`, undefined, METADATA_TIMEOUT_MS)
+}
+
+/** 字段列表;detail=true 时返回完整元数据(注释/可空/键),Oracle 可指定 schemaName */
+export async function listFields(db: string, table: string, detail = false, schemaName?: string): Promise<TableField[] | TableFieldDetail[]> {
+  const q = new URLSearchParams({ db, table })
+  if (detail) q.set('detail', '1')
+  if (schemaName !== undefined) q.set('schemaName', schemaName)
+  return request<TableField[] | TableFieldDetail[]>(`/fields?${q.toString()}`, undefined, METADATA_TIMEOUT_MS)
 }
 
 /** 生成建表 DDL */
-export async function getTableDDL(db: string, table: string): Promise<TableDDL> {
-  return request<TableDDL>(`/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`, undefined, METADATA_TIMEOUT_MS)
+export async function getTableDDL(db: string, table: string, schemaName?: string): Promise<TableDDL> {
+  const q = new URLSearchParams({ db, table })
+  if (schemaName !== undefined) q.set('schemaName', schemaName)
+  return request<TableDDL>(`/ddl?${q.toString()}`, undefined, METADATA_TIMEOUT_MS)
 }
 
 // ── Schema 元数据补全 / EXPLAIN(经网关 /api/db/schema、/api/db/explain)────────
@@ -908,6 +927,8 @@ export async function getTableDDL(db: string, table: string): Promise<TableDDL> 
 /** 单表元数据(供 SQL 编辑器补全) */
 export interface DbSchemaTable {
   name: string
+  owner?: string
+  qualifiedName?: string
   comment?: string
   columns: Array<{ name: string; type?: string }>
 }
@@ -920,8 +941,10 @@ export interface DbSchema {
 }
 
 /** 拉取数据源 schema(表+字段,供编辑器补全;GET /api/db/schema 经网关透传 db-proxy /schema) */
-export async function getSchema(db: string): Promise<DbSchema> {
-  return request<DbSchema>(`/schema?db=${encodeURIComponent(db)}`, undefined, SCHEMA_TIMEOUT_MS)
+export async function getSchema(db: string, schemaName?: string): Promise<DbSchema> {
+  const q = new URLSearchParams({ db })
+  if (schemaName !== undefined) q.set('schemaName', schemaName)
+  return request<DbSchema>(`/schema?${q.toString()}`, undefined, SCHEMA_TIMEOUT_MS)
 }
 
 /** EXPLAIN 树节点(root 展开;MySQL/Oracle 字段略有差异) */
@@ -950,7 +973,7 @@ export async function explainSql(params: { db: string; sql: string; schemaName?:
     body: JSON.stringify({
       db: params.db,
       sql: params.sql,
-      ...(params.schemaName ? { schemaName: params.schemaName } : {})
+      ...(params.schemaName !== undefined ? { schemaName: params.schemaName } : {})
     })
   })
 }

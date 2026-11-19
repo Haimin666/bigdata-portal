@@ -24,7 +24,7 @@ import {
 
 // ── Props / Emits ────────────────────────────────────────────
 interface SchemaMeta {
-  tables: Array<{ name: string; comment?: string; columns: Array<{ name: string; type?: string }> }>
+  tables: Array<{ name: string; owner?: string; qualifiedName?: string; comment?: string; columns: Array<{ name: string; type?: string }> }>
 }
 const props = withDefaults(
   defineProps<{
@@ -34,9 +34,10 @@ const props = withDefaults(
     themeMode?: 'dark' | 'light'
     fontSize?: number
     currentDb?: string
+    currentSchemaName?: string
     engine?: string
     executionMode?: SparkExecutionMode
-    schemaLoader?: (db: string, engine: string, executionMode: SparkExecutionMode, table?: string) => Promise<SchemaMeta | null>
+    schemaLoader?: (db: string, engine: string, executionMode: SparkExecutionMode, table?: string, schemaName?: string) => Promise<SchemaMeta | null>
   }>(),
   {
     value: '',
@@ -44,6 +45,7 @@ const props = withDefaults(
     themeMode: 'dark',
     fontSize: 14,
     currentDb: '',
+    currentSchemaName: '',
     engine: '',
     executionMode: 'thrift',
     schemaLoader: undefined
@@ -416,8 +418,8 @@ function engineIsSpark(engine: string | undefined): boolean {
   return engine === 'sparksql' || engine === 'sparksession'
 }
 
-function schemaKey(dbName: string, table: string | undefined, engine: string, executionMode: SparkExecutionMode): string {
-  return JSON.stringify([engine, executionMode, dbName, table ?? ''])
+function schemaKey(dbName: string, table: string | undefined, engine: string, executionMode: SparkExecutionMode, schemaName = ''): string {
+  return JSON.stringify([engine, executionMode, dbName, schemaName, table ?? ''])
 }
 
 /** 命中判断:成功条目 5 分钟、失败条目 10 秒后过期(过期后允许重试) */
@@ -484,12 +486,13 @@ async function ensureSparkDatabases(executionMode: SparkExecutionMode): Promise<
   return p
 }
 
-async function loadSchema(dbName: string, table?: string): Promise<SchemaMeta | null> {
+async function loadSchema(dbName: string, table?: string, requestedSchemaName = props.currentSchemaName || ''): Promise<SchemaMeta | null> {
   if (!dbName) return null
-  // 发起时快照:engine/executionMode 一起进 key,返回后若已切换则丢弃结果不写缓存
+  // 发起时快照:engine/executionMode/schemaName 一起进 key,返回后只写入对应上下文
   const engine = props.engine
   const executionMode: SparkExecutionMode = props.executionMode
-  const key = schemaKey(dbName, table, engine, executionMode)
+  const schemaName = engine === 'oracle' ? requestedSchemaName : ''
+  const key = schemaKey(dbName, table, engine, executionMode, schemaName)
   const cached = getFreshSchema(key)
   if (cached) return cached.data
   const inflight = schemaInflight.get(key)
@@ -498,7 +501,7 @@ async function loadSchema(dbName: string, table?: string): Promise<SchemaMeta | 
     try {
       // loader 显式接收发起时的 engine/mode,key 也带同样的快照:
       // 即使返回时用户已切走,这条结果仍然只属于原引擎/模式,可安全缓存(避免切回时重复拉取)
-      const meta = (await props.schemaLoader?.(dbName, engine, executionMode, table)) ?? null
+      const meta = (await props.schemaLoader?.(dbName, engine, executionMode, table, schemaName)) ?? null
       schemaCache.set(key, { data: meta, ts: Date.now() })
       return meta
     } catch {
@@ -553,6 +556,7 @@ function registerProvider(language: 'sql' | 'python'): void {
         // Never hold local suggestions behind a cold network request.
         const schemaEngine = props.engine
         const schemaMode: SparkExecutionMode = props.executionMode
+        const schemaNameSnapshot = schemaEngine === 'oracle' ? props.currentSchemaName || '' : ''
         const sparkCtx = engineIsSpark(schemaEngine) ? sparkSchemaContext(before) : null
         let schemaDb = ''
         let table: string | undefined
@@ -583,7 +587,7 @@ function registerProvider(language: 'sql' | 'python'): void {
           const currentDb = props.currentDb
           if (currentDb && currentDb !== 'spark' && currentDb !== 'flink') schemaDb = currentDb
         }
-        const key = schemaKey(schemaDb, table, schemaEngine, schemaMode)
+        const key = schemaKey(schemaDb, table, schemaEngine, schemaMode, schemaNameSnapshot)
         const schemaPending = !!schemaDb && !getFreshSchema(key)
         /** 结果回来后仅当仍是同一 model/光标/引擎/模式才重触发补全 */
         const retriggerSuggest = () => {
@@ -593,6 +597,7 @@ function registerProvider(language: 'sql' | 'python'): void {
             cursor?.lineNumber === position.lineNumber &&
             cursor.column === position.column &&
             props.engine === schemaEngine &&
+            (schemaEngine !== 'oracle' || (props.currentSchemaName || '') === schemaNameSnapshot) &&
             props.executionMode === schemaMode
           ) {
             editor.trigger('schema-loaded', 'editor.action.triggerSuggest', {})
@@ -603,17 +608,17 @@ function registerProvider(language: 'sql' | 'python'): void {
             const ambiguousName = sparkAmbiguousName
             // 先按当前猜测立即加载(库清单未知时猜 `库.`,已知且不是库名时猜 `表.列`),
             // 同时拉库清单做纠正:猜错才额外加载另一侧,不阻塞首次补全。
-            void loadSchema(schemaDb, table).then(retriggerSuggest)
+            void loadSchema(schemaDb, table, schemaNameSnapshot).then(retriggerSuggest)
             void (async () => {
               const databases = await ensureSparkDatabases(schemaMode)
               if (props.executionMode !== schemaMode) return // 模式已切换,丢弃这次判定
               if (databases.has(ambiguousName)) return // 猜测正确(按库解析),已加载
               if (table === ambiguousName) return // 猜测正确(按表解析),已加载
-              const meta = await loadSchema(sparkBaseDb(), ambiguousName)
+              const meta = await loadSchema(sparkBaseDb(), ambiguousName, schemaNameSnapshot)
               if (meta) retriggerSuggest()
             })()
           } else {
-            void loadSchema(schemaDb, table).then(retriggerSuggest)
+            void loadSchema(schemaDb, table, schemaNameSnapshot).then(retriggerSuggest)
           }
           // Spark 一个点号场景:后台拉库清单,拿到后按「库.表」重新判断并触发补全
           if (sparkCtx && !sparkCtx.second) {
@@ -1191,8 +1196,8 @@ watch(
 )
 // ── 关系库 schema 预取;Spark(SparkSQL/SparkSession)只在显式库/表前缀下按需加载 ──
 watch(
-  () => [props.currentDb, props.engine, props.executionMode] as const,
-  ([db, engine, executionMode]) => {
+  () => [props.currentDb, props.engine, props.executionMode, props.currentSchemaName] as const,
+  ([db, engine, executionMode, schemaName]) => {
     if (!db) return
     if (engineIsSpark(engine)) {
       // 提前拉一次 Spark 库清单,用于区分 `emp.id` 是 表.列 还是 库.表;失败短 TTL 可重试
@@ -1201,7 +1206,7 @@ watch(
     }
     // 引擎/库切换的中间态可能短暂出现 spark/flink 虚拟源名,别拿它当关系库名请求 /schema
     if (db === 'spark' || db === 'flink') return
-    void loadSchema(db)
+    void loadSchema(db, undefined, engine === 'oracle' ? schemaName || '' : '')
   },
   { immediate: true }
 )

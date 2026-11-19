@@ -8,6 +8,7 @@ import {
   renameScriptNode,
   deleteScriptNode,
   moveScriptNode,
+  listOwners,
   listTables,
   listFields,
   getTableDDL,
@@ -42,7 +43,7 @@ const props = withDefaults(defineProps<{ dbs: DbDataSource[]; executionMode?: Sp
 const emit = defineEmits<{
   (e: 'open', node: ScriptNode): void
   (e: 'insert', text: string): void
-  (e: 'openTable', payload: { db: string; table: string; engine?: string }): void
+  (e: 'openTable', payload: { db: string; table: string; owner?: string; engine?: string }): void
   (e: 'runSql', sql: string, result?: HistResult): void
 }>()
 
@@ -110,14 +111,24 @@ async function doTableSearch() {
     }
   }
 }
-/** 点击搜索命中:插入 库.表 到画布 */
+/** 点击搜索命中:插入 schema.table 到画布 */
+function searchHitName(h: TableSearchHit): string {
+  const schema = h.owner || h.schema || h.db
+  return `${schema}.${h.table}`
+}
+function searchHitLabel(h: TableSearchHit): string {
+  const qualified = searchHitName(h)
+  const namespace = h.owner || h.schema
+  return namespace && namespace !== h.db ? `${qualified} · ${h.db}` : qualified
+}
 function onSearchInsert(h: TableSearchHit) {
-  emit('insert', `${h.db}.${h.table}`)
-  ElMessage.success(`已插入 ${h.db}.${h.table}`)
+  const name = searchHitName(h)
+  emit('insert', name)
+  ElMessage.success(`已插入 ${name}`)
 }
 /** 双击搜索命中:预览表数据(与树双击表一致) */
 function onSearchDblClick(h: TableSearchHit) {
-  emit('openTable', { db: h.db, table: h.table })
+  emit('openTable', { db: h.db, table: h.table, owner: h.owner, engine: h.engine })
 }
 
 // ── 我的目录(双根:我的文件夹私有 + 共享文件夹公共)───────────────
@@ -211,10 +222,11 @@ async function onDelete(node: ScriptNode) {
 interface CatNode extends Record<string, unknown> {
   id: string
   name: string
-  kind: 'engine' | 'db' | 'table' | 'field'
+  kind: 'engine' | 'db' | 'owner' | 'table' | 'field'
   isLeaf: boolean
   db?: string
   table?: string
+  owner?: string
   /** 节点所属引擎(mysql|oracle|spark,贯穿懒加载决定走哪套元数据 API) */
   engine?: string
   /** 表/字段注释(detail=1 时后端返回) */
@@ -274,25 +286,51 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
       return
     }
     if (data.kind === 'db') {
-      // 库 → 表
+      // Oracle datasource → owner/schema;其它关系库与 Spark datasource → 表
+      if (data.engine === 'oracle') {
+        const owners = await listOwners(data.db || '')
+        resolve(owners.map((owner) => ({
+          id: `owner:${nodeKey(data.db || '', owner)}`,
+          name: owner,
+          kind: 'owner',
+          isLeaf: false,
+          db: data.db,
+          owner,
+          engine: data.engine
+        })))
+        return
+      }
       if (data.engine === 'spark') {
         const tables = await listSparkTables(data.db || '', props.executionMode)
         resolve(tables.map((t) => ({ id: `spark-t:${nodeKey(data.db || '', t)}`, name: t, kind: 'table', isLeaf: false, db: data.db, table: t, engine: 'spark' })))
         return
       }
       const tables = await listTables(data.db || '', true)
-      resolve(
-        (tables as TableMeta[]).map((t) => ({
-          id: `t:${nodeKey(data.db || '', t.name)}`,
-          name: t.name,
-          kind: 'table',
-          isLeaf: false,
-          db: data.db,
-          table: t.name,
-          engine: data.engine,
-          comment: t.comment
-        }))
-      )
+      resolve((tables as TableMeta[]).map((t) => ({
+        id: `t:${nodeKey(data.db || '', t.name)}`,
+        name: t.name,
+        kind: 'table',
+        isLeaf: false,
+        db: data.db,
+        table: t.name,
+        engine: data.engine,
+        comment: t.comment
+      })))
+      return
+    }
+    if (data.kind === 'owner') {
+      const tables = await listTables(data.db || '', true, data.owner || '')
+      resolve((tables as TableMeta[]).map((t) => ({
+        id: `t:${nodeKey(data.db || '', data.owner || '', t.name)}`,
+        name: t.name,
+        kind: 'table',
+        isLeaf: false,
+        db: data.db,
+        owner: data.owner,
+        table: t.name,
+        engine: data.engine,
+        comment: t.comment
+      })))
       return
     }
     if (data.kind === 'table') {
@@ -306,6 +344,7 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
             kind: 'field',
             isLeaf: true,
             db: data.db,
+            owner: data.owner,
             table: data.table,
             typeName: (f as { type?: string }).type || '',
             comment: (f as { comment?: string }).comment || ''
@@ -313,10 +352,10 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
         )
         return
       }
-      const fields = (await listFields(data.db || '', data.table || data.name, true)) as TableFieldDetail[]
+      const fields = (await listFields(data.db || '', data.table || data.name, true, data.engine === 'oracle' ? data.owner || '' : undefined)) as TableFieldDetail[]
       resolve(
         fields.map((f) => ({
-          id: `f:${nodeKey(data.db || '', data.table || '', f.name)}`,
+          id: `f:${nodeKey(data.db || '', data.owner || '', data.table || '', f.name)}`,
           name: f.name,
           kind: 'field',
           isLeaf: true,
@@ -337,19 +376,21 @@ async function lazyLoad(node: any, resolve: (nodes: CatNode[]) => void) {
 
 /** 单击:字段插入;库/表仅展开(双击预览需点表按钮) */
 function onCatalogClick(data: CatNode) {
-  if (data.kind === 'db' || data.kind === 'table') return // 库/表仅展开
+  if (data.kind === 'db' || data.kind === 'owner' || data.kind === 'table') return // 库/owner/表仅展开
   emit('insert', data.name) // 字段:保持点击插入
 }
 
 /** 双击表:预览数据(交给父组件开新 tab 查 SELECT * LIMIT 100) */
 function onTableDblClick(data: CatNode) {
   if (data.kind !== 'table') return
-  emit('openTable', { db: data.db || '', table: data.table || data.name, engine: data.engine })
+  emit('openTable', { db: data.db || '', table: data.table || data.name, owner: data.owner, engine: data.engine })
 }
 
 /** 复制表名到画布(点 + 按钮);Spark 表带库前缀(db.table,避免同名歧义) */
 function onCopyTable(data: CatNode) {
-  const text = data.engine === 'spark' ? `${data.db}.${data.table || data.name}` : data.table || data.name
+  const text = data.engine === 'spark' || (data.engine === 'oracle' && data.owner)
+    ? `${data.engine === 'oracle' ? data.owner : data.db}.${data.table || data.name}`
+    : data.table || data.name
   emit('insert', text)
   ElMessage.success(`已插入 ${text}`)
 }
@@ -359,7 +400,7 @@ async function onCopyDDL(data: CatNode) {
   const db = data.db || ''
   const table = data.table || data.name
   try {
-    const { ddl } = await getTableDDL(db, table)
+    const { ddl } = await getTableDDL(db, table, data.engine === 'oracle' ? data.owner || '' : undefined)
     const ok = await copyText(ddl)
     if (!ok) throw new Error('剪贴板写入失败')
     ElMessage.success(`已复制建表语句 ${table}`)
@@ -640,12 +681,12 @@ onUnmounted(() => {
               v-for="(h, i) in searchResults"
               :key="i"
               class="search-hit"
-              :title="`点击插入 ${h.db}.${h.table} · 双击预览表数据`"
+              :title="`点击插入 ${searchHitName(h)} · 双击预览表数据`"
               @click="onSearchInsert(h)"
               @dblclick="onSearchDblClick(h)"
             >
               <span class="search-hit-engine" :class="h.engine">{{ h.engine }}</span>
-              <span class="search-hit-name">{{ h.db }}.{{ h.table }}</span>
+              <span class="search-hit-name">{{ searchHitLabel(h) }}</span>
             </div>
           </template>
           <div v-else-if="!searching" class="search-empty">无匹配表(mysql/oracle)<br />Spark 表请展开「Spark」组查看</div>

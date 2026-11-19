@@ -103,6 +103,9 @@ export function setupDbConfig(app, auth) {
   router.post('/test', (req, res) =>
     proxyAdmin(req, res, 'POST', '/admin/datasources/test', req.body))
 
+  router.post('/discover-owners', (req, res) =>
+    proxyAdmin(req, res, 'POST', '/admin/datasources/discover-owners', req.body))
+
   router.put('/datasources/:name', datasourceName, (req, res) =>
     proxyAdmin(req, res, 'PUT', `/admin/datasources/${encodeURIComponent(req.datasourceName)}`, req.body, { refresh: true }))
 

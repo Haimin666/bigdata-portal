@@ -15,7 +15,7 @@ import { dbProxyIdentityHeaders } from '../utils/db-proxy-identity.js'
 
 // /api/db 透传白名单(显式放行,其余一律 403)。每项含 HTTP 方法与归一化后的路径。
 const DB_PROXY_WHITELIST = [
-  { method: 'GET', re: /^\/(acl|health|dbs|tables|fields|ddl|schema|search\/tables)$/ },
+  { method: 'GET', re: /^\/(acl|health|dbs|owners|tables|fields|ddl|schema|search\/tables)$/ },
   { method: 'POST', re: /^\/explain$/ },
   { method: 'GET', re: /^\/jobs\/[a-z0-9_-]+$/ },
   { method: 'POST', re: /^\/jobs\/[a-z0-9_-]+\/cancel$/ }
@@ -49,15 +49,15 @@ function isWhitelistedDbProxyRequest(pathname, method) {
 }
 
 export function setupDb(app, auth) {
-  // ── 数据权限矩阵:GET /api/db/{tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
+  // ── 数据权限矩阵:GET /api/db/{owners,tables,fields,ddl,schema} 带 db 参数时按用户/角色校验 ──
   // 路径判断统一用 normalizedPath(百分号编码/反斜杠/大小写变体一律归一)。
-  // 配置了表级白名单的规则:整库枚举接口(tables/schema)直接拒绝;
+  // 配置了表级白名单的规则:owner/schema/整库表枚举接口直接拒绝;
   // fields/ddl 带 table 时按该表校验,无 table 时按整库(无表白名单不受影响)。
   app.use('/api/db', async (req, res, next) => {
     if (req.method !== 'GET') return next()
     const pathname = normalizedPath(req)
     if (pathname == null) return res.status(400).json({ code: 400, msg: '非法请求路径' })
-    const meta = pathname.match(/^\/(tables|fields|ddl|schema)$/)
+    const meta = pathname.match(/^\/(owners|tables|fields|ddl|schema)$/)
     if (!meta || !req.query.db) return next()
     try {
       const dbName = String(req.query.db)
@@ -70,7 +70,7 @@ export function setupDb(app, auth) {
       const tableName = req.query.table == null ? '' : String(req.query.table)
       // API Token 的元数据接口一律要求整库读取(保持既有语义)
       const opts = { engine, requireWholeDatabase: !!req.dbQueryApiPrincipal }
-      if (kind === 'tables' || kind === 'schema') {
+      if (kind === 'owners' || kind === 'tables' || kind === 'schema') {
         opts.requireWholeDatabase = true
       } else if (!opts.requireWholeDatabase && tableName) {
         opts.tables = [tableName]
@@ -164,7 +164,7 @@ export function setupDb(app, auth) {
     }
   })
 
-  // 跨库表搜索(mysql information_schema / oracle all_tables;db-proxy 按实例去重查询 + 30s TTL 缓存)
+  // 跨库表搜索(mysql information_schema / oracle all_tables;db-proxy 按权限隔离的数据源查询 + 30s TTL 缓存)
   app.get('/api/db/search/tables', async (req, res) => {
     if (!config.dbProxyUrl) {
       return res.status(503).json({ code: 503, msg: 'db-proxy not configured (DB_PROXY_URL empty)' })
@@ -268,8 +268,9 @@ export function setupDb(app, auth) {
     }
     // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 3600000, 1000, 7200000)
-    const schemaName = String(req.body?.schemaName || '').trim()
-    const proxyBody = { db: dbName, sql, timeoutMs, ...(schemaName ? { schemaName } : {}) }
+    const hasSchemaName = Object.prototype.hasOwnProperty.call(req.body || {}, 'schemaName')
+    const schemaName = hasSchemaName ? String(req.body.schemaName ?? '').trim() : undefined
+    const proxyBody = { db: dbName, sql, timeoutMs, ...(hasSchemaName ? { schemaName } : {}) }
     if (engine === 'impala') proxyBody.aiFix = req.body?.aiFix !== false
     try {
       const r = await fetch(config.dbProxyUrl + '/jobs', {
@@ -330,12 +331,13 @@ export function setupDb(app, auth) {
       return res.status(500).json({ code: 500, msg: '数据权限校验失败' })
     }
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 30000, 1000, 60000)
-    const schemaName = String(req.body?.schemaName || '').trim()
+    const hasSchemaName = Object.prototype.hasOwnProperty.call(req.body || {}, 'schemaName')
+    const schemaName = hasSchemaName ? String(req.body.schemaName ?? '').trim() : undefined
     try {
       const r = await fetch(config.dbProxyUrl + '/explain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-        body: JSON.stringify({ db: dbName, sql, timeoutMs, ...(schemaName ? { schemaName } : {}) }),
+        body: JSON.stringify({ db: dbName, sql, timeoutMs, ...(hasSchemaName ? { schemaName } : {}) }),
         signal: AbortSignal.timeout(timeoutMs)
       })
       const body = await r.json().catch(() => ({}))

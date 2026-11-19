@@ -217,7 +217,7 @@ app = FastAPI(title="db-proxy", version="2.1.0")
 
 # 对会新建数据库连接/执行计划的元数据端点施加共享并发护栏。
 # 跨库搜索有自己的请求闸门;其 worker 对每条物理连接单独申请 _query_semaphore。
-_METADATA_PATHS = frozenset({"/tables", "/fields", "/ddl", "/schema", "/explain", "/sync/db2hive"})
+_METADATA_PATHS = frozenset({"/owners", "/tables", "/fields", "/ddl", "/schema", "/explain", "/sync/db2hive"})
 _SEARCH_PATH = "/search/tables"
 
 
@@ -370,11 +370,15 @@ class DataSource:
         self.charset: str = str(
             cfg.get("charset", "utf8mb4" if self.type == "mysql" else "AL32UTF8")
         )
-        # Oracle Service Name 只用于连接;owner/schema 独立于数据源 ID,缺省用 name。
-        # MySQL 的 service 仍代表连接数据库名,保持原有语义。
+        # Oracle Service Name 只用于连接;owner/schema 是可选默认会话 schema。
+        # 缺少 owner 字段的旧配置仍回退 name;显式空字符串表示未指定默认 schema。
         self.service: str = str(cfg.get("database", cfg.get("service", cfg.get("schema", self.name))))
-        raw_owner = str(cfg.get("owner") or self.name).strip() or self.name
+        raw_owner = str(cfg.get("owner", self.name) or "").strip()
         self.owner: str = raw_owner.upper() if self.type == "oracle" else raw_owner
+        raw_owners = cfg.get("owners") or []
+        if not isinstance(raw_owners, list):
+            raise ValueError(f"datasource '{self.name}' owners must be a list")
+        self.owners: List[str] = sorted({str(value).strip().upper() for value in raw_owners if str(value).strip()}) if self.type == "oracle" else []
         # 只读策略(默认 false = 写操作放行,权限收口到门户网关密码解锁):
         # 配 readOnly:true 的数据源强制只读(纵深保护,如只读账号/敏感库),拒绝一切非查询 SQL
         self.read_only: bool = bool(cfg.get("readOnly", False))
@@ -411,7 +415,7 @@ class DataSource:
             self._oracle_major = self._detect_oracle_version(conn)
         return "rownum" if self._oracle_major <= 11 else "fetch"
 
-    def connect(self, connect_timeout: int, query_timeout: int):
+    def connect(self, connect_timeout: int, query_timeout: int, schema_name: Optional[str] = None):
         if self.type == "impala":
             return IMPALA_ENGINE.connect(
                 host=self.host,
@@ -456,10 +460,11 @@ class DataSource:
             conn.call_timeout = max(1, int(query_timeout)) * 1000
         except Exception:
             pass
-        if self.owner:
+        requested_schema = self.owner if schema_name is None else str(schema_name or "").strip().upper()
+        if requested_schema:
             cur = conn.cursor()
             try:
-                owner_ident = self.owner.replace('"', '""')
+                owner_ident = requested_schema.replace('"', '""')
                 cur.execute('ALTER SESSION SET CURRENT_SCHEMA = "{}"'.format(owner_ident))
             except Exception:
                 conn.close()
@@ -594,6 +599,7 @@ class DataSource:
             "database": self.service if self.type == "mysql" else None,
             "serviceName": self.service if self.type == "oracle" else None,
             "owner": self.owner if self.type == "oracle" else None,
+            "owners": self.owners if self.type == "oracle" else None,
             "rowLimit": self.row_limit,
             "readOnly": self.read_only,
         }
@@ -1168,7 +1174,7 @@ def _execute_database(
                 logs.append("【类型校验】AI 修复后的 SQL 未能完成字段校验，继续尝试执行：%s。" % (str(type_exc) or type_exc.__class__.__name__))
 
 
-def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync") -> Dict[str, Any]:
+def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sync", schema_name: Optional[str] = None) -> Dict[str, Any]:
     """连接并执行 SQL,返回 {columns, rows, costMs, truncated}。
     SELECT 类返回结果集;写语句(INSERT/UPDATE/DELETE)返回受影响行数。
     timeout_ms:覆盖默认查询超时(异步 job 用,大查询可传更长,不撞网关 60s)。
@@ -1177,7 +1183,7 @@ def fetch(sql: str, db: str, timeout_ms: Optional[int] = None, source: str = "sy
         sql, db, timeout_ms, source=source
     )
     try:
-        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout, schema_name=schema_name)
     except Exception as e:
         de = _extract_sql_error(e, ds.type)
         if de.error_type == "DatabaseError":
@@ -1213,7 +1219,7 @@ class QueryReq(BaseModel):
     sql: str
     timeoutMs: int = 0  # 异步 job 用(毫秒,0=默认 1 小时);同步 /query 忽略
     aiFix: Optional[bool] = None  # 异步 Impala job 的 AI 修复选择;省略沿用服务端配置
-    schemaName: Optional[str] = None  # Oracle owner/schema 上下文;必须与所选数据源配置一致
+    schemaName: Optional[str] = None  # Oracle owner/schema 上下文;省略兼容默认 owner,空字符串读取全部允许的 schema
 
 
 class Db2HiveReq(BaseModel):
@@ -1257,14 +1263,40 @@ def _find_sync_datasource(db_name: str) -> DataSource:
     raise HTTPException(status_code=404, detail="未找到可用于数据同步的 MySQL/Oracle 数据源")
 
 
-def _validate_schema_context(ds: DataSource, schema_name: Optional[str]) -> None:
-    requested = str(schema_name or "").strip()
+def _validate_schema_context(ds: DataSource, schema_name: Optional[str]) -> Optional[str]:
+    requested = str(schema_name or "").strip().upper()
     if not requested:
-        return
+        if ds.type != "oracle":
+            return None
+        if schema_name is None:
+            if ds.owner and ds.owners and ds.owner not in ds.owners:
+                raise HTTPException(status_code=403, detail="默认 owner 不在当前数据源允许的 schema 列表中")
+            return ds.owner
+        return ""
     if ds.type != "oracle":
         raise HTTPException(status_code=400, detail="schemaName 仅支持 Oracle 数据源")
-    if requested.upper() != ds.owner:
-        raise HTTPException(status_code=400, detail="Oracle schemaName 必须与所选数据源的 owner 配置一致")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", requested):
+        raise HTTPException(status_code=400, detail="schemaName 不是有效的 Oracle schema 名称")
+    if ds.owners and requested not in ds.owners:
+        raise HTTPException(status_code=403, detail="schemaName 不在当前数据源允许的 schema 列表中")
+    return requested
+
+
+def _oracle_owner_clause(ds: DataSource, schema_name: Optional[str], prefix: str = "owner", owner_column: str = "owner") -> Tuple[str, Dict[str, str]]:
+    requested = str(schema_name or "").strip().upper()
+    if schema_name is None and ds.owner:
+        requested = ds.owner
+    if requested:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", requested):
+            raise HTTPException(status_code=400, detail="schemaName 不是有效的 Oracle schema 名称")
+        if ds.owners and requested not in ds.owners:
+            raise HTTPException(status_code=403, detail="schemaName 不在当前数据源允许的 schema 列表中")
+        return " AND {} = :{}".format(owner_column, prefix), {prefix: requested}
+    if ds.owners:
+        binds = {"{}{}".format(prefix, index): owner for index, owner in enumerate(ds.owners)}
+        placeholders = ", ".join(":" + name for name in binds)
+        return " AND {} IN ({})".format(owner_column, placeholders), binds
+    return "", {}
 
 
 @app.post("/sync/db2hive")
@@ -1285,11 +1317,20 @@ def sync_db2hive(
     if ds.type == "oracle":
         if service_name and service_name.casefold() != ds.service.casefold():
             raise HTTPException(status_code=400, detail="service_name 必须与所选数据源的 Oracle Service Name 一致")
-        if requested_owner and requested_owner.upper() != ds.owner:
-            raise HTTPException(status_code=400, detail="owner 必须与所选数据源配置一致")
-        if datasource_id and "." in table_name:
-            raise HTTPException(status_code=400, detail="新请求请分别传 owner 和未限定的 table_name")
-        requested_owner = requested_owner or (None if not datasource_id and "." in table_name else ds.owner)
+        if "." in table_name:
+            table_owner, table_name = table_name.split(".", 1)
+            if requested_owner and table_owner.upper() != requested_owner.upper():
+                raise HTTPException(status_code=400, detail="OWNER.TABLE 中的 owner 与单独传入的 owner 不一致")
+            requested_owner = table_owner
+        requested_owner = requested_owner.strip().upper()
+        if requested_owner and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", requested_owner):
+            raise HTTPException(status_code=400, detail="owner 不是有效的 Oracle schema 名称")
+        if requested_owner and ds.owners and requested_owner not in ds.owners:
+            raise HTTPException(status_code=403, detail="owner 不在当前数据源允许的 schema 列表中")
+        if not requested_owner:
+            requested_owner = ds.owner or None
+        if requested_owner and ds.owners and requested_owner not in ds.owners:
+            raise HTTPException(status_code=403, detail="owner 不在当前数据源允许的 schema 列表中")
     else:
         if service_name or requested_owner:
             raise HTTPException(status_code=400, detail="service_name 和 owner 仅支持 Oracle 数据源")
@@ -1350,7 +1391,8 @@ class DbJobManager:
         self._ttl = ttl
 
     def submit(self, db: str, sql: str, timeout_ms: int = 3600000,
-               owner: Optional[str] = None, ai_fix: Optional[bool] = None) -> str:
+               owner: Optional[str] = None, ai_fix: Optional[bool] = None,
+               schema_name: Optional[str] = None) -> str:
         # 数据源在提交阶段就解析:未知 db 立刻 404,而不是等后台线程失败
         ds = get_datasource(db)
         # 与同步 /query 共享全局与主体级并发/QPS 配额。
@@ -1360,7 +1402,7 @@ class DbJobManager:
             with self._lock:
                 self._jobs[job_id] = {
                     "id": job_id, "state": "queued", "db": db, "sql": sql,
-                    "timeout_ms": timeout_ms, "ai_fix": ai_fix, "created_at": time.time(),
+                    "timeout_ms": timeout_ms, "ai_fix": ai_fix, "schema_name": schema_name, "created_at": time.time(),
                     "started_at": None, "finished_at": None,
                     "result": None, "error": None, "logs": [], "executed_sql": None,
                     "conn": None, "cursor": None, "thread_id": None,
@@ -1406,7 +1448,7 @@ class DbJobManager:
             if ds.type == "impala":
                 j["logs"].append("【Impala 进度】任务已启动，正在连接数据源。")
             try:
-                conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+                conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout, schema_name=j.get("schema_name"))
             except Exception as exc:
                 de = _extract_sql_error(exc, ds.type)
                 if de.error_type == "DatabaseError":
@@ -1553,9 +1595,9 @@ def query(
                 detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
             )
         ds = get_datasource(req.db)
-        _validate_schema_context(ds, req.schemaName)
+        schema_context = _validate_schema_context(ds, req.schemaName)
         # 读写限制已收口到门户网关侧,此处仅保留资源护栏(行数/长度/超时/限流)
-        result = fetch(req.sql, req.db)
+        result = fetch(req.sql, req.db, schema_name=schema_context)
         # 审计日志:时间/库/SQL/行数/耗时
         log.info(
             "query db=%s rows=%d cost=%dms sql=%s",
@@ -1667,9 +1709,12 @@ def db_job_submit(
             detail=f"SQL too long: {len(req.sql)} > MAX_SQL_LEN({MAX_SQL_LEN})",
         )
     ds = get_datasource(req.db)
-    _validate_schema_context(ds, req.schemaName)
+    schema_context = _validate_schema_context(ds, req.schemaName)
     timeout_ms = req.timeoutMs or 3600000
-    job_id = DB_JOBS.submit(req.db, req.sql, timeout_ms, owner=subject, ai_fix=req.aiFix)
+    job_id = DB_JOBS.submit(
+        req.db, req.sql, timeout_ms, owner=subject, ai_fix=req.aiFix,
+        schema_name=schema_context,
+    )
     log.info("db job submitted: %s db=%s", job_id, req.db)
     return {"code": 0, "data": {"jobId": job_id}}
 
@@ -1714,6 +1759,7 @@ class DatasourceAdminRequest(BaseModel):
     database: Optional[str] = None
     serviceName: Optional[str] = None
     owner: Optional[str] = None
+    owners: Optional[List[str]] = None
     charset: Optional[str] = None
     rowLimit: Optional[str] = None
     readOnly: bool = False
@@ -1742,6 +1788,7 @@ def _admin_datasource_dict(ds: DataSource) -> Dict[str, Any]:
         "database": ds.service if ds.type == "mysql" else None,
         "serviceName": ds.service if ds.type == "oracle" else None,
         "owner": ds.owner if ds.type == "oracle" else None,
+        "owners": ds.owners if ds.type == "oracle" else None,
         "charset": ds.charset if ds.type == "mysql" else None,
         "rowLimit": ds.row_limit if ds.type == "oracle" else None,
         "readOnly": ds.read_only,
@@ -1788,7 +1835,7 @@ def _parse_admin_request(payload: Any) -> DatasourceAdminRequest:
         raise HTTPException(status_code=400, detail="invalid datasource request fields") from exc
 
 
-def _validate_admin_fields(request: DatasourceAdminRequest, *, creating: bool) -> Dict[str, Any]:
+def _validate_admin_fields(request: DatasourceAdminRequest, *, creating: bool, validate_owner_allowlist: bool = True) -> Dict[str, Any]:
     name = str(request.name or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
         raise HTTPException(status_code=400, detail="name must use letters, digits, dot, underscore, or hyphen")
@@ -1829,14 +1876,23 @@ def _validate_admin_fields(request: DatasourceAdminRequest, *, creating: bool) -
         service = str(request.serviceName or "").strip()
         if not service:
             raise HTTPException(status_code=400, detail="Oracle serviceName is required")
-        owner = str(request.owner or "").strip()
+        owner = str(request.owner or "").strip().upper()
         if owner and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", owner):
             raise HTTPException(status_code=400, detail="owner must be a valid Oracle schema identifier")
+        owners = request.owners or []
+        if not isinstance(owners, list) or len(owners) > 500:
+            raise HTTPException(status_code=400, detail="owners must be a list of at most 500 Oracle schema names")
+        normalized_owners = sorted({str(value).strip().upper() for value in owners if str(value).strip()})
+        if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", value) for value in normalized_owners):
+            raise HTTPException(status_code=400, detail="owners contains an invalid Oracle schema identifier")
+        if validate_owner_allowlist and owner and normalized_owners and owner not in normalized_owners:
+            raise HTTPException(status_code=400, detail="default owner must be included in the owners allowlist")
         row_limit = str(request.rowLimit or "").strip().lower()
         if row_limit and row_limit not in ("fetch", "rownum"):
             raise HTTPException(status_code=400, detail="rowLimit must be fetch or rownum")
         result["service"] = service
-        result["owner"] = (owner or name).upper()
+        result["owner"] = owner
+        result["owners"] = normalized_owners
         if row_limit:
             result["rowLimit"] = row_limit
     return result
@@ -1984,6 +2040,47 @@ def admin_delete_datasource(name: str, x_db_admin_token: Optional[str] = Header(
     _require_admin_header(x_db_admin_token)
     data = _admin_mutate_datasources("delete", str(name).strip(), None, expected_revision)
     return {"code": 0, "data": data}
+
+
+@app.post("/admin/datasources/discover-owners")
+def admin_discover_owners(payload: Any = Body(...), x_db_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _require_admin_header(x_db_admin_token)
+    request = _parse_admin_request(payload)
+    fields = _validate_admin_fields(request, creating=False, validate_owner_allowlist=False)
+    if request.type.strip().lower() != "oracle":
+        raise HTTPException(status_code=400, detail="owner discovery only supports Oracle datasources")
+    if not fields.get("password"):
+        source = DATASOURCES.get(str(request.name or "").strip())
+        if source is None or source.type != "oracle" or not source.password:
+            raise HTTPException(status_code=400, detail="password is required to discover Oracle schemas")
+        fields["password"] = source.password
+    if not _query_semaphore.acquire(timeout=1):
+        raise HTTPException(status_code=429, detail="db-proxy 当前连接测试繁忙，请稍后重试")
+    connection = None
+    cursor = None
+    try:
+        ds = DataSource(fields)
+        connection = ds.connect(5, 10)
+        cursor = connection.cursor()
+        cursor.execute("SELECT DISTINCT owner FROM all_tables ORDER BY owner")
+        owners = [str(row[0]).upper() for row in cursor.fetchall() if row and row[0]]
+        return {"code": 0, "data": {"owners": owners, "count": len(owners)}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=_redact_admin_error(exc, str(fields.get("password") or ""))) from exc
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        _query_semaphore.release()
 
 
 @app.post("/admin/datasources/test")
@@ -2297,11 +2394,16 @@ _SEARCH_EXECUTOR = ThreadPoolExecutor(
 
 
 def _distinct_search_datasources(datasources):
-    """按实际连接实例去重,保持配置顺序以便结果稳定。"""
+    """保留各配置数据源的权限与凭证边界;仅合并同一 Impala service。"""
     seen = set()
     distinct = []
     for ds in datasources:
-        ent = (ds.type, ds.host, ds.port, ds.service if ds.type == "impala" else "")
+        ent = (
+            ds.type,
+            ds.host,
+            ds.port,
+            ds.name if ds.type in ("mysql", "oracle") else ds.service if ds.type == "impala" else "",
+        )
         if ent in seen:
             continue
         seen.add(ent)
@@ -2325,21 +2427,25 @@ def _search_one_instance(ds: DataSource, keyword: str) -> List[Dict[str, Any]]:
             if ds.type == "mysql":
                 cur.execute(
                     "SELECT table_schema, table_name FROM information_schema.tables "
-                    "WHERE table_name LIKE %s AND table_schema NOT IN "
-                    "('information_schema','mysql','performance_schema','sys') "
+                    "WHERE table_name LIKE %s AND table_schema = %s "
+                    "AND table_schema NOT IN ('information_schema','mysql','performance_schema','sys') "
                     "ORDER BY table_schema, table_name LIMIT %s",
-                    (f"%{keyword}%", _SEARCH_LIMIT),
+                    (f"%{keyword}%", ds.service, _SEARCH_LIMIT),
                 )
                 for schema_name, table_name in cur.fetchall():
-                    out.append({"engine": "mysql", "db": schema_name, "table": table_name})
+                    out.append({"engine": "mysql", "db": ds.name, "schema": schema_name, "table": table_name})
             elif ds.type == "oracle":
+                owner_clause, owner_params = _oracle_owner_clause(ds, "", owner_column="owner")
+                params = {"search_keyword": f"%{keyword.lower()}%", "search_limit": _SEARCH_LIMIT}
+                params.update(owner_params)
                 cur.execute(
                     "SELECT owner, table_name FROM all_tables "
-                    "WHERE LOWER(table_name) LIKE :1 AND ROWNUM <= :2 ORDER BY owner, table_name",
-                    (f"%{keyword.lower()}%", _SEARCH_LIMIT),
+                    "WHERE LOWER(table_name) LIKE :search_keyword" + owner_clause +
+                    " AND ROWNUM <= :search_limit ORDER BY owner, table_name",
+                    params,
                 )
                 for owner, table_name in cur.fetchall():
-                    out.append({"engine": "oracle", "db": owner, "table": table_name})
+                    out.append({"engine": "oracle", "db": ds.name, "owner": owner, "table": table_name})
             else:  # impala
                 cur.execute("SHOW TABLES")
                 for row in cur.fetchall():
@@ -3104,10 +3210,36 @@ def scripts_get(
     return {"code": 0, "data": {"id": id, "content": content}}
 
 
-# ── 表目录(库→表→字段,只读元数据)────────────────────────────
+# ── Oracle 可见 schema 列表与表目录 ────────────────────────────
+@app.get("/owners")
+def oracle_owners(db: str, x_db_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_auth(x_db_token)
+    ds = get_datasource(db)
+    if ds.type != "oracle":
+        raise HTTPException(status_code=400, detail="owners only supports Oracle datasources")
+    owner_clause, params = _oracle_owner_clause(ds, "")
+    try:
+        conn = ds.connect(DB_CONNECT_TIMEOUT, QUERY_TIMEOUT)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"connect failed: {exc}")
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT owner FROM all_tables WHERE 1=1" + owner_clause + " ORDER BY owner", params)
+        owners = [str(row[0]).upper() for row in cur.fetchall() if row and row[0]]
+        cur.close()
+    except Exception as exc:
+        de = _extract_sql_error(exc, ds.type)
+        raise HTTPException(status_code=502, detail=f"failed to list Oracle schemas: {de.message}") from exc
+    finally:
+        conn.close()
+    return {"code": 0, "data": owners}
+
+
+# ── 表目录(库→schema→表→字段,只读元数据)──────────────────────
 @app.get("/tables")
 def tables(
     db: str,
+    schemaName: Optional[str] = None,
     detail: int = 0,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
@@ -3142,15 +3274,15 @@ def tables(
             names = IMPALA_ENGINE.list_tables(conn, cache_namespace, ds.service)
             items = [{"name": name, "comment": ""} for name in names]
         else:
-            # 数据源 name 是 Oracle 元数据 owner；service 仅用于连接。
+            owner_clause, owner_params = _oracle_owner_clause(ds, schemaName, owner_column="t.owner")
             cur.execute(
-                "SELECT t.table_name, c.comments FROM all_tables t "
+                "SELECT t.owner, t.table_name, c.comments FROM all_tables t "
                 "LEFT JOIN all_tab_comments c ON t.owner = c.owner AND t.table_name = c.table_name "
-                "WHERE t.owner = :owner ORDER BY t.table_name",
-                {"owner": ds.owner},
+                "WHERE 1=1" + owner_clause + " ORDER BY t.owner, t.table_name",
+                owner_params,
             )
             rows = cur.fetchall()
-            items = [{"name": r[0], "comment": str(r[1] or "")} for r in rows]
+            items = [{"name": r[1], "owner": str(r[0]).upper(), "comment": str(r[2] or "")} for r in rows]
         cur.close()
     finally:
         conn.close()
@@ -3163,6 +3295,7 @@ def tables(
 def fields(
     db: str,
     table: str,
+    schemaName: Optional[str] = None,
     detail: int = 0,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
@@ -3216,39 +3349,41 @@ def fields(
                 for name, typ in columns.items()
             ]
         else:
-            # 主键列集合(约束型 P)
+            owner_clause, owner_params = _oracle_owner_clause(ds, schemaName)
+            pk_clause, pk_params = _oracle_owner_clause(ds, schemaName, prefix="pk_owner", owner_column="c.owner")
             pk_set = set()
             cur.execute(
-                "SELECT cc.column_name FROM all_cons_columns cc "
+                "SELECT cc.owner, cc.column_name FROM all_cons_columns cc "
                 "JOIN all_constraints c ON cc.owner = c.owner "
                 "AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name "
-                "WHERE c.owner = :owner AND c.constraint_type = 'P' AND c.table_name = :t",
-                {"owner": ds.owner, "t": table.upper()},
+                "WHERE 1=1" + pk_clause + " AND c.constraint_type = 'P' AND c.table_name = :t",
+                {**pk_params, "t": table.upper()},
             )
             for r in cur.fetchall():
-                pk_set.add(str(r[0]).upper())
+                pk_set.add((str(r[0]).upper(), str(r[1]).upper()))
             cur.execute(
-                "SELECT column_name, data_type, nullable FROM all_tab_columns "
-                "WHERE owner = :owner AND table_name = :t ORDER BY column_id",
-                {"owner": ds.owner, "t": table.upper()},
+                "SELECT owner, column_name, data_type, nullable FROM all_tab_columns "
+                "WHERE table_name = :t" + owner_clause + " ORDER BY owner, column_id",
+                {**owner_params, "t": table.upper()},
             )
             rows = cur.fetchall()
-            col_meta = {r[0]: (r[1], r[2]) for r in rows}
+            col_meta = {(str(r[0]).upper(), r[1]): (r[2], r[3]) for r in rows}
+            comment_clause, comment_params = _oracle_owner_clause(ds, schemaName, prefix="comment_owner")
             cur.execute(
-                "SELECT column_name, comments FROM all_col_comments "
-                "WHERE owner = :owner AND table_name = :t",
-                {"owner": ds.owner, "t": table.upper()},
+                "SELECT owner, column_name, comments FROM all_col_comments "
+                "WHERE table_name = :t" + comment_clause,
+                {**comment_params, "t": table.upper()},
             )
-            comments = {r[0]: str(r[1] or "") for r in cur.fetchall()}
+            comments = {(str(r[0]).upper(), r[1]): str(r[2] or "") for r in cur.fetchall()}
             cols = []
-            for name, (data_type, nullable) in col_meta.items():
-                base = {"name": name, "type": data_type}
+            for (owner_name, name), (data_type, nullable) in col_meta.items():
+                base = {"name": name, "type": data_type, "owner": owner_name}
                 if detail:
                     base.update(
                         {
-                            "comment": comments.get(name, ""),
+                            "comment": comments.get((owner_name, name), ""),
                             "nullable": str(nullable).upper() == "Y",
-                            "key": "PRI" if str(name).upper() in pk_set else "",
+                            "key": "PRI" if (owner_name, str(name).upper()) in pk_set else "",
                         }
                     )
                 cols.append(base)
@@ -3262,6 +3397,7 @@ def fields(
 def ddl(
     db: str,
     table: str,
+    schemaName: Optional[str] = None,
     timeoutMs: int = 0,
     x_db_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
@@ -3290,9 +3426,19 @@ def ddl(
             rows = cur.fetchall()
             ddl_text = "\n".join(str(r[0]) for r in rows if r and r[0])
         else:
+            owner_clause, owner_params = _oracle_owner_clause(ds, schemaName)
+            cur.execute(
+                "SELECT DISTINCT owner FROM all_tables WHERE table_name = :t" + owner_clause + " ORDER BY owner",
+                {**owner_params, "t": table.upper()},
+            )
+            owners = [str(row[0]).upper() for row in cur.fetchall() if row and row[0]]
+            if not owners:
+                raise HTTPException(status_code=404, detail=f"Oracle table '{table}' not found")
+            if len(owners) > 1:
+                raise HTTPException(status_code=409, detail="该表存在于多个 schema，请先选择 owner")
             cur.execute(
                 "SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :owner) FROM dual",
-                {"t": table.upper(), "owner": ds.owner},
+                {"t": table.upper(), "owner": owners[0]},
             )
             row = cur.fetchone()
             ddl_text = str(row[0]) if row and row[0] else ""
@@ -3317,6 +3463,7 @@ SCHEMA_MAX_TABLES = 800
 @app.get("/schema")
 def schema(
     db: str,
+    schemaName: Optional[str] = None,
     timeoutMs: int = 30000,
     x_db_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
@@ -3324,7 +3471,7 @@ def schema(
 
     - MySQL/Doris(走 mysql 协议):information_schema.tables/columns;table_schema 取
       连接库(ds.service,与 /tables 的 SHOW TABLE STATUS 一致),而非请求参数 db
-    - Oracle:all_tables/all_tab_comments/all_tab_columns 以工作台数据源 name 作为 OWNER
+    - Oracle:all_tables/all_tab_comments/all_tab_columns 按 schemaName 或 datasource owners allowlist 过滤；显式空 schemaName 表示全部可见范围
     表数 > 800 只返回前 800 张并在 data.truncated=true。"""
     require_auth(x_db_token)
     ds = get_datasource(db)
@@ -3407,25 +3554,30 @@ def schema(
             IMPALA_SCHEMA_CACHE.put_schema(cache_namespace, ds.service, schema_to_cache)
             schema_truncated = len(table_names) > SCHEMA_MAX_TABLES
         else:
+            owner_clause, owner_params = _oracle_owner_clause(ds, schemaName, owner_column="t.owner")
             cur.execute(
-                "SELECT t.table_name, c.comments FROM all_tables t "
+                "SELECT t.owner, t.table_name, c.comments FROM all_tables t "
                 "LEFT JOIN all_tab_comments c ON t.owner = c.owner AND t.table_name = c.table_name "
-                "WHERE t.owner = :owner ORDER BY t.table_name",
-                {"owner": ds.owner},
+                "WHERE 1=1" + owner_clause + " ORDER BY t.owner, t.table_name",
+                owner_params,
             )
             table_rows = cur.fetchall()
+            col_clause, col_params = _oracle_owner_clause(ds, schemaName)
             cur.execute(
-                "SELECT table_name, column_name, data_type FROM all_tab_columns "
-                "WHERE owner = :owner ORDER BY table_name, column_id",
-                {"owner": ds.owner},
+                "SELECT owner, table_name, column_name, data_type FROM all_tab_columns "
+                "WHERE 1=1" + col_clause + " ORDER BY owner, table_name, column_id",
+                col_params,
             )
             col_rows = cur.fetchall()
-            tables = [{"name": str(r[0] or ""), "comment": str(r[1] or ""), "columns": []} for r in table_rows]
-            by_name = {t["name"]: t for t in tables}
+            tables = [
+                {"name": str(r[1] or ""), "owner": str(r[0]).upper(), "qualifiedName": "{}.{}".format(str(r[0]).upper(), str(r[1] or "")), "comment": str(r[2] or ""), "columns": []}
+                for r in table_rows
+            ]
+            by_key = {(t["owner"], t["name"]): t for t in tables}
             for c in col_rows:
-                t = by_name.get(str(c[0] or ""))
+                t = by_key.get((str(c[0]).upper(), str(c[1] or "")))
                 if t is not None:
-                    t["columns"].append({"name": str(c[1] or ""), "type": str(c[2] or "")})
+                    t["columns"].append({"name": str(c[2] or ""), "type": str(c[3] or "")})
         cur.close()
     except HTTPException:
         raise
@@ -3655,11 +3807,11 @@ def explain(
     # EXPLAIN 只读,非 SELECT 一律 400
     # (MySQL 5.x 的 EXPLAIN 对 DML 会实际执行,必须在此挡住)。
     ds, clean, is_select, q_timeout, _start = _prepare_query(raw, req.db)
-    _validate_schema_context(ds, req.schemaName)
+    schema_context = _validate_schema_context(ds, req.schemaName)
     if not is_select:
         raise HTTPException(status_code=400, detail="explain only supports read-only SQL")
     try:
-        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout)
+        conn = ds.connect(DB_CONNECT_TIMEOUT, q_timeout, schema_name=schema_context)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connect failed: {e}")
     try:

@@ -32,7 +32,7 @@
 - **规则文件损坏（JSON 解析失败 / 非 ENOENT 的读取失败）/ 结构非法 → fail-closed**：非 admin 一律 403（提示联系管理员修复），避免矩阵静默失效。2026-11 前 EACCES/EISDIR 等读取异常会被当成"无规则"而放行所有人。
 - **表级白名单 fail-closed（2026-11）**：规则的 `tables` 为数组时，SQL 表引用提取失败（`extractTables` 返回 `null`，如 `FROM (--c ...)` 这类无法可靠识别）→ 403，不再像以前那样把 `[]` 当"没有表引用"跳过校验。
 - **引擎未知 fail-closed（2026-11）**：`dbEngine()` 未命中数据源映射时返回 `null`；命中规则但引擎未知 → 403（此前退化为"任意引擎规则都匹配"）。网关会先惰性拉 `/api/db/acl` 建映射，仍失败则拒绝受限用户（admin 不受影响）。
-- **元数据接口与表级规则（2026-11）**：配置 `tables` 白名单的用户调用 `/api/db/tables`、`/api/db/schema`（整库枚举）直接 403；`/fields`、`/ddl` 带 `table` 时按该表校验，缺 `table` 时 fail-closed；`/explain` 对所有用户做表级校验。
+- **元数据接口与表级规则（2026-11）**：配置 `tables` 白名单的用户调用 `/api/db/owners`、`/api/db/tables`、`/api/db/schema`（整库/schema 枚举）直接 403；`/fields`、`/ddl` 带 `table` 时按该表校验，缺 `table` 时 fail-closed；`/explain` 对所有用户做表级校验。
 - **`/api/db/dbs`（2026-11）**：改为网关侧代理并按权限过滤（普通用户 `allowedDbsFor`、API Token 按 `apiTokenAllowsDatabase`、admin 全量），不再透传 db-proxy 的全量数据源名。
 - **Flink 读写分离（2026-11）**：`flink` 规则支持显式 `read`/`write`；写 SQL（多语句脚本中任一条写也算）需 `write` 权限，`writeUnlocked`/`X-Spark-Write` 只在判定为写时置位。旧规则仅 `{enabled:true}` 视为读写均开放（兼容）。
 - **异步任务归属（2026-11）**：`/api/db/jobs/:id`、`/api/spark/jobs/:id`、`/api/flink/async/:id`、`/api/flink/prejob/jobs/:id` 的查询/取消/日志要求提交者是当前用户（admin 放行），API Token 只能访问自己提交的任务（见 `server/utils/job-ownership.js`，TTL 2h）。
@@ -47,7 +47,7 @@
 | `POST /api/dbquery/query` | body | 路由内显式调用 |
 | `POST /api/db/jobs`（提交） | body | 路由内显式调用（GET 状态查询放行） |
 | `POST /api/db/explain` | body | 路由内显式调用 |
-| `GET /api/db/tables`、`/fields`、`/ddl`、`/schema` | query | `app.use('/api/db', ...)` 前置中间件（仅处理 GET+query.db，其余 next） |
+| `GET /api/db/owners`、`/tables`、`/fields`、`/ddl`、`/schema` | query | `app.use('/api/db', ...)` 前置中间件（仅处理 GET+query.db，其余 next）；owners 与整库表/Schema 枚举要求整库读取权限 |
 | `GET /api/db/search/tables` | query.keyword | 返回结果按当前用户允许的数据库过滤（表级白名单下的表名泄露仍属已知限制） |
 | `GET /api/db/dbs` | — | 网关代理 + 按 `allowedDbsFor`/Token 规则过滤 |
 | `GET /api/spark/schema/*`、`/api/spark/{logs,status,stages}` | — | 统一 `checkSparkAccess` 读校验（2026-11 前部分接口无校验） |
@@ -60,7 +60,7 @@ Spark/Flink 常规权限继续使用各自规则；Spark 可选 `writeDbs: strin
 - 唯一 Token 密钥放在门户服务端 `config.local.json` 的 `dbQueryApiToken`；数据库名单不再重复配置。
 - API Token 映射到权限矩阵中的虚拟角色 `db-query-api`。该角色不对应登录账号，角色规则在用户管理 → 数据权限中单独展示和编辑；没有该角色规则时 API Token 的数据库访问默认拒绝，不受 `defaultDeny=false` 的无规则放行影响。
 - 通过 `engineRules` 配置 `{engine:"impala"|"mysql"|"oracle", db:"库名", read:true, write:false}` 控制 Impala/MySQL/Oracle 只读查询；通过 Spark 规则 `{read:true, write:true, writeDbs:["目标库"]}` 控制 Spark 读和可写库。Token 本身仍被网关硬限制为 Impala/MySQL/Oracle 单条只读 SQL与 Spark 路由、Spark SQL（不含 PySpark）及 `INSERT INTO` / `INSERT OVERWRITE`；Spark 写 SQL 必须全限定目标库并与请求 `db` 相同。异步任务状态/取消仅允许该 Token 访问自己提交的任务。
-- Impala 表级规则仍约束查询引用表；表目录/字段/DDL/整库 Schema 元数据接口要求库规则为整库读取（`tables: null`），以免受限表名或结构通过元数据接口泄露。
+- 表级规则仍约束查询引用表；owner 列表、表目录、字段/DDL 与整库 Schema 元数据接口要求库规则为整库读取（`tables: null`），以免受限表名、结构或 schema 名通过元数据接口泄露。
 - `dbQueryApiToken` 只认证身份，所有库权限均由上述权限矩阵决定；db-proxy 不参与门户用户/Token 授权。
 
 ## 管理 API（admin only）
