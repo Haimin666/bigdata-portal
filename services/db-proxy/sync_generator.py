@@ -179,7 +179,7 @@ def _source_columns(ds, table_name: str, connect_timeout: int, query_timeout: in
                 comment_row = _rows_as_dicts(cur)
                 table_comment = str(comment_row[0].get("TABLE_COMMENT") or "") if comment_row else ""
             else:
-                owner = str(oracle_owner or ds.service).upper()
+                owner = str(oracle_owner or getattr(ds, "owner", ds.service)).upper()
                 cur.execute(
                     "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.DATA_PRECISION, "
                     "c.DATA_SCALE, c.NULLABLE AS IS_NULLABLE, c.COLUMN_ID AS ORDINAL_POSITION, "
@@ -405,7 +405,16 @@ def _datax_json(ds, db_name: str, table_name: str, columns: List[Dict[str, Any]]
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, config: Dict[str, Any], connect_timeout: int, query_timeout: int) -> Dict[str, Any]:
+def generate_db2hive(
+    ds,
+    db_name: str,
+    table_name: str,
+    align_with_hive: bool,
+    config: Dict[str, Any],
+    connect_timeout: int,
+    query_timeout: int,
+    oracle_owner: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return the legacy snake_case response data without writing files."""
     sync_cfg = config or {}
     if not sync_cfg.get("enabled", False):
@@ -416,17 +425,22 @@ def generate_db2hive(ds, db_name: str, table_name: str, align_with_hive: bool, c
 
     hive_table_name = table_name
     source_table_name = table_name
-    oracle_owner = ds.service
+    configured_owner = str(getattr(ds, "owner", ds.service) or ds.service).upper()
+    resolved_owner = str(oracle_owner or configured_owner).strip().upper()
     if source_type == "oracle" and "." in table_name:
-        oracle_owner, hive_table_name = table_name.split(".", 1)
-        oracle_owner = oracle_owner.upper()
-        source_table_name = "{}.{}".format(oracle_owner, hive_table_name.upper())
+        table_owner, hive_table_name = table_name.split(".", 1)
+        table_owner = table_owner.upper()
+        if oracle_owner and table_owner != str(oracle_owner).strip().upper():
+            raise ValueError("OWNER.TABLE 中的 owner 与单独传入的 owner 不一致")
+        resolved_owner = table_owner
+    if source_type == "oracle":
+        source_table_name = "{}.{}".format(resolved_owner, hive_table_name.upper())
     columns, table_comment = _source_columns(
         ds, hive_table_name, connect_timeout, query_timeout,
-        oracle_owner=oracle_owner if source_type == "oracle" else None,
+        oracle_owner=resolved_owner if source_type == "oracle" else None,
     )
     if not columns:
-        source_owner = oracle_owner if source_type == "oracle" else ds.service
+        source_owner = resolved_owner if source_type == "oracle" else ds.service
         raise LookupError("{} 表不存在: {}.{}".format(source_type.upper(), source_owner, hive_table_name))
 
     hive_table = "{}_{}".format(db_name, hive_table_name)

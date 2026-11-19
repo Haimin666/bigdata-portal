@@ -16,7 +16,7 @@
 
 | 层 | 文件 | 说明 |
 |---|---|---|
-| 视图 | `src/views/db/QueryView.vue` | 主工作台:PageHeader + 引擎/数据源下拉、Monaco 编辑器(SqlEditor 封装)、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史、日志面板;支持双击表目录表节点生成预览查询自动执行(Oracle 使用数据源名作为 OWNER，生成 `OWNER.TABLE`);结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;工具栏 **EXPLAIN** 打开执行计划树;编辑器 **schema 驱动补全**(Ctrl+Space);格式化走 **sql-formatter**(方言 mysql/oracle/spark,${var} 占位保护,失败降级自研) |
+| 视图 | `src/views/db/QueryView.vue` | 主工作台:PageHeader + 引擎/数据源下拉（Oracle 分别展示 Service Name 与 owner，实际 `db` 仍是稳定数据源名）、Monaco 编辑器(SqlEditor 封装)、快捷键(Ctrl+Enter 执行/Ctrl+Shift+F 格式化)、结果多 tab、执行历史、日志面板;支持双击表目录表节点生成预览查询自动执行(Oracle 使用数据源配置的 owner，生成 `OWNER.TABLE`；未配置 owner 时回退到数据源名);结果表**双击单元格行内编辑**(仅带主键的单表预览)生成 UPDATE 写前确认;工具栏 **EXPLAIN** 打开执行计划树;编辑器 **schema 驱动补全**(Ctrl+Space);格式化走 **sql-formatter**(方言 mysql/oracle/spark,${var} 占位保护,失败降级自研) |
 | 视图 | `src/views/db/QueryResults.vue` | 查询结果面板(2026-09 从 QueryView 拆出):结果 tab 栏(日志 tab 内容经 slot 注入)+ 分页表格 + 单元格行内编辑(提交走 queryDb + emit rerun 重查)+ 复制(单元格/本页/整表 TSV)+ CSV 导出;结果 tab 右键菜单支持关闭当前、关闭左侧、关闭右侧、关闭其他;props: results/activePane/db/loading |
 | 视图 | `src/views/db/SqlEditor.vue` | Monaco 编辑器封装(2026-08 替代 CodeMirror):**model 池**(每 tab 一个 ITextModel,独立撤销/光标)、补全 provider(关键字+**内置函数**+**SQL snippet**+schema 表/列点语法+文中词/字符串值行级增量索引——打字只重建光标行 O(行内容),Enter/粘贴/删除才整表重建;输入变更按 SQL 光标上下文显式触发自动提示(80ms 防抖),本地候选不等网络;**当前编辑 Tab 内 SQL 字符串字面量**按前缀补全,不扫描注释、不跨 Tab/历史)、**关系库 schema 预取** db 就绪即拉缓存;Spark 仅显式库/表前缀按模式懒加载)、快捷键(Cmd+Enter/S/Cmd+Shift+F/Cmd+/、Ctrl+Tab 缩进、Shift+Tab 反缩进)、主题 portal-dark/light 与字号联动 |
 | 工具 | `src/utils/monaco-setup.ts` | Monaco 环境:worker 注册(Vite `?worker` 内联 EditorWorker)、主题 definePortalThemes(portal-dark/light)、model URI 约定(`portal-sql://editor/<modelId>`,供补全 provider 归属判定) |
@@ -25,7 +25,7 @@
 | 视图 | `src/views/db/FlinkJobsDialog.vue` / `FlinkPreJobDialog.vue` | Flink 流任务列表/停止;PreJob 提交(yarn-per-job)/状态/日志/取消 |
 | 工具 | `src/utils/db-query-cache.ts` | 历史/收藏/列宽的 localStorage 统一读写:单一上限、读-改-写合并、`storage` 事件同步、配额超限逐条降级、列宽键容量治理 |
 | 网关工具 | `server/utils/sql-write-detect.js` / `timeout.js` / `upstream-error.js` / `job-ownership.js` / `db-proxy-identity.js` | 引号感知的 SQL 掩码与表引用提取(fail-closed)、超时入参夹逼、上游错误状态/字段透传与脱敏、异步任务归属表、短时 HMAC 主体声明 |
-| API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
+| API | `src/api/db.ts` | queryDb / querySpark / queryFlink / sparkAuth / cancelSpark / 日志轮询 / 脚本 CRUD;Oracle 查询、异步 job 与 EXPLAIN 携带 `schemaName`，其值来自当前数据源 owner；listTables/listFields(detail 参数返回表/字段注释)、getTableDDL、**getSchema(补全元数据)、explainSql(执行计划)** |
 | 网关 | `server/routes/db.js` `/api/db*` 透传(不含 `/jobs`、`/query`、`/spark/*`、`/flink/*`,均走专用路由)、`server/routes/dbquery.js` `/api/dbquery/query`、`server/routes/spark.js` `/api/spark/*`、`server/routes/flink.js` `/api/flink/*`、`server/db-scripts.js` `/api/scripts` |
 | 服务 | `services/db-proxy/main.py` | `/query`(MySQL/Oracle/Doris/Impala)、`/spark/query`、`/flink/query`、`/dbs`、`/acl`、护栏(限流/并发/SQL 长度/超时)、**异步 job 真实取消(`cancelMethod`)**;`/tables` `/fields`(detail=1 返回注释/可空/键)、`/ddl`(生成建表语句)、**`/schema`(全量表+字段扁平元数据,供补全)、`/explain`(MySQL EXPLAIN / Oracle EXPLAIN PLAN / Impala EXPLAIN)、写审计(audit/audit-db.log)** |
 | 服务 | `services/db-proxy/sql_limits.py` | **行数限制的唯一实现点**:注释/字面量/作用域感知的掩码 + 默认 1000 行追加 + 显式上限压到 500000 硬上限(MySQL `LIMIT` / Oracle 12c+ `FETCH FIRST` / 11g `ROWNUM` 三种语法) |
@@ -124,8 +124,11 @@
 ## 5. 数据源
 
 `db-proxy/datasources.json` 是唯一运行时配置；Linux 部署可用 `services/db-proxy/manage.sh` 管理服务、状态、日志、连通性检查和显式 CSV 导入:
-- MySQL、Oracle、Doris 可在门户「用户管理 → 数据库连接」中维护；更新由 db-proxy 校验、原子写入 `datasources.json` 并立即热重载。CSV 仅用于显式的一次性初始化/迁移，`start`、`restart` 与 `check-datasources` 不自动导入。CSV 用独立的 `数据库名称列表`、`数据库ID列表` 两列；连接串只使用数据库名称，ID 不拼入库名。`datasource` 行定义显式连接项，`inventory` 行的分号分隔库清单也会逐库生成连接项；同名时显式 `datasource` 行优先，inventory 用来补齐未显式配置的库。`credential_profile` 行提供默认/例外账号。Oracle 数据源必须明确配置 `Oracle服务名`。CSV 的 Doris 类型同步为运行时 `type: "mysql"`。
-- 配置编辑只改变 `datasources` 中受支持的 MySQL/Oracle/Doris 条目；Impala 与 JSON 根级的全局、Spark、Flink、AI、数据同步等配置保持原值。密码不在读取接口回传；编辑时留空保留原密码。Oracle 服务名需明确填写，不以显示名称或 schema 名自动推断。
+
+- Oracle 的 `/acl` 响应返回 `serviceName` 与 `owner`；工作台用 Service Name 与 owner 两个选择项定位数据源，实际提交的 `db` 始终是唯一数据源 `name`，用于引擎路由和权限校验。db-proxy 连接 Service Name，Oracle 会话 `CURRENT_SCHEMA` 与 `/tables`、`/fields`、`/ddl`、`/schema` 元数据均使用配置 owner。旧配置的 owner 默认等于数据源 name；管理界面允许显式配置 owner/schema。
+- Oracle 同步查询、异步 job 和 EXPLAIN 均携带 `schemaName`，db-proxy 校验它与 `db` 所对应数据源的 owner 相同；MySQL 不发送该参数，库/schema 仍由数据源配置中的数据库名决定。
+- MySQL、Oracle、Doris 可在门户「用户管理 → 数据库连接」中维护；更新由 db-proxy 校验、原子写入 `datasources.json` 并立即热重载。CSV 仅用于显式的一次性初始化/迁移，`start`、`restart` 与 `check-datasources` 不自动导入。CSV 用独立的 `数据库名称列表`、`数据库ID列表` 两列；连接串只使用数据库名称，ID 不拼入库名。`datasource` 行定义显式连接项，`inventory` 行的分号分隔库清单也会逐库生成连接项；同名时显式 `datasource` 行优先，inventory 用来补齐未显式配置的库。`credential_profile` 行提供默认/例外账号。管理界面维护的 Oracle 数据源必须明确填写 `Oracle服务名`；CSV inventory 行若服务名为空，沿用导入维护约定回退到 schema 名。CSV 的 Doris 类型同步为运行时 `type: "mysql"`.
+- 配置编辑只改变 `datasources` 中受支持的 MySQL/Oracle/Doris 条目；Impala 与 JSON 根级的全局、Spark、Flink、AI、数据同步等配置保持原值。密码不在读取接口回传；编辑时留空保留原密码。管理界面中的 Oracle 服务名需明确填写；CSV inventory 的空服务名按维护约定回退到 schema 名。
 - `bi_hosts_databases.csv` 是一次性初始化/迁移来源；`sync_datasources.py` 仍可手动运行，或通过 `manage.sh import-csv` 显式调用。`start`、`restart`、`check-datasources` 不自动同步 CSV。CSV 的两列库名/库 ID 分开；连接串仅用库名；导入保留根级配置与非 CSV 引擎。Doris 使用 `type: "mysql"`、`sourceType: "doris"`。
 - `allowedDbs` 仅为 db-proxy `/acl` 的旧版回显字段；网关按 `db-permissions` 规则过滤列表并校验查询，无匹配规则时由 `defaultDeny` 决定是否放行
 - Impala 数据源设置 `readOnly: true` 时由 db-proxy 二次拒绝写语句

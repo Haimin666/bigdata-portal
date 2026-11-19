@@ -9,6 +9,7 @@ export interface DbConnection {
   user: string
   database: string
   serviceName: string
+  owner?: string
   charset: string
   rowLimit: string
   readOnly: boolean
@@ -25,6 +26,7 @@ export interface DbConnectionPayload {
   user: string
   database: string
   serviceName: string
+  owner?: string
   charset: string
   rowLimit: string
   readOnly: boolean

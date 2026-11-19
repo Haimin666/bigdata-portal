@@ -268,7 +268,8 @@ export function setupDb(app, auth) {
     }
     // 转发体白名单化,丢弃未知字段;提交为秒级往返,30s 兜底
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 3600000, 1000, 7200000)
-    const proxyBody = { db: dbName, sql, timeoutMs }
+    const schemaName = String(req.body?.schemaName || '').trim()
+    const proxyBody = { db: dbName, sql, timeoutMs, ...(schemaName ? { schemaName } : {}) }
     if (engine === 'impala') proxyBody.aiFix = req.body?.aiFix !== false
     try {
       const r = await fetch(config.dbProxyUrl + '/jobs', {
@@ -329,11 +330,12 @@ export function setupDb(app, auth) {
       return res.status(500).json({ code: 500, msg: '数据权限校验失败' })
     }
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 30000, 1000, 60000)
+    const schemaName = String(req.body?.schemaName || '').trim()
     try {
       const r = await fetch(config.dbProxyUrl + '/explain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-DB-Token': config.dbProxyToken },
-        body: JSON.stringify({ db: dbName, sql, timeoutMs }),
+        body: JSON.stringify({ db: dbName, sql, timeoutMs, ...(schemaName ? { schemaName } : {}) }),
         signal: AbortSignal.timeout(timeoutMs)
       })
       const body = await r.json().catch(() => ({}))

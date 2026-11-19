@@ -419,7 +419,12 @@ async function onOpenTable(payload: { db: string; table: string; engine?: string
   engine.value = isSpark ? (engine.value === 'sparksession' ? 'sparksession' : 'sparksql') : isOracle ? 'oracle' : isImpala ? 'impala' : 'mysql'
   db.value = isSpark ? SPARK_SOURCE.name : payload.db
   const sparkIdent = (value: string) => '`' + value.replace(/`/g, '``') + '`'
-  const ident = isSpark ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}` : isOracle ? `"${payload.db}"."${payload.table}"` : `\`${payload.table}\``
+  const oracleIdent = (value: string) => `"${value.replace(/"/g, '""')}"`
+  const ident = isSpark
+    ? `${sparkIdent(payload.db)}.${sparkIdent(payload.table)}`
+    : isOracle
+      ? `${oracleIdent(src?.owner || payload.db)}.${oracleIdent(payload.table)}`
+      : `\`${payload.table}\``
   const sql = isOracle ? `SELECT * FROM ${ident} FETCH FIRST 100 ROWS ONLY` : `SELECT * FROM ${ident} LIMIT 100`
   const tabId = `${isSpark ? 'spark-' : ''}tbl-${payload.db}.${payload.table}`
   const existing = tabs.value.find((t) => t.id === tabId)
@@ -554,6 +559,34 @@ const filteredDbs = computed(() => {
   if (engine.value === 'flinksql') return [FLINK_SOURCE]
   return engine.value ? datasources.value.filter((d) => d.type === engine.value) : datasources.value
 })
+
+function oracleServiceKey(source: DbDataSource): string {
+  return source.serviceName?.trim() || source.name
+}
+
+function oracleOwnerKey(source: DbDataSource): string {
+  return source.owner?.trim() || source.name
+}
+
+const oracleSources = computed(() => datasources.value.filter((source) => source.type === 'oracle'))
+const oracleServiceNames = computed(() => [...new Set(oracleSources.value.map(oracleServiceKey))])
+const selectedOracleSource = computed(() => oracleSources.value.find((source) => source.name === db.value))
+const oracleServiceName = computed({
+  get: () => selectedOracleSource.value ? oracleServiceKey(selectedOracleSource.value) : '',
+  set: (value: string) => {
+    const candidates = oracleSources.value.filter((source) => oracleServiceKey(source) === value)
+    const selected = candidates.find((source) => source.name === db.value) || candidates[0]
+    db.value = selected?.name || ''
+  }
+})
+const oracleOwnerSources = computed(() => oracleSources.value.filter((source) => oracleServiceKey(source) === oracleServiceName.value))
+const oracleSchemaName = computed(() => selectedOracleSource.value ? oracleOwnerKey(selectedOracleSource.value) : '')
+
+function oracleOwnerLabel(source: DbDataSource): string {
+  const owner = oracleOwnerKey(source)
+  const duplicates = oracleOwnerSources.value.filter((item) => oracleOwnerKey(item) === owner).length > 1
+  return duplicates ? `${owner} (${source.name})` : owner
+}
 
 // 库下拉占位:区分「没选引擎」「加载失败」「该引擎无库」三种空状态,避免用户对着禁用框猜测
 const dbPlaceholder = computed(() => {
@@ -1110,7 +1143,7 @@ async function runExplain() {
   explainTree.value = null
   explainTable.value = null
   try {
-    const data = await explainSql({ db: db.value, sql })
+    const data = await explainSql({ db: db.value, sql, ...(engine.value === 'oracle' ? { schemaName: oracleSchemaName.value } : {}) })
     if (data.kind === 'tree') explainTree.value = data.root
     else {
       // MySQL/Impala 回退为行;Oracle 无列时是文本行列表,统一转成单列对象
@@ -1201,7 +1234,14 @@ async function execDb(sql: string): Promise<{ columns: string[]; rows: Record<st
   if (engine.value === 'impala') activePane.value = 0
   const run = async (): Promise<{ columns: string[]; rows: Record<string, unknown>[]; costMs: number; truncated: boolean }> => {
     const aiFix = engine.value === 'impala' ? impalaAiFixEnabled.value : undefined
-    const { jobId: jid } = await submitDbJob(db.value, sql, 3600000, undefined, aiFix)
+    const { jobId: jid } = await submitDbJob(
+      db.value,
+      sql,
+      3600000,
+      undefined,
+      aiFix,
+      engine.value === 'oracle' ? oracleSchemaName.value : undefined
+    )
     currentDbJobId.value = jid
     const deadline = Date.now() + 3600000 // 上限 1 小时
     let statusFailures = 0
@@ -1571,13 +1611,15 @@ onMounted(async () => {
 })
 
 watch(engine, async (val) => {
+  // 双击表目录时会在同一轮设置引擎与目标数据源；保留同引擎下已选的稳定数据源 ID。
   // 写权限密码验证已移除,切换引擎不再要求解锁
   if (!val) {
     // 引擎被清空时同步清空库,避免禁用控件里残留上一个引擎的库名
     db.value = ''
     return
   }
-  const selected = filteredDbs.value.find((d) => d.type === val || (isSparkEngine.value && (d.type === 'sparksql' || d.type === 'sparksession')))
+  const selected = filteredDbs.value.find((d) => d.name === db.value)
+    || filteredDbs.value.find((d) => d.type === val || (isSparkEngine.value && (d.type === 'sparksql' || d.type === 'sparksession')))
   db.value = selected?.name || ''
   // 编辑器始终使用 SQL 语言模式,无需随引擎切换设置
 })
@@ -1612,7 +1654,7 @@ watch([engine, db], () => resetRunVarValuesForScope())
     <!-- 顶部工具条 -->
     <div class="toolbar">
       <div class="toolbar-group toolbar-group-context">
-      <el-select v-model="engine" class="engine-select" placeholder="选择引擎" clearable :disabled="loading || sparkBatchActive || exportLoading">
+      <el-select v-model="engine" class="engine-select" placeholder="选择引擎" aria-label="选择数据库引擎" clearable :disabled="loading || sparkBatchActive || exportLoading">
         <el-option label="MySQL" value="mysql" />
         <el-option label="Oracle" value="oracle" />
         <el-option label="Impala" value="impala" />
@@ -1620,7 +1662,37 @@ watch([engine, db], () => resetRunVarValuesForScope())
         <el-option label="SparkSession" value="sparksession" />
         <el-option label="FlinkSQL" value="flinksql" />
       </el-select>
-      <el-select v-model="db" class="db-select" :placeholder="dbPlaceholder" filterable :disabled="!engine">
+      <template v-if="engine === 'oracle'">
+        <el-select
+          v-model="oracleServiceName"
+          class="oracle-context-select"
+          placeholder="Oracle Service Name"
+          aria-label="Oracle Service Name"
+          filterable
+          :disabled="loading || sparkBatchActive || exportLoading || !oracleServiceNames.length"
+        >
+          <el-option v-for="service in oracleServiceNames" :key="service" :label="service" :value="service" />
+        </el-select>
+        <el-select
+          v-model="db"
+          class="db-select"
+          placeholder="Oracle owner / schema"
+          aria-label="Oracle owner / schema"
+          filterable
+          :disabled="loading || sparkBatchActive || exportLoading || !oracleOwnerSources.length"
+        >
+          <el-option v-for="source in oracleOwnerSources" :key="source.name" :label="oracleOwnerLabel(source)" :value="source.name" />
+        </el-select>
+      </template>
+      <el-select
+        v-else
+        v-model="db"
+        class="db-select"
+        :placeholder="dbPlaceholder"
+        aria-label="选择数据库或数据源"
+        filterable
+        :disabled="!engine || loading || sparkBatchActive || exportLoading"
+      >
         <el-option v-for="d in filteredDbs" :key="d.name" :label="`${d.label || d.name}${d.label && d.label !== d.name ? ` (${d.name})` : ''}`" :value="d.name" />
       </el-select>
       </div>
@@ -2047,7 +2119,8 @@ watch([engine, db], () => resetRunVarValuesForScope())
 
 .toolbar-group-context {
   gap: 5px;
-  /* 允许引擎/库下拉在窄屏收缩,而不是把右侧操作挤出去 */
+  /* 窄屏时允许 Oracle 的服务名/owner 选择器换行，避免顶出工具栏 */
+  flex-wrap: wrap;
   flex-shrink: 1;
   min-width: 0;
 }
@@ -2079,6 +2152,11 @@ watch([engine, db], () => resetRunVarValuesForScope())
 
 .db-select {
   flex: 0 1 200px;
+  min-width: 110px;
+}
+
+.oracle-context-select {
+  flex: 0 1 160px;
   min-width: 110px;
 }
 

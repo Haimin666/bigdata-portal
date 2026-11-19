@@ -65,9 +65,9 @@
 
 根级可选 `dataSync` 配置控制 `POST /sync/db2hive`。`enabled` 必须为 `true`；`hiveMetastore` 是查询 `lion_dw_ods` Hive 表结构的 MySQL 连接（`align_with_hive=true` 时必需）；`datax.mysqlPassword` 是 MySQLReader 的 DataX 密码，`datax.mysqlUsername` 可选覆盖源数据用户名，`datax.oracleUsername`/`oraclePassword` 用于 OracleReader；`datasourceOverrides` 可用数据源 `name` 覆盖单个源的相应 DataX 凭据或 Oracle JDBC URL。生成 JSON 时，reader `password` 按 `lion#code_` 可逆变换格式编码；已带该前缀的值原样保留。该格式不是密码学加密。`defaultFs` 与 `hadoopConfig` 可覆盖 HDFS HA writer 设置。DataX 凭据与 Hive metastore 密码只放在运行机权限受限的 `datasources.json` 中。CSV 同步只替换 `datasources`，会保留这些根级配置。
 
-Oracle `table_name` 支持 `OWNER.TABLE`，其中 `OWNER` 用于查询 `ALL_TAB_COLUMNS`/`ALL_TAB_COMMENTS` 并限定 DataX 源表；数据库连接仍使用数据源的 Service Name。Hive 目标表名使用点号后的表名。未指定 owner 时仍回退到数据源 Service Name，以保持旧输入兼容。
+Oracle 的 Service Name、owner/schema 与 table 分开处理：连接使用数据源 Service Name；元数据和默认查询 schema 使用数据源配置 `owner`（旧配置缺省取 `name`）。新同步请求用 `datasource_id` 唯一定位连接，并传 `service_name`、`owner`、`table_name`；db-proxy 校验服务名和 owner 与该连接配置一致。`db_name` 继续作为 Hive 目标名前缀。旧请求仍可使用 `{db_name, table_name}`，Oracle `table_name` 支持 `OWNER.TABLE` 并拆分 owner/table；未指定 owner 的旧请求回退到配置 owner。
 
-MySQL、Oracle、Doris 的 CSV 导入来源是项目根目录 `bi_hosts_databases.csv`，只用于首次初始化或显式迁移。CSV 将库名和库 ID 分别放在 `数据库名称列表`、`数据库ID列表`；`datasource` 行定义显式连接，`inventory` 行的分号分隔库清单逐库生成连接项并补齐缺项；同名时显式 datasource 优先。`credential_profile` 行定义共享账号或单数据源覆盖。Oracle inventory 行优先使用 `Oracle服务名`。Doris 导入后使用 `type: "mysql"` 与 `sourceType: "doris"`。先准备运行配置 `datasources.json`（从 `datasources.json.example` 复制并填写根级设置及非 CSV 引擎配置），可预演：
+MySQL、Oracle、Doris 的 CSV 导入来源是项目根目录 `bi_hosts_databases.csv`，只用于首次初始化或显式迁移。CSV 将库名和库 ID 分别放在 `数据库名称列表`、`数据库ID列表`；`datasource` 行定义显式连接，`inventory` 行的分号分隔库清单逐库生成连接项并补齐缺项；同名时显式 datasource 优先。`credential_profile` 行定义共享账号或单数据源覆盖。Oracle inventory 行优先使用 `Oracle服务名`，服务名为空时按维护约定回退到 schema 名。Doris 导入后使用 `type: "mysql"` 与 `sourceType: "doris"`。先准备运行配置 `datasources.json`（从 `datasources.json.example` 复制并填写根级设置及非 CSV 引擎配置），可预演：
 
 ```bash
 python3 services/db-proxy/sync_datasources.py \
@@ -151,13 +151,13 @@ python3 main.py        # 依赖 requirements.txt;Flink 需 pyflink;Spark session
 |---|---|---|
 | GET  | `/health` | 探活 |
 | GET  | `/dbs` | 全部数据源 name(无白名单过滤) |
-| GET  | `/acl` | 配置回显(脱敏,含引擎状态) |
-| POST | `/query` | 同步执行,body `{db, sql, timeoutMs?}` |
+| GET  | `/acl` | 配置回显(脱敏,含引擎状态)；Oracle 项包含 `serviceName` 与 `owner` |
+| POST | `/query` | 同步执行,body `{db, sql, schemaName?, timeoutMs?}`；Oracle `schemaName` 必须匹配数据源 owner |
 | POST | `/jobs` | 异步提交,body 同上 → `{jobId}` |
 | GET/POST | `/jobs/{id}[/cancel]` | 异步任务状态/取消 |
-| GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema)；Oracle owner 使用数据源 `name`，Service Name 仅用于连接 |
-| POST | `/explain` | 执行计划树(只读 SQL) |
-| POST | `/sync/db2hive` | 生成 Hive 建表/新增字段 SQL 与 DataX JSON，body `{db_name, table_name, align_with_hive?}`，仅 MySQL/Oracle 数据源；DataX 类型限 `bigint`、`double`、`string`，与 Hive 类型不一致时仍生成并在 `data.type_warnings` 返回告警 |
+| GET  | `/tables` `/fields` `/ddl` `/schema` | 元数据(表/字段/建表 DDL/完整 schema)；Oracle 使用数据源配置 `owner`（旧配置缺省为 `name`），Service Name 用于连接 |
+| POST | `/explain` | 执行计划树(只读 SQL)，Oracle 可传经数据源校验的 `schemaName` |
+| POST | `/sync/db2hive` | 生成 Hive 建表/新增字段 SQL 与 DataX JSON；新请求 `{datasource_id, service_name, owner, db_name, table_name, align_with_hive?}`，旧 `{db_name, table_name, align_with_hive?}` 保持兼容；仅 MySQL/Oracle 数据源；DataX 类型限 `bigint`、`double`、`string`，与 Hive 类型不一致时仍生成并在 `data.type_warnings` 返回告警 |
 | POST | `/spark/query` | Spark SQL 执行;body `{db, sql, executionMode?}` |
 | GET | `/spark/schema/databases?executionMode=` | Spark 库列表(SHOW DATABASES;TTL 缓存 5 分钟;模式由 query 参数选择) |
 | GET | `/spark/schema/tables?db=&executionMode=` | Spark 库下表列表(SHOW TABLES IN;模式由 query 参数选择) |

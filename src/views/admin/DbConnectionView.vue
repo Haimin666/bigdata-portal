@@ -26,7 +26,7 @@ const testResult = ref<{ ok: boolean; elapsedMs: number; error?: string } | null
 
 const form = reactive<DbConnectionPayload>({
   name: '', label: '', type: 'mysql', host: '', port: 3306, user: '', database: '',
-  serviceName: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
+  serviceName: '', owner: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
 })
 
 const defaultPort: Record<DbConnectionType, number> = { mysql: 3306, oracle: 1521, doris: 9030 }
@@ -50,7 +50,7 @@ const filteredConnections = computed(() => {
     if (!terms.length) return true
     const searchable = [
       item.label, item.name, typeLabels[item.type] || item.type, item.type,
-      item.host, String(item.port), item.user, item.database, item.serviceName
+      item.host, String(item.port), item.user, item.database, item.serviceName, item.owner
     ].filter(Boolean).join(' ').toLocaleLowerCase()
     return terms.every((term) => searchable.includes(term))
   })
@@ -110,7 +110,7 @@ async function refresh() {
 function resetForm() {
   Object.assign(form, {
     name: '', label: '', type: 'mysql', host: '', port: 3306, user: '', database: '',
-    serviceName: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
+    serviceName: '', owner: '', charset: 'utf8mb4', rowLimit: '', readOnly: true, password: ''
   })
   testResult.value = null
 }
@@ -135,6 +135,7 @@ function openEdit(connection: DbConnection) {
     user: connection.user,
     database: connection.database || '',
     serviceName: connection.serviceName || '',
+    owner: connection.owner || '',
     charset: connection.charset || '',
     rowLimit: connection.rowLimit || '',
     readOnly: connection.readOnly,
@@ -160,6 +161,7 @@ function payload(): DbConnectionPayload {
     ...form,
     name: form.name.trim(), label: form.label.trim(), host: form.host.trim(),
     user: form.user.trim(), database: form.database.trim(), serviceName: form.serviceName.trim(),
+    owner: form.type === 'oracle' ? form.owner?.trim() || undefined : undefined,
     password: form.password, expectedRevision: revision.value || undefined
   }
 }
@@ -274,7 +276,12 @@ onMounted(refresh)
             <template #default="{ row }"><span class="mono">{{ row.host }}:{{ row.port }}</span></template>
           </el-table-column>
           <el-table-column prop="user" label="用户名" min-width="130" sortable="custom" />
-          <el-table-column prop="database" label="数据库 / 服务名" min-width="150" sortable="custom"><template #default="{ row }">{{ row.database || row.serviceName || '—' }}</template></el-table-column>
+          <el-table-column prop="database" label="数据库 / 服务名" min-width="160" sortable="custom">
+            <template #default="{ row }">
+              <div>{{ row.database || row.serviceName || '—' }}</div>
+              <div v-if="row.type === 'oracle'" class="source-key">Owner / Schema: {{ row.owner || row.name }}</div>
+            </template>
+          </el-table-column>
           <el-table-column prop="hasPassword" label="认证" width="110" align="center" sortable="custom">
             <template #default="{ row }"><el-tag size="small" :type="row.hasPassword ? 'success' : 'warning'">{{ row.hasPassword ? '已配置密码' : '未配置密码' }}</el-tag></template>
           </el-table-column>
@@ -335,6 +342,10 @@ onMounted(refresh)
           <el-form-item v-if="form.type !== 'oracle'" label="数据库名" required><el-input v-model="form.database" :disabled="saving" /></el-form-item>
           <el-form-item v-if="form.type === 'oracle'" label="Oracle Service Name" required><el-input v-model="form.serviceName" :disabled="saving" placeholder="必须明确填写服务名" /></el-form-item>
           <el-form-item v-else label="字符集"><el-input v-model="form.charset" :disabled="saving" placeholder="例如 utf8mb4" /></el-form-item>
+          <el-form-item v-if="form.type === 'oracle'" label="Oracle Owner / Schema">
+            <el-input v-model="form.owner" :disabled="saving" placeholder="可选，留空默认使用数据源名称" />
+            <span class="field-note">用于 Oracle 元数据和当前 schema；旧配置未设置时也默认使用数据源名称。</span>
+          </el-form-item>
           <el-form-item v-if="form.type === 'oracle'" label="行数限制模式"><el-select v-model="form.rowLimit" :disabled="saving" clearable placeholder="自动探测"><el-option label="自动探测" value="" /><el-option label="FETCH (12c+)" value="fetch" /><el-option label="ROWNUM (11g)" value="rownum" /></el-select></el-form-item>
           <el-form-item label="数据库密码" :required="!isEditing">
             <el-input v-model="form.password" type="password" show-password autocomplete="new-password" :disabled="saving" :placeholder="isEditing ? '留空表示保留现有密码；测试连接需输入密码' : '新增连接必须填写密码'" />

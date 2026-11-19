@@ -45,6 +45,7 @@ export function setupDbQuery(app) {
     }
     // 超时对齐:统一默认 120s,上限 10 分钟;转发体白名单化,丢弃未知字段(G5)
     const timeoutMs = clampTimeoutMs(req.body?.timeoutMs, 120000, 1000, 600000)
+    const schemaName = String(req.body?.schemaName || '').trim()
     try {
       const r = await fetch(config.dbProxyUrl + '/query', {
         method: 'POST',
@@ -53,7 +54,7 @@ export function setupDbQuery(app) {
           'X-DB-Token': config.dbProxyToken,
           ...dbProxyIdentityHeaders(req)
         },
-        body: JSON.stringify({ db: dbName, sql, timeoutMs }),
+        body: JSON.stringify({ db: dbName, sql, timeoutMs, ...(schemaName ? { schemaName } : {}) }),
         signal: AbortSignal.timeout(timeoutMs)
       })
       const body = await r.json().catch(() => ({}))

@@ -21,6 +21,9 @@ export function setupSyncProxy(app) {
   app.post('/api/sync/db2hive', requireApiToken, async (req, res) => {
     const dbName = String(req.body?.db_name || '').trim()
     const tableName = String(req.body?.table_name || '').trim()
+    const datasourceId = String(req.body?.datasource_id || '').trim()
+    const serviceName = String(req.body?.service_name || '').trim()
+    const owner = String(req.body?.owner || '').trim()
     if (!dbName || !tableName) {
       return res.status(400).json({ code: 400, msg: 'db_name 和 table_name 不能为空' })
     }
@@ -35,7 +38,14 @@ export function setupSyncProxy(app) {
           'content-type': 'application/json',
           'X-DB-Token': config.dbProxyToken || '',
         },
-        body: JSON.stringify({ db_name: dbName, table_name: tableName, align_with_hive: true }),
+        body: JSON.stringify({
+          db_name: dbName,
+          table_name: tableName,
+          align_with_hive: true,
+          ...(datasourceId ? { datasource_id: datasourceId } : {}),
+          ...(serviceName ? { service_name: serviceName } : {}),
+          ...(owner ? { owner } : {}),
+        }),
         signal: AbortSignal.timeout(60000),
       })
       const body = await r.json().catch(() => ({}))

@@ -9,6 +9,10 @@ export interface DbDataSource {
   host: string
   port: number
   user: string
+  /** Oracle Service Name (connection attribute; not the stable datasource name). */
+  serviceName?: string
+  /** Oracle schema owner used for metadata and the default session schema. */
+  owner?: string
   rowLimit?: string
 }
 
@@ -115,11 +119,11 @@ export async function listDataSources(): Promise<DbDataSource[]> {
 }
 
 /** 执行查询(mysql/oracle 同步通道;Impala 等通过通用异步任务执行) */
-export async function queryDb(db: string, sql: string): Promise<DbQueryResult> {
+export async function queryDb(db: string, sql: string, schemaName?: string): Promise<DbQueryResult> {
   const res = await fetch('/api/dbquery/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ db, sql })
+    body: JSON.stringify({ db, sql, ...(schemaName ? { schemaName } : {}) })
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -144,14 +148,21 @@ export async function submitDbJob(
   sql: string,
   timeoutMs = 3600000,
   writeToken?: string,
-  aiFix?: boolean
+  aiFix?: boolean,
+  schemaName?: string
 ): Promise<{ jobId: string }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (writeToken) headers['X-Spark-Token'] = writeToken
   const res = await fetch('/api/db/jobs', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ db, sql, timeoutMs, ...(aiFix !== undefined ? { aiFix } : {}) })
+    body: JSON.stringify({
+      db,
+      sql,
+      timeoutMs,
+      ...(aiFix !== undefined ? { aiFix } : {}),
+      ...(schemaName ? { schemaName } : {})
+    })
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -928,11 +939,15 @@ export type ExplainResult =
   | { kind: 'table'; columns?: string[]; rows?: unknown[] }
 
 /** 获取执行计划(只读 SQL;POST /api/db/explain,网关有专用路由) */
-export async function explainSql(params: { db: string; sql: string }): Promise<ExplainResult> {
+export async function explainSql(params: { db: string; sql: string; schemaName?: string }): Promise<ExplainResult> {
   return request<ExplainResult>('/explain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ db: params.db, sql: params.sql })
+    body: JSON.stringify({
+      db: params.db,
+      sql: params.sql,
+      ...(params.schemaName ? { schemaName: params.schemaName } : {})
+    })
   })
 }
 
