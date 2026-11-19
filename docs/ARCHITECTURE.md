@@ -159,7 +159,7 @@ SparkSQL 与 SparkSession 在门户工作台中是独立引擎入口；分别固
 
 ### 数据同步代码生成流
 
-`SyncCodeView.vue` 调用门户 `POST /api/sync/db2hive`，请求分别携带稳定连接键 `datasource_id`、Service Name `service_name`、Oracle owner `owner`、Hive 目标名前缀 `db_name` 和源表 `table_name`；网关执行 sync 模块认证后保留这些字段转发到 db-proxy `POST /sync/db2hive`。db-proxy 按 `datasource_id` 查找连接，并校验 Service Name 与 owner 和配置一致；旧 `{db_name, table_name}` 请求仍兼容。MySQL 的 schema 仍取连接配置，Oracle owner 独立于服务名。db-proxy 复用已加载的数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`，生成 JSON 时 reader `password` 按 `lion#code_` 可逆变换格式编码（非密码学加密）。门户响应为 `{code, data: {sqlContent, jsonContent, typeWarnings?}}`；类型不匹配时生成结果照常返回，页面显示核对提示。旧 `dbaSyncUrl` 不再参与门户数据同步。
+`SyncCodeView.vue` 先从经权限过滤的 ACL 选择源库路径：MySQL 以连接返回的真实 `database/service` 作为库，Oracle 先选 Service Name、再选 owner/schema（库）；选库后用该稳定数据源 ID 调 `/api/db/tables` 加载表。库、Service Name 和表均支持下拉输入过滤。页面向门户 `POST /api/sync/db2hive` 发送稳定连接键 `datasource_id`、源表 `table_name`，并携带 Oracle 的 `service_name` 和 `owner`；`db_name` 沿用所选库名作为 Hive 目标名前缀。网关执行 sync 模块认证后保留这些字段转发到 db-proxy `POST /sync/db2hive`。db-proxy 按 `datasource_id` 查找连接，并校验 Service Name 与 owner 和配置一致；旧 `{db_name, table_name}` 请求仍兼容。Oracle owner 独立于服务名。db-proxy 复用已加载的数据源连接生成 Hive SQL 与 DataX JSON，默认从 `dataSync.hiveMetastore` 对齐 Hive 字段；`dataSync.datax` 和 HDFS writer 配置保存在 db-proxy 私有 `datasources.json`，生成 JSON 时 reader `password` 按 `lion#code_` 可逆变换格式编码（非密码学加密）。门户响应为 `{code, data: {sqlContent, jsonContent, typeWarnings?}}`；类型不匹配时生成结果照常返回，页面显示核对提示。旧 `dbaSyncUrl` 不再参与门户数据同步。
 
 ## 6. 配置体系
 

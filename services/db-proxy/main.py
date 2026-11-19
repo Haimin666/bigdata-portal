@@ -591,6 +591,7 @@ class DataSource:
             "host": self.host,
             "port": self.port,
             "user": self.user,
+            "database": self.service if self.type == "mysql" else None,
             "serviceName": self.service if self.type == "oracle" else None,
             "owner": self.owner if self.type == "oracle" else None,
             "rowLimit": self.row_limit,

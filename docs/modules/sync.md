@@ -2,7 +2,7 @@
 
 ## 1. 职责
 
-输入数据库类型、已授权数据源、Hive 目标名前缀和源表名，调用网关生成 db2hive SQL 与 JSON 配置，并支持复制。Oracle 的 Service Name、owner/schema、表名分别选择或填写；MySQL schema 仍由连接配置决定。
+按源库路径选择数据库与表，调用网关生成 db2hive SQL 与 JSON 配置，并支持复制。MySQL 选择库后选择表，显示为“库.表”；Oracle 依次选择 Service Name、owner/schema（库）和表，显示为“服务.库.表”。库、Service Name 和表下拉框均支持输入过滤；表选项在库确定后从该稳定数据源 ID 的元数据接口加载。`db_name` 继续沿用所选库名作为 Hive 目标名前缀，MySQL 库取连接的 `database/service`，Oracle 库取 owner/schema。
 
 ## 2. 涉及文件
 
@@ -15,7 +15,7 @@
 
 ## 3. API 与数据流
 
-- 新版前端向 `POST /api/sync/db2hive` 发送 `{datasource_id, service_name, owner, db_name, table_name}`；`datasource_id` 是唯一数据源名，`service_name` 和 Oracle `owner` 由所选数据源元数据填入，`db_name` 继续表示 Hive 目标名前缀。网关按字段白名单转发这些参数。
+- 新版前端向 `POST /api/sync/db2hive` 发送 `{datasource_id, service_name, owner, db_name, table_name}`；`datasource_id` 是唯一连接 ID，MySQL `db_name` 取所选源库的真实 database/service，Oracle 的 `service_name` 与 `owner` 分别取 Service Name 和所选库/schema，`db_name` 使用所选库名作为 Hive 目标名前缀。网关按字段白名单转发这些参数。MySQL 连接 ACL 会附带非敏感的 `database` 字段供库下拉显示。
 - 旧调用仍可发送 `{db_name, table_name}`；db-proxy 按旧规则解析数据源，兼容期继续接受 Oracle `OWNER.TABLE`。
 - db-proxy 按 `datasource_id` 查找新请求的数据源，并校验 `service_name`、`owner` 与服务端配置一致；MySQL 的源 schema 仍取配置数据库名，Oracle 的 owner 独立于 Service Name。默认对齐 `lion_dw_ods` 中以 `db_name` 和表名构成的 Hive 表，并生成 DataX JSON。DataX 字段类型只生成 `bigint`、`double`、`string`；若 Hive 字段类型与源字段映射类型不一致，或 Hive 字段类型不在白名单内，仍完成生成并在响应中返回告警，前端提示核对 Hive 与 DataX 字段类型。
 - Oracle `table_name` 使用未限定表名，`owner` 用于查询元数据和 DataX 源表，连接仍使用数据源配置中的 Service Name；Hive 目标表只采用 `db_name` 与表名。旧的 `OWNER.TABLE` 输入会拆分出 owner 与 table；未带 owner 的旧请求回退到配置 owner（未配置时为数据源名）。
@@ -32,7 +32,7 @@
 
 ## 4. 响应式布局
 
-- 桌面端表单为数据库类型、数据源/Service Name、Oracle owner/schema、Hive 目标名前缀、源表名和生成操作的紧凑布局，MySQL 隐藏 Oracle owner 控件，结果为 SQL/JSON 双栏。
+- 桌面端表单按库路径排列：MySQL 为数据库类型、库、表；Oracle 为数据库类型、Service Name、库(owner/schema)、表；所有下拉支持输入过滤，选择库后才加载表列表，结果为 SQL/JSON 双栏。稳定数据源 ID 隐藏在选择值中，不额外占用一个选择字段。
 - ≤640px 时表单控件纵向排列并允许收缩，生成按钮占满一行；代码面板改为纵向排列，长 SQL/JSON 在面板内滚动。
 - 页面级别不得产生横向溢出，结果代码允许在各自代码框内横向滚动。
 - **视觉层**:输入区使用桌面统一工具栏;SQL/JSON 结果使用独立浅色面板、低饱和边界和主题变量,不重复显示页面标题。

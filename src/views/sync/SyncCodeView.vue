@@ -1,13 +1,13 @@
 <script setup lang="ts">
 /**
- * 数据同步模块:选择已授权的数据源与 Hive 目标名前缀 → 展示 db2hive SQL 与 JSON → 一键复制。
+ * 数据同步模块:按 MySQL 库.表 / Oracle 服务.库.表选择源路径 → 展示 db2hive SQL 与 JSON → 一键复制。
  * 数据源:门户网关 /api/sync/db2hive → db-proxy。
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, CopyDocument } from '@element-plus/icons-vue'
 import { copyText } from '@/utils/clipboard'
-import { listDataSources, type DbDataSource } from '@/api/db'
+import { listDataSources, listTables, type DbDataSource } from '@/api/db'
 import StateView from '@/components/StateView.vue'
 import TableToolbar from '@/components/TableToolbar.vue'
 
@@ -23,77 +23,105 @@ const datasources = ref<DbDataSource[]>([])
 const databaseType = ref<DatabaseType>('mysql')
 const datasourceId = ref('')
 const serviceName = ref('')
-const owner = ref('')
-const dbName = ref('')
 const tableName = ref('')
+const tableOptions = ref<string[]>([])
 const datasourceLoading = ref(false)
 const datasourceError = ref('')
+const tableLoading = ref(false)
+const tableError = ref('')
 const loading = ref(false)
 const result = ref<SyncResult | null>(null)
 const error = ref('')
+let tableLoadSequence = 0
 
-const engineSources = computed(() => datasources.value.filter((source) => source.type === databaseType.value))
-const oracleServiceNames = computed(() => [...new Set(
-  datasources.value
-    .filter((source) => source.type === 'oracle')
-    .map((source) => source.serviceName)
-    .filter((name): name is string => Boolean(name?.trim()))
-)])
-const oracleServiceSources = computed(() => engineSources.value.filter(
-  (source) => source.type === 'oracle' && source.serviceName === serviceName.value
+const mysqlSources = computed(() => datasources.value.filter(
+  (source) => source.type === 'mysql' && source.sourceType !== 'doris'
 ))
-const availableSources = computed(() => databaseType.value === 'oracle' ? oracleServiceSources.value : engineSources.value)
-const ownerOptions = computed(() => [...new Set(
-  oracleServiceSources.value
-    .map((source) => source.owner)
-    .filter((value): value is string => Boolean(value?.trim()))
+const oracleSources = computed(() => datasources.value.filter((source) => source.type === 'oracle'))
+const oracleServiceNames = computed(() => [...new Set(
+  oracleSources.value
+    .map((source) => source.serviceName?.trim())
+    .filter((name): name is string => Boolean(name))
 )])
+const engineSources = computed(() => databaseType.value === 'oracle' ? oracleSources.value : mysqlSources.value)
+const oracleServiceSources = computed(() => oracleSources.value.filter(
+  (source) => serviceName.value && source.serviceName?.trim() === serviceName.value
+))
+const availableSources = computed(() => databaseType.value === 'oracle' ? oracleServiceSources.value : mysqlSources.value)
 const selectedSource = computed(() => availableSources.value.find((source) => source.name === datasourceId.value))
+const selectedDatabase = computed(() => {
+  const source = selectedSource.value
+  if (!source) return ''
+  return databaseType.value === 'mysql'
+    ? (source.database?.trim() || source.name)
+    : (source.owner?.trim() || source.name)
+})
 
 function sourceLabel(source: DbDataSource) {
   return source.label && source.label !== source.name ? `${source.label}（${source.name}）` : source.name
 }
 
-function selectInitialSource() {
-  const source = databaseType.value === 'oracle'
-    ? oracleServiceSources.value.find((item) => item.owner && ownerOptions.value.includes(item.owner)) || oracleServiceSources.value[0]
-    : availableSources.value[0]
-  datasourceId.value = source?.name || ''
-  owner.value = databaseType.value === 'oracle' && source?.owner && ownerOptions.value.includes(source.owner)
-    ? source.owner
-    : ''
+function databaseLabel(source: DbDataSource) {
+  const database = databaseType.value === 'mysql'
+    ? (source.database?.trim() || source.name)
+    : (source.owner?.trim() || source.name)
+  const duplicates = availableSources.value.filter((item) => {
+    const name = databaseType.value === 'mysql' ? (item.database?.trim() || item.name) : (item.owner?.trim() || item.name)
+    return name === database
+  }).length > 1
+  return duplicates ? `${database}（${sourceLabel(source)}）` : database
 }
 
-function handleDatabaseTypeChange() {
-  if (databaseType.value === 'oracle') {
-    serviceName.value = oracleServiceNames.value[0] || ''
-  } else {
-    serviceName.value = ''
-    owner.value = ''
-  }
-  selectInitialSource()
+function clearSelectedSource() {
+  datasourceId.value = ''
 }
 
-function handleServiceNameChange() {
-  selectInitialSource()
-}
-
-function handleDatasourceChange() {
-  if (databaseType.value !== 'oracle') return
+async function loadSelectedTables() {
+  const sequence = ++tableLoadSequence
   const source = selectedSource.value
-  owner.value = source?.owner && ownerOptions.value.includes(source.owner) ? source.owner : ''
-}
-
-function handleOwnerChange(value: string) {
-  // Owner is sourced only from ACL entries for this Service Name. Keep the
-  // selected datasource_id paired with the chosen owner when such an entry exists.
-  if (!ownerOptions.value.includes(value)) {
-    owner.value = ''
+  tableName.value = ''
+  tableOptions.value = []
+  tableError.value = ''
+  if (!source) {
+    tableLoading.value = false
     return
   }
-  owner.value = value
-  const matchingSource = oracleServiceSources.value.find((source) => source.owner === value)
-  if (matchingSource) datasourceId.value = matchingSource.name
+
+  tableLoading.value = true
+  try {
+    const tables = await listTables(source.name)
+    if (sequence !== tableLoadSequence) return
+    tableOptions.value = tables
+      .map((item) => typeof item === 'string' ? item : item.name)
+      .filter((name) => Boolean(name?.trim()))
+      .map((name) => name.trim())
+  } catch (e) {
+    if (sequence === tableLoadSequence) {
+      tableError.value = e instanceof Error ? e.message : String(e)
+    }
+  } finally {
+    if (sequence === tableLoadSequence) tableLoading.value = false
+  }
+}
+
+async function handleDatabaseTypeChange() {
+  serviceName.value = ''
+  clearSelectedSource()
+  datasourceError.value = !engineSources.value.length
+    ? `未配置${databaseType.value === 'mysql' ? 'MySQL' : 'Oracle'}数据源`
+    : databaseType.value === 'oracle' && !oracleServiceNames.value.length
+      ? '未配置 Oracle Service Name'
+      : ''
+  await loadSelectedTables()
+}
+
+async function handleServiceNameChange() {
+  clearSelectedSource()
+  await loadSelectedTables()
+}
+
+async function handleDatabaseChange() {
+  await loadSelectedTables()
 }
 
 async function loadDataSources() {
@@ -101,13 +129,14 @@ async function loadDataSources() {
   datasourceError.value = ''
   try {
     datasources.value = await listDataSources()
-    const hasMysql = datasources.value.some((source) => source.type === 'mysql')
+    const hasMysql = datasources.value.some((source) => source.type === 'mysql' && source.sourceType !== 'doris')
     const hasOracle = datasources.value.some((source) => source.type === 'oracle')
     databaseType.value = hasMysql || !hasOracle ? 'mysql' : 'oracle'
-    serviceName.value = databaseType.value === 'oracle' ? (oracleServiceNames.value[0] || '') : ''
-    selectInitialSource()
+    serviceName.value = ''
+    clearSelectedSource()
     if (!datasources.value.length) datasourceError.value = '未配置可用数据库源'
     else if (!engineSources.value.length) datasourceError.value = `未配置${databaseType.value === 'mysql' ? 'MySQL' : 'Oracle'}数据源`
+    else if (databaseType.value === 'oracle' && !oracleServiceNames.value.length) datasourceError.value = '未配置 Oracle Service Name'
   } catch (e) {
     datasourceError.value = `加载数据源失败:${e instanceof Error ? e.message : e}`
   } finally {
@@ -116,23 +145,22 @@ async function loadDataSources() {
 }
 
 async function generate() {
-  const db = dbName.value.trim()
+  const db = selectedDatabase.value.trim()
   const tbl = tableName.value.trim()
   const selected = selectedSource.value
-  if (!db || !tbl) {
-    ElMessage.warning('请填写 Hive 目标名前缀和未限定表名')
+  if (!selected || !db) {
+    ElMessage.warning('请先选择库')
     return
   }
-  if (!selected) {
-    ElMessage.warning('请选择可用数据源')
+  if (!tbl) {
+    ElMessage.warning('请先选择表')
     return
   }
   if (databaseType.value === 'oracle' && (
     !serviceName.value ||
-    !ownerOptions.value.includes(owner.value) ||
-    selected.owner !== owner.value
+    (selected.owner?.trim() || selected.name).toUpperCase() !== db.toUpperCase()
   )) {
-    ElMessage.warning('请选择与当前 Oracle 数据源匹配的 owner/schema')
+    ElMessage.warning('请选择当前 Oracle 服务下的库/schema')
     return
   }
 
@@ -149,7 +177,7 @@ async function generate() {
   }
   if (databaseType.value === 'oracle') {
     payload.service_name = serviceName.value
-    payload.owner = owner.value
+    payload.owner = selected.owner?.trim() || selected.name
   }
 
   loading.value = true
@@ -201,7 +229,7 @@ onMounted(() => {
     <TableToolbar :show-density="false" :show-refresh="false">
       <div class="sync-form">
         <div class="sync-field sync-engine-field">
-          <span class="sync-label">数据库</span>
+          <span class="sync-label">类型</span>
           <el-select v-model="databaseType" class="sync-input" :disabled="datasourceLoading" @change="handleDatabaseTypeChange">
             <el-option label="MySQL" value="mysql" />
             <el-option label="Oracle" value="oracle" />
@@ -213,56 +241,52 @@ onMounted(() => {
           <el-select
             v-model="serviceName"
             class="sync-input sync-service-input"
-            placeholder="选择服务名"
+            placeholder="输入或选择服务名"
+            filterable
+            clearable
             :disabled="datasourceLoading || !oracleServiceNames.length"
             @change="handleServiceNameChange"
           >
             <el-option v-for="name in oracleServiceNames" :key="name" :label="name" :value="name" />
           </el-select>
         </div>
+        <span v-if="databaseType === 'oracle'" class="sync-dot">.</span>
 
         <div class="sync-field">
-          <span class="sync-label">数据源</span>
+          <span class="sync-label">库</span>
           <el-select
             v-model="datasourceId"
             class="sync-input sync-source-input"
-            :placeholder="datasourceLoading ? '加载数据源…' : '选择数据源'"
+            :placeholder="datasourceLoading ? '加载库…' : '输入或选择库'"
+            filterable
+            clearable
             :disabled="datasourceLoading || !availableSources.length"
-            @change="handleDatasourceChange"
+            @change="handleDatabaseChange"
           >
-            <el-option v-for="source in availableSources" :key="source.name" :label="sourceLabel(source)" :value="source.name" />
+            <el-option v-for="source in availableSources" :key="source.name" :label="databaseLabel(source)" :value="source.name" />
           </el-select>
         </div>
 
-        <div v-if="databaseType === 'oracle'" class="sync-field">
-          <span class="sync-label">Owner / Schema</span>
-          <el-select
-            v-model="owner"
-            class="sync-input sync-owner-input"
-            placeholder="选择 owner/schema"
-            :disabled="datasourceLoading || !ownerOptions.length"
-            @change="handleOwnerChange"
-          >
-            <el-option v-for="item in ownerOptions" :key="item" :label="item" :value="item" />
-          </el-select>
-        </div>
-
-        <div class="sync-field sync-target-field">
-          <span class="sync-label">Hive 目标名前缀</span>
-          <el-input v-model="dbName" placeholder="如 pangu" class="sync-input" clearable @keyup.enter="generate" />
-        </div>
         <span class="sync-dot">.</span>
         <div class="sync-field sync-table-field">
-          <span class="sync-label">源表名</span>
-          <el-input
+          <span class="sync-label">表</span>
+          <el-select
             v-model="tableName"
-            :placeholder="databaseType === 'oracle' ? '未限定表名' : '表名'"
             class="sync-input"
+            :placeholder="tableLoading ? '加载表…' : tableError ? '表加载失败，请重新选择库' : selectedSource ? '输入或选择表' : '请先选择库'"
+            filterable
             clearable
-            @keyup.enter="generate"
-          />
+            :loading="tableLoading"
+            :disabled="!selectedSource || tableLoading || !!tableError"
+          >
+            <el-option v-for="table in tableOptions" :key="table" :label="table" :value="table" />
+          </el-select>
+          <span v-if="tableError" class="sync-inline-error">
+            {{ tableError }}
+            <el-button text size="small" type="primary" @click="loadSelectedTables">重试</el-button>
+          </span>
         </div>
-        <el-button type="primary" :loading="loading" :disabled="datasourceLoading || !!datasourceError" class="sync-submit" @click="generate">
+        <el-button type="primary" :loading="loading" :disabled="datasourceLoading || tableLoading || !!datasourceError" class="sync-submit" @click="generate">
           <el-icon v-if="!loading"><Search /></el-icon> 生成
         </el-button>
       </div>
@@ -292,7 +316,7 @@ onMounted(() => {
         </div>
       </template>
       <div v-else class="sync-empty">
-        <el-empty description="选择数据库源，填写 Hive 目标名前缀与源表名，点击「生成」获取 db2hive 同步代码" />
+        <el-empty description="按库路径选择库和表，点击「生成」获取 db2hive 同步代码" />
       </div>
     </div>
   </div>
@@ -334,18 +358,19 @@ onMounted(() => {
 .sync-engine-field .sync-input {
   width: 130px;
 }
-.sync-service-input,
-.sync-owner-input {
+.sync-service-input {
   width: 160px;
 }
 .sync-source-input {
   width: 190px;
 }
-.sync-target-field .sync-input {
-  width: 180px;
-}
 .sync-table-field .sync-input {
   width: 180px;
+}
+.sync-inline-error {
+  color: var(--el-color-danger);
+  font-size: 11px;
+  line-height: 1.3;
 }
 .sync-dot {
   align-self: flex-end;
@@ -428,9 +453,7 @@ onMounted(() => {
   .sync-input,
   .sync-engine-field .sync-input,
   .sync-service-input,
-  .sync-owner-input,
   .sync-source-input,
-  .sync-target-field .sync-input,
   .sync-table-field .sync-input {
     width: 100%;
   }

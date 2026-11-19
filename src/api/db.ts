@@ -6,6 +6,10 @@ export interface DbDataSource {
   /** 显示别名(缺省回退 name) */
   label?: string
   type: 'mysql' | 'oracle' | 'impala' | 'sparksql' | 'sparksession' | 'flinksql'
+  /** MySQL database/schema used by the connection. */
+  database?: string
+  /** Underlying source type when a compatible protocol alias is exposed. */
+  sourceType?: string
   host: string
   port: number
   user: string
