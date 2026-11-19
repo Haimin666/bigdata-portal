@@ -2119,8 +2119,8 @@ watch([engine, db], () => resetRunVarValuesForScope())
 
 .toolbar-group-context {
   gap: 5px;
-  /* 窄屏时允许 Oracle 的服务名/owner 选择器换行，避免顶出工具栏 */
-  flex-wrap: wrap;
+  /* 引擎、Oracle 服务名和 owner/schema 选择器始终保持同一行 */
+  flex-wrap: nowrap;
   flex-shrink: 1;
   min-width: 0;
 }
