@@ -11,7 +11,7 @@ CSV 是一次性初始化/导入来源。初始化后 `datasources.json` 是唯�
 | 层 | 文件 | 说明 |
 |---|---|---|
 | 前端视图 | `src/views/admin/UserManageView.vue` | 用户管理工作区新增“数据库连接”标签 |
-| 前端视图 | `src/views/admin/DbConnectionView.vue` | 连接列表、引擎表单、连接测试、保存/删除状态 |
+| 前端视图 | `src/views/admin/DbConnectionView.vue` | 可排序连接表、跨字段关键词搜索、分页与类型汇总、引擎表单和连接测试 |
 | 前端 API | `src/api/db-connections.ts` | 门户同源管理 API；不含 db-proxy 凭证 |
 | 网关 | `server/routes/db-config.js` | admin-only API；仅服务端向 db-proxy 转发并注入管理凭证 |
 | 网关配置 | `server/config.js` / `server/config.local.example.json` | `dbProxyAdminToken`，只保存在服务端本地配置 |
@@ -41,6 +41,8 @@ db-proxy 在进程内构建候选 `DataSource` 集合并验证唯一名称、引
 - 名称在配置中唯一且用于 SQL 工作台的 `db` 参数；编辑时保持名称不变，数据源类型也不可切换，避免权限规则与脚本引用静默失效。
 - 删除前检查用户/角色数据权限矩阵的引用；仍被引用时拒绝删除并提示先移除对应权限规则。
 - 列表只回传连接参数与凭据是否已配置，不回传密码。新增要求密码非空；编辑留空表示保留已存密码。
+- 连接列表按名称、类型、地址、用户、数据库/服务名、认证和访问模式排序；关键词对名称、显示名、类型、主机、端口、用户和数据库/服务名做不区分大小写的包含匹配，多个空格分隔的词均需命中。
+- 列表按匹配结果分页，分页控件提供总数、每页条数、页码和跳转；底部汇总全部连接数及 MySQL、Oracle、Doris 各自数量。
 
 ## 5. 安全与部署
 
